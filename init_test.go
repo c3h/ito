@@ -1470,6 +1470,236 @@ func TestRmJSONOutput(t *testing.T) {
 	}
 }
 
+func TestPruneRequiresFilterConfirmationAndValidStatus(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "prune-guards", "--prefix", "PRG"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing filter", args: []string{"prune", "--json", "--yes"}},
+		{name: "missing confirmation", args: []string{"prune", "--json", "--status", "done"}},
+		{name: "invalid status", args: []string{"prune", "--json", "--status", "closed", "--yes"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, repo, itoHome, tt.args...)
+			if result.exitCode != 2 {
+				t.Fatalf("expected exit 2, got %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+			}
+			if result.stdout != "" {
+				t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+			}
+			var errObject struct {
+				Error string `json:"error"`
+				Code  int    `json:"code"`
+				Hint  string `json:"hint"`
+			}
+			if err := json.Unmarshal([]byte(result.stderr), &errObject); err != nil {
+				t.Fatalf("stderr is not a JSON error object: %v\nstderr: %s", err, result.stderr)
+			}
+			if errObject.Code != 2 || errObject.Error == "" || errObject.Hint == "" {
+				t.Fatalf("expected actionable bad-usage error object, got %#v", errObject)
+			}
+		})
+	}
+}
+
+func TestPruneDeletesMatchingStatusOnlyWithHumanCount(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "status-prune", "--prefix", "SPN"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	fixtures := [][]string{
+		{"new", "--json", "--title", "Backlog survivor", "--status", "backlog"},
+		{"new", "--json", "--title", "Done one", "--status", "done"},
+		{"new", "--json", "--title", "Todo survivor", "--status", "todo"},
+		{"new", "--json", "--title", "Done two", "--status", "done"},
+	}
+	for _, args := range fixtures {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+
+	result := runITO(t, repo, itoHome, "prune", "--status", "done", "--yes")
+	if result.exitCode != 0 || result.stdout != "2\n" || result.stderr != "" {
+		t.Fatalf("expected human prune count only, got exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, id := range []string{"SPN-1", "SPN-3"} {
+		show := runITO(t, repo, itoHome, "show", "--json", id)
+		if show.exitCode != 0 {
+			t.Fatalf("survivor %s was deleted or unreadable: exit %d\nstdout: %s\nstderr: %s", id, show.exitCode, show.stdout, show.stderr)
+		}
+	}
+	for _, id := range []string{"SPN-2", "SPN-4"} {
+		show := runITO(t, repo, itoHome, "show", "--json", id)
+		if show.exitCode != 3 {
+			t.Fatalf("matching Issue %s must be deleted, got exit %d\nstdout: %s\nstderr: %s", id, show.exitCode, show.stdout, show.stderr)
+		}
+	}
+}
+
+func TestPruneDeletesLabelsLinksAndFTSForMatchingIssues(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "cleanup-prune", "--prefix", "CLP")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	fixtures := [][]string{
+		{"new", "--json", "--title", "Done cleanup one", "--status", "done", "--label", "bug", "--body", "pruneonlytoken"},
+		{"new", "--json", "--title", "Todo survivor", "--status", "todo"},
+		{"new", "--json", "--title", "Done cleanup two", "--status", "done", "--label", "docs"},
+		{"new", "--json", "--title", "Backlog survivor", "--status", "backlog"},
+	}
+	for _, args := range fixtures {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "CLP-1", "--block", "CLP-2", "--relate", "CLP-3"); result.exitCode != 0 {
+		t.Fatalf("ito edit outgoing links failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "CLP-2", "--block", "CLP-1"); result.exitCode != 0 {
+		t.Fatalf("ito edit incoming link failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "CLP-3", "--relate", "CLP-4"); result.exitCode != 0 {
+		t.Fatalf("ito edit survivor-facing link failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, repo, itoHome, "prune", "--status", "done", "--yes")
+	if result.exitCode != 0 || result.stdout != "2\n" || result.stderr != "" {
+		t.Fatalf("expected prune cleanup success, got exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, id := range []string{"CLP-2", "CLP-4"} {
+		show := runITO(t, repo, itoHome, "show", "--json", id)
+		if show.exitCode != 0 {
+			t.Fatalf("survivor %s was deleted or unreadable: exit %d\nstdout: %s\nstderr: %s", id, show.exitCode, show.stdout, show.stderr)
+		}
+		var issue issueJSON
+		if err := json.Unmarshal([]byte(show.stdout), &issue); err != nil {
+			t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, show.stdout)
+		}
+		if len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 {
+			t.Fatalf("links to pruned Issues must be removed from %s, got %#v", id, issue)
+		}
+	}
+
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	var issuesCount, labelsCount, linksCount, ftsMatches int
+	if err := db.QueryRow(`SELECT count(*) FROM issues WHERE project_id = ?`, project.ID).Scan(&issuesCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM issue_labels WHERE project_id = ? AND issue_id IN ('CLP-1', 'CLP-3')`, project.ID).Scan(&labelsCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM issue_links WHERE project_id = ? AND (source_id IN ('CLP-1', 'CLP-3') OR target_id IN ('CLP-1', 'CLP-3'))`, project.ID).Scan(&linksCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM issues_fts WHERE issues_fts MATCH 'pruneonlytoken'`).Scan(&ftsMatches); err != nil {
+		t.Fatal(err)
+	}
+	if issuesCount != 2 || labelsCount != 0 || linksCount != 0 || ftsMatches != 0 {
+		t.Fatalf("prune cleanup mismatch: issues=%d labels=%d links=%d fts=%d", issuesCount, labelsCount, linksCount, ftsMatches)
+	}
+}
+
+func TestPrunePreservesProjectCounter(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "counter-prune", "--prefix", "CPR"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, title := range []string{"First", "Second"} {
+		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title, "--status", "done"); result.exitCode != 0 {
+			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, repo, itoHome, "prune", "--json", "--status", "done", "--yes"); result.exitCode != 0 {
+		t.Fatalf("ito prune failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	result := runITO(t, repo, itoHome, "new", "--json", "--title", "Third")
+	if result.exitCode != 0 {
+		t.Fatalf("ito new after prune failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.ID != "CPR-3" {
+		t.Fatalf("pruned IDs must not be reused, got %#v", issue)
+	}
+}
+
+func TestPruneProjectScoping(t *testing.T) {
+	firstRepo := t.TempDir()
+	secondRepo := t.TempDir()
+	run(t, firstRepo, "git", "init", "-q")
+	run(t, secondRepo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "first-prune", "--prefix", "FPR"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "second-prune", "--prefix", "SPR"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, firstRepo, itoHome, "new", "--json", "--title", "First done", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("first new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "new", "--json", "--title", "Second done", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("second new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "prune", "--project", "second-prune", "--status", "done", "--yes")
+	if result.exitCode != 0 || result.stdout != "1\n" || result.stderr != "" {
+		t.Fatalf("expected explicit project prune success, got exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+	if show := runITO(t, firstRepo, itoHome, "show", "--json", "FPR-1"); show.exitCode != 0 {
+		t.Fatalf("first Project Issue must survive explicit second prune, got exit %d\nstdout: %s\nstderr: %s", show.exitCode, show.stdout, show.stderr)
+	}
+	if show := runITO(t, secondRepo, itoHome, "show", "--json", "SPR-1"); show.exitCode != 3 {
+		t.Fatalf("second Project Issue must be pruned, got exit %d\nstdout: %s\nstderr: %s", show.exitCode, show.stdout, show.stderr)
+	}
+}
+
+func TestPruneJSONOutput(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "json-prune", "--prefix", "JPR"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Delete JSON", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, repo, itoHome, "prune", "--json", "--status", "done", "--yes")
+	if result.exitCode != 0 || result.stdout != "{\"deleted\":1}\n" || result.stderr != "" {
+		t.Fatalf("expected exact JSON prune output, got exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+}
+
 func TestInitCreatesCentralStoreForGitProject(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")
