@@ -713,6 +713,196 @@ func TestShowHumanOutputIncludesFieldsLinksLabelsAndBody(t *testing.T) {
 	}
 }
 
+func TestMoveAcceptsEveryTargetStatusFromAnySourceAndCwd(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "move-app", "--prefix", "MOV"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Movable", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	for _, status := range []string{"backlog", "todo", "in_progress", "in_review", "done"} {
+		result := runITO(t, t.TempDir(), itoHome, "move", "--json", "MOV-1", status)
+		if result.exitCode != 0 {
+			t.Fatalf("ito move %s failed with exit %d\nstdout: %s\nstderr: %s", status, result.exitCode, result.stdout, result.stderr)
+		}
+		var issue issueJSON
+		if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+			t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+		}
+		if issue.ID != "MOV-1" || issue.Project != "move-app" || issue.Status != status {
+			t.Fatalf("expected issue moved to %s, got %#v", status, issue)
+		}
+	}
+}
+
+func TestMoveRejectsMalformedInvalidUnknownAndProjectMismatch(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "first")
+	secondRepo := filepath.Join(parent, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "first-move", "--prefix", "FMV"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "second-move", "--prefix", "SMV"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, firstRepo, itoHome, "new", "--json", "--title", "Owned by first"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		code int
+	}{
+		{name: "malformed ID", args: []string{"move", "--json", "FMV", "todo"}, code: 2},
+		{name: "invalid status", args: []string{"move", "--json", "FMV-1", "doing"}, code: 2},
+		{name: "unknown ID", args: []string{"move", "--json", "FMV-99", "todo"}, code: 3},
+		{name: "unknown prefix", args: []string{"move", "--json", "ZZZ-1", "todo"}, code: 3},
+		{name: "project mismatch", args: []string{"move", "--json", "--project", "second-move", "FMV-1", "todo"}, code: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, t.TempDir(), itoHome, tt.args...)
+			if result.exitCode != tt.code {
+				t.Fatalf("expected exit %d, got %d\nstdout: %s\nstderr: %s", tt.code, result.exitCode, result.stdout, result.stderr)
+			}
+			if result.stdout != "" {
+				t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+			}
+			var errObject struct {
+				Error string `json:"error"`
+				Code  int    `json:"code"`
+				Hint  string `json:"hint"`
+			}
+			if err := json.Unmarshal([]byte(result.stderr), &errObject); err != nil {
+				t.Fatalf("stderr is not a JSON error object: %v\nstderr: %s", err, result.stderr)
+			}
+			if errObject.Code != tt.code || errObject.Error == "" || errObject.Hint == "" {
+				t.Fatalf("expected actionable error object with code %d, got %#v", tt.code, errObject)
+			}
+		})
+	}
+}
+
+func TestMoveNoOpKeepsUpdatedAndReturnsCanonicalJSON(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "noop-move", "--prefix", "NOP")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "No-op", "--status", "todo", "--label", "feature"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Blocker"); result.exitCode != 0 {
+		t.Fatalf("second ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`
+UPDATE issues SET created = '2026-05-24T10:00:00Z', updated = '2026-05-24T11:00:00Z' WHERE project_id = ? AND id = 'NOP-1';
+INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'NOP-1', 'NOP-2', 'blocked_by');
+`, project.ID, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	jsonResult := runITO(t, t.TempDir(), itoHome, "move", "--json", "NOP-1", "todo")
+	if jsonResult.exitCode != 0 {
+		t.Fatalf("ito move --json no-op failed with exit %d\nstdout: %s\nstderr: %s", jsonResult.exitCode, jsonResult.stdout, jsonResult.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(jsonResult.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, jsonResult.stdout)
+	}
+	if issue.Status != "todo" || issue.Created != "2026-05-24T10:00:00Z" || issue.Updated != "2026-05-24T11:00:00Z" {
+		t.Fatalf("no-op must preserve canonical timestamps and status, got %#v", issue)
+	}
+	if !stringSlicesEqual(issue.Labels, []string{"feature"}) || !stringSlicesEqual(issue.BlockedBy, []string{"NOP-2"}) {
+		t.Fatalf("expected canonical labels and blocked_by links, got %#v", issue)
+	}
+
+	human := runITO(t, t.TempDir(), itoHome, "move", "NOP-1", "todo")
+	if human.exitCode != 0 || !strings.Contains(human.stdout, "is already in todo") || human.stderr != "" {
+		t.Fatalf("expected clear human no-op success, got exit=%d stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+	var updated string
+	if err := db.QueryRow(`SELECT updated FROM issues WHERE project_id = ? AND id = 'NOP-1'`, project.ID).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated != "2026-05-24T11:00:00Z" {
+		t.Fatalf("human no-op changed updated timestamp to %q", updated)
+	}
+}
+
+func TestMoveRealChangeUpdatesOnlyUpdatedTimestampAndIgnoresBlockedBy(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "timestamp-move", "--prefix", "TIM")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Blocked move", "--status", "backlog"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Blocker"); result.exitCode != 0 {
+		t.Fatalf("second ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`
+UPDATE issues SET created = '2026-05-24T10:00:00Z', updated = '2026-05-24T10:00:00Z' WHERE project_id = ? AND id = 'TIM-1';
+INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'TIM-1', 'TIM-2', 'blocked_by');
+`, project.ID, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "move", "--json", "TIM-1", "done")
+	if result.exitCode != 0 {
+		t.Fatalf("ito move failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.Status != "done" || issue.Created != "2026-05-24T10:00:00Z" {
+		t.Fatalf("move must update status and preserve created, got %#v", issue)
+	}
+	if issue.Updated == "2026-05-24T10:00:00Z" {
+		t.Fatalf("move must update updated timestamp, got %#v", issue)
+	}
+	if _, err := time.Parse(time.RFC3339, issue.Updated); err != nil {
+		t.Fatalf("updated timestamp must remain RFC3339, got %q: %v", issue.Updated, err)
+	}
+	if !stringSlicesEqual(issue.BlockedBy, []string{"TIM-2"}) {
+		t.Fatalf("blocked_by link must not prevent movement or disappear, got %#v", issue)
+	}
+}
+
 func TestInitCreatesCentralStoreForGitProject(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")

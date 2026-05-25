@@ -113,6 +113,8 @@ func runCLI(args []string) int {
 		return runShow(args[1:])
 	case "list":
 		return runList(args[1:])
+	case "move":
+		return runMove(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		return exitBadUsage
@@ -395,6 +397,87 @@ func runShow(args []string) int {
 		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
 	}
 	return printIssueDetail(foundIssue, jsonMode)
+}
+
+func runMove(args []string) int {
+	fs := flag.NewFlagSet("move", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	if err := fs.Parse(args); err != nil {
+		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito move --help' to see the accepted flags.")
+	}
+	if fs.NArg() != 2 {
+		return fail(jsonMode, exitBadUsage, "ito move takes exactly one full ID and a target status.", "use: ito move <PREFIX>-<n> <status>.")
+	}
+	issueID := fs.Arg(0)
+	targetStatus := fs.Arg(1)
+	matches := issueIDPattern.FindStringSubmatch(issueID)
+	if matches == nil {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
+	}
+	if !isValidValue(targetStatus, validStatuses) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", targetStatus), "use backlog, todo, in_progress, in_review or done.")
+	}
+	prefix := matches[1]
+	if projectName != "" && !projectNamePattern.MatchString(projectName) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	}
+
+	db, err := openStore()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
+	}
+
+	p, found, err := findProjectByPrefix(db, prefix)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
+	}
+	if !found {
+		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+	}
+	if projectName != "" {
+		override, found, err := findProjectByName(db, projectName)
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
+		}
+		if !found {
+			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
+		}
+		if override.ID != p.ID {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
+		}
+	}
+
+	beforeStatus, changed, err := moveIssueStatus(db, p, issueID, targetStatus)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not move Issue %q: %v", issueID, err), "try again or inspect the central store.")
+	}
+	movedIssue, found, err := findIssueByID(db, p, issueID)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read Issue %q: %v", issueID, err), "try again or inspect the central store.")
+	}
+	if !found {
+		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+	}
+	if jsonMode {
+		return printIssueDetail(movedIssue, true)
+	}
+	if !changed {
+		fmt.Printf("%s is already in %s; nothing changed.\n", movedIssue.ID, targetStatus)
+		return 0
+	}
+	fmt.Printf("%s moved from %s to %s.\n", movedIssue.ID, beforeStatus, targetStatus)
+	return 0
 }
 
 func runList(args []string) int {
@@ -1071,6 +1154,42 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		return issue{}, err
 	}
 	return created, nil
+}
+
+func moveIssueStatus(db *sql.DB, p project, id string, targetStatus string) (string, bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+
+	var currentStatus string
+	if err := tx.QueryRow(`SELECT status FROM issues WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&currentStatus); err != nil {
+		return "", false, err
+	}
+	if currentStatus == targetStatus {
+		if err := tx.Commit(); err != nil {
+			return "", false, err
+		}
+		return currentStatus, false, nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND id = ?`, targetStatus, now, p.ID, id)
+	if err != nil {
+		return "", false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return "", false, err
+	}
+	if affected != 1 {
+		return "", false, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return currentStatus, true, nil
 }
 
 func findIssueByID(db *sql.DB, p project, id string) (issue, bool, error) {
