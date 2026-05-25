@@ -903,6 +903,189 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'TIM-
 	}
 }
 
+func TestEditScalarsReturnCanonicalJSONUpdateFTSAndPreserveCreated(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "edit-scalars", "--prefix", "EDS")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Old title", "--priority", "low", "--body", "old body"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE issues SET created = '2026-05-24T10:00:00Z', updated = '2026-05-24T10:00:00Z' WHERE project_id = ? AND id = 'EDS-1'`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	body := "# New body\n\n- exact markdown\n"
+	result := runITO(t, t.TempDir(), itoHome, "edit", "--json", "EDS-1", "--title", "New title", "--priority", "urgent", "--body", body)
+	if result.exitCode != 0 {
+		t.Fatalf("ito edit failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.Title != "New title" || issue.Priority != "urgent" || issue.Body != body {
+		t.Fatalf("edit must replace scalar fields and exact body, got %#v", issue)
+	}
+	if issue.Created != "2026-05-24T10:00:00Z" || issue.Updated == "2026-05-24T10:00:00Z" {
+		t.Fatalf("edit must preserve created and change updated, got %#v", issue)
+	}
+	if _, err := time.Parse(time.RFC3339, issue.Updated); err != nil {
+		t.Fatalf("updated timestamp must remain RFC3339, got %q: %v", issue.Updated, err)
+	}
+	var ftsMatches int
+	if err := db.QueryRow(`SELECT count(*) FROM issues_fts WHERE issues_fts MATCH 'exact'`).Scan(&ftsMatches); err != nil {
+		t.Fatal(err)
+	}
+	if ftsMatches != 1 {
+		t.Fatalf("expected edited body to be indexed in FTS, got %d matches", ftsMatches)
+	}
+}
+
+func TestEditReadsReplacementBodyFromStdin(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "edit-stdin", "--prefix", "EST"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Body issue", "--body", "old"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	body := "## Replacement\n\n```go\nfmt.Println(\"kept\")\n```\n"
+	result := runITOWithInput(t, t.TempDir(), itoHome, body, "edit", "--json", "EST-1", "--body", "-")
+	if result.exitCode != 0 {
+		t.Fatalf("ito edit failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.Body != body {
+		t.Fatalf("expected stdin body %q, got %#v", body, issue)
+	}
+}
+
+func TestEditLabelsAndIdempotentOperationsKeepUpdatedWhenFinalStateUnchanged(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "edit-labels", "--prefix", "EDL")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Labels", "--label", "bug", "--label", "docs"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE issues SET created = '2026-05-24T10:00:00Z', updated = '2026-05-24T10:00:00Z' WHERE project_id = ? AND id = 'EDL-1'`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "edit", "--json", "EDL-1", "--add-label", "feature", "--remove-label", "docs", "--remove-label", "infra")
+	if result.exitCode != 0 {
+		t.Fatalf("ito edit labels failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if !stringSlicesEqual(issue.Labels, []string{"bug", "feature"}) || issue.Updated == "2026-05-24T10:00:00Z" {
+		t.Fatalf("expected label change and updated timestamp, got %#v", issue)
+	}
+	updatedAfterChange := issue.Updated
+
+	noChange := runITO(t, t.TempDir(), itoHome, "edit", "--json", "EDL-1", "--add-label", "bug", "--remove-label", "docs")
+	if noChange.exitCode != 0 {
+		t.Fatalf("ito edit idempotent labels failed with exit %d\nstdout: %s\nstderr: %s", noChange.exitCode, noChange.stdout, noChange.stderr)
+	}
+	if err := json.Unmarshal([]byte(noChange.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, noChange.stdout)
+	}
+	if !stringSlicesEqual(issue.Labels, []string{"bug", "feature"}) || issue.Updated != updatedAfterChange || issue.Created != "2026-05-24T10:00:00Z" {
+		t.Fatalf("idempotent label operations must preserve final state and timestamps, got %#v", issue)
+	}
+}
+
+func TestEditRejectsNoChangeInvalidInputsAndProjectMismatch(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "first")
+	secondRepo := filepath.Join(parent, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "first-edit", "--prefix", "FED"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "second-edit", "--prefix", "SED"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, firstRepo, itoHome, "new", "--json", "--title", "Editable"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		code int
+	}{
+		{name: "no requested change", args: []string{"edit", "--json", "FED-1"}, code: 2},
+		{name: "blank title", args: []string{"edit", "--json", "FED-1", "--title", " \t\n"}, code: 2},
+		{name: "invalid priority", args: []string{"edit", "--json", "FED-1", "--priority", "critical"}, code: 2},
+		{name: "invalid add label", args: []string{"edit", "--json", "FED-1", "--add-label", "custom"}, code: 2},
+		{name: "invalid remove label", args: []string{"edit", "--json", "FED-1", "--remove-label", "custom"}, code: 2},
+		{name: "malformed ID", args: []string{"edit", "--json", "FED", "--title", "New"}, code: 2},
+		{name: "unknown ID", args: []string{"edit", "--json", "FED-99", "--title", "New"}, code: 3},
+		{name: "unknown prefix", args: []string{"edit", "--json", "ZZZ-1", "--title", "New"}, code: 3},
+		{name: "project mismatch", args: []string{"edit", "--json", "--project", "second-edit", "FED-1", "--title", "New"}, code: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, t.TempDir(), itoHome, tt.args...)
+			if result.exitCode != tt.code {
+				t.Fatalf("expected exit %d, got %d\nstdout: %s\nstderr: %s", tt.code, result.exitCode, result.stdout, result.stderr)
+			}
+			if result.stdout != "" {
+				t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+			}
+			var errObject struct {
+				Error string `json:"error"`
+				Code  int    `json:"code"`
+				Hint  string `json:"hint"`
+			}
+			if err := json.Unmarshal([]byte(result.stderr), &errObject); err != nil {
+				t.Fatalf("stderr is not a JSON error object: %v\nstderr: %s", err, result.stderr)
+			}
+			if errObject.Code != tt.code || errObject.Error == "" || errObject.Hint == "" {
+				t.Fatalf("expected actionable error object with code %d, got %#v", tt.code, errObject)
+			}
+		})
+	}
+}
+
 func TestInitCreatesCentralStoreForGitProject(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")

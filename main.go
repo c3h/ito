@@ -44,6 +44,34 @@ func (f *stringSliceFlag) Set(value string) error {
 	return nil
 }
 
+type labelEditOp struct {
+	Kind  string
+	Label string
+}
+
+type labelEditFlag struct {
+	kind string
+	ops  *[]labelEditOp
+}
+
+func (f labelEditFlag) String() string {
+	if f.ops == nil {
+		return ""
+	}
+	labels := make([]string, 0, len(*f.ops))
+	for _, op := range *f.ops {
+		if op.Kind == f.kind {
+			labels = append(labels, op.Label)
+		}
+	}
+	return strings.Join(labels, ",")
+}
+
+func (f labelEditFlag) Set(value string) error {
+	*f.ops = append(*f.ops, labelEditOp{Kind: f.kind, Label: value})
+	return nil
+}
+
 type project struct {
 	ID       int64  `json:"id"`
 	Name     string `json:"name"`
@@ -92,6 +120,16 @@ type listOptions struct {
 	Labels      []string
 }
 
+type editIssueOptions struct {
+	TitleSet    bool
+	Title       string
+	PrioritySet bool
+	Priority    string
+	BodySet     bool
+	Body        string
+	LabelOps    []labelEditOp
+}
+
 func main() {
 	os.Exit(runCLI(os.Args[1:]))
 }
@@ -115,6 +153,8 @@ func runCLI(args []string) int {
 		return runList(args[1:])
 	case "move":
 		return runMove(args[1:])
+	case "edit":
+		return runEdit(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		return exitBadUsage
@@ -480,6 +520,134 @@ func runMove(args []string) int {
 	return 0
 }
 
+func runEdit(args []string) int {
+	fs := flag.NewFlagSet("edit", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	var title string
+	var priority string
+	var body string
+	var labelOps []labelEditOp
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	fs.StringVar(&title, "title", "", "")
+	fs.StringVar(&priority, "priority", "", "")
+	fs.StringVar(&body, "body", "", "")
+	fs.Var(labelEditFlag{kind: "add", ops: &labelOps}, "add-label", "")
+	fs.Var(labelEditFlag{kind: "remove", ops: &labelOps}, "remove-label", "")
+	parseArgs, issueID, positionalCount := splitEditArgs(args)
+	if err := fs.Parse(parseArgs); err != nil {
+		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito edit --help' to see the accepted flags.")
+	}
+	if fs.NArg() != 0 || positionalCount != 1 {
+		return fail(jsonMode, exitBadUsage, "ito edit takes exactly one full ID.", "use: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-].")
+	}
+	matches := issueIDPattern.FindStringSubmatch(issueID)
+	if matches == nil {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
+	}
+	prefix := matches[1]
+	if projectName != "" && !projectNamePattern.MatchString(projectName) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	}
+
+	options := editIssueOptions{LabelOps: labelOps}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "title":
+			options.TitleSet = true
+		case "priority":
+			options.PrioritySet = true
+		case "body":
+			options.BodySet = true
+		}
+	})
+	if !options.TitleSet && !options.PrioritySet && !options.BodySet && len(options.LabelOps) == 0 {
+		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --add-label or --remove-label.")
+	}
+	if options.TitleSet {
+		if strings.TrimSpace(title) == "" {
+			return fail(jsonMode, exitBadUsage, "title is required.", "use --title <title> with non-empty text.")
+		}
+		options.Title = title
+	}
+	if options.PrioritySet {
+		if !isValidValue(priority, validPriorities) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use low, medium, high or urgent.")
+		}
+		options.Priority = priority
+	}
+	if options.BodySet {
+		if body == "-" {
+			input, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Issue body from stdin: %v", err), "try again by passing --body <text>.")
+			}
+			body = string(input)
+		}
+		options.Body = body
+	}
+	for _, op := range options.LabelOps {
+		if !isValidValue(op.Label, validLabels) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", op.Label), "use feature, bug, docs, tests, refactor, chore, research or infra.")
+		}
+	}
+
+	db, err := openStore()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
+	}
+
+	p, found, err := findProjectByPrefix(db, prefix)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
+	}
+	if !found {
+		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+	}
+	if projectName != "" {
+		override, found, err := findProjectByName(db, projectName)
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
+		}
+		if !found {
+			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
+		}
+		if override.ID != p.ID {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
+		}
+	}
+
+	changed, err := editIssue(db, p, issueID, options)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not edit Issue %q: %v", issueID, err), "try again or inspect the central store.")
+	}
+	editedIssue, found, err := findIssueByID(db, p, issueID)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read Issue %q: %v", issueID, err), "try again or inspect the central store.")
+	}
+	if !found {
+		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+	}
+	if jsonMode {
+		return printIssueDetail(editedIssue, true)
+	}
+	if !changed {
+		fmt.Printf("%s did not change; the final state already matched the request.\n", editedIssue.ID)
+		return 0
+	}
+	fmt.Printf("%s edited.\n", editedIssue.ID)
+	return 0
+}
+
 func runList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -757,6 +925,40 @@ func formatList(values []string) string {
 func isValidValue(value string, valid map[string]struct{}) bool {
 	_, ok := valid[value]
 	return ok
+}
+
+func splitEditArgs(args []string) ([]string, string, int) {
+	valueFlags := map[string]struct{}{
+		"project":      {},
+		"title":        {},
+		"priority":     {},
+		"body":         {},
+		"add-label":    {},
+		"remove-label": {},
+	}
+	parseArgs := make([]string, 0, len(args))
+	issueID := ""
+	positionalCount := 0
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionalCount++
+			if positionalCount == 1 {
+				issueID = arg
+			}
+			continue
+		}
+		parseArgs = append(parseArgs, arg)
+		name := strings.TrimLeft(arg, "-")
+		if idx := strings.IndexByte(name, '='); idx >= 0 {
+			name = name[:idx]
+		}
+		if _, ok := valueFlags[name]; ok && !strings.Contains(arg, "=") && i+1 < len(args) {
+			i++
+			parseArgs = append(parseArgs, args[i])
+		}
+	}
+	return parseArgs, issueID, positionalCount
 }
 
 func openStore() (*sql.DB, error) {
@@ -1192,6 +1394,101 @@ func moveIssueStatus(db *sql.DB, p project, id string, targetStatus string) (str
 	return currentStatus, true, nil
 }
 
+func editIssue(db *sql.DB, p project, id string, options editIssueOptions) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var rowID int64
+	var currentTitle, currentPriority, currentBody string
+	if err := tx.QueryRow(`
+SELECT row_id, title, priority, body
+FROM issues
+WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &currentPriority, &currentBody); err != nil {
+		return false, err
+	}
+
+	currentLabels, err := stringColumnTx(tx, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, p.ID, id)
+	if err != nil {
+		return false, err
+	}
+	nextLabels := make(map[string]struct{}, len(currentLabels))
+	for _, label := range currentLabels {
+		nextLabels[label] = struct{}{}
+	}
+	for _, op := range options.LabelOps {
+		switch op.Kind {
+		case "add":
+			nextLabels[op.Label] = struct{}{}
+		case "remove":
+			delete(nextLabels, op.Label)
+		}
+	}
+
+	nextTitle := currentTitle
+	if options.TitleSet {
+		nextTitle = options.Title
+	}
+	nextPriority := currentPriority
+	if options.PrioritySet {
+		nextPriority = options.Priority
+	}
+	nextBody := currentBody
+	if options.BodySet {
+		nextBody = options.Body
+	}
+
+	scalarChanged := nextTitle != currentTitle || nextPriority != currentPriority || nextBody != currentBody
+	labelsChanged := !labelSetMatches(currentLabels, nextLabels)
+	changed := scalarChanged || labelsChanged
+	if !changed {
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := tx.Exec(`
+UPDATE issues
+SET title = ?, priority = ?, body = ?, updated = ?
+WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextBody, now, p.ID, id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected != 1 {
+		return false, sql.ErrNoRows
+	}
+	if nextTitle != currentTitle || nextBody != currentBody {
+		if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, currentTitle, currentBody); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, nextTitle, nextBody); err != nil {
+			return false, err
+		}
+	}
+	if labelsChanged {
+		if _, err := tx.Exec(`DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ?`, p.ID, id); err != nil {
+			return false, err
+		}
+		for label := range nextLabels {
+			if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, id, label); err != nil {
+				return false, err
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func findIssueByID(db *sql.DB, p project, id string) (issue, bool, error) {
 	row := db.QueryRow(`
 SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.body, issues.created, issues.updated
@@ -1370,6 +1667,39 @@ func stringColumn(db *sql.DB, query string, args ...any) ([]string, error) {
 		return nil, err
 	}
 	return values, nil
+}
+
+func stringColumnTx(tx *sql.Tx, query string, args ...any) ([]string, error) {
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	values := []string{}
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func labelSetMatches(labels []string, set map[string]struct{}) bool {
+	if len(labels) != len(set) {
+		return false
+	}
+	for _, label := range labels {
+		if _, ok := set[label]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, error) {
