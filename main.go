@@ -161,6 +161,11 @@ type editIssueOptions struct {
 	LinkOps     []linkEditOp
 }
 
+type deletedIssue struct {
+	Deleted int    `json:"deleted"`
+	ID      string `json:"id"`
+}
+
 type commandFailure struct {
 	code    int
 	message string
@@ -196,6 +201,8 @@ func runCLI(args []string) int {
 		return runMove(args[1:])
 	case "edit":
 		return runEdit(args[1:])
+	case "rm":
+		return runRm(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		return exitBadUsage
@@ -703,6 +710,78 @@ func runEdit(args []string) int {
 		return 0
 	}
 	fmt.Printf("%s edited.\n", editedIssue.ID)
+	return 0
+}
+
+func runRm(args []string) int {
+	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	if err := fs.Parse(args); err != nil {
+		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito rm --help' to see the accepted flags.")
+	}
+	if fs.NArg() != 1 {
+		return fail(jsonMode, exitBadUsage, "ito rm takes exactly one full ID.", "use: ito rm <PREFIX>-<n>.")
+	}
+	issueID := fs.Arg(0)
+	matches := issueIDPattern.FindStringSubmatch(issueID)
+	if matches == nil {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
+	}
+	prefix := matches[1]
+	if projectName != "" && !projectNamePattern.MatchString(projectName) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	}
+
+	db, err := openStore()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
+	}
+
+	p, found, err := findProjectByPrefix(db, prefix)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
+	}
+	if !found {
+		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+	}
+	if projectName != "" {
+		override, found, err := findProjectByName(db, projectName)
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
+		}
+		if !found {
+			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
+		}
+		if override.ID != p.ID {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
+		}
+	}
+
+	if err := deleteIssue(db, p, issueID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete Issue %q: %v", issueID, err), "try again or inspect the central store.")
+	}
+	deleted := deletedIssue{Deleted: 1, ID: issueID}
+	if jsonMode {
+		encoded, err := json.Marshal(deleted)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not serialize the removal: %v\n", err)
+			return exitGeneric
+		}
+		fmt.Println(string(encoded))
+		return 0
+	}
+	fmt.Printf("%s deleted.\n", issueID)
 	return 0
 }
 
@@ -1606,6 +1685,44 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextBody, now, p.ID, 
 		return false, err
 	}
 	return true, nil
+}
+
+func deleteIssue(db *sql.DB, p project, id string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var rowID int64
+	var title, body string
+	if err := tx.QueryRow(`
+SELECT row_id, title, body
+FROM issues
+WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &title, &body); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, title, body); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ?`, p.ID, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM issue_links WHERE project_id = ? AND (source_id = ? OR target_id = ?)`, p.ID, id, id); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`DELETE FROM issues WHERE project_id = ? AND id = ?`, p.ID, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
 }
 
 func findIssueByID(db *sql.DB, p project, id string) (issue, bool, error) {

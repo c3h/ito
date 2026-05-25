@@ -1309,6 +1309,167 @@ func TestEditRejectsNoChangeInvalidInputsAndProjectMismatch(t *testing.T) {
 	}
 }
 
+func TestRmDeletesIssueLabelsOutgoingIncomingLinksAndFTS(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "delete-app", "--prefix", "DEL")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	fixtures := [][]string{
+		{"new", "--json", "--title", "Delete me", "--label", "bug", "--body", "deleteonlytoken"},
+		{"new", "--json", "--title", "Outgoing target"},
+		{"new", "--json", "--title", "Related survivor"},
+	}
+	for _, args := range fixtures {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, t.TempDir(), itoHome, "edit", "--json", "DEL-1", "--block", "DEL-2", "--relate", "DEL-3"); result.exitCode != 0 {
+		t.Fatalf("ito edit outgoing links failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, t.TempDir(), itoHome, "edit", "--json", "DEL-2", "--block", "DEL-1"); result.exitCode != 0 {
+		t.Fatalf("ito edit incoming link failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "rm", "DEL-1")
+	if result.exitCode != 0 || result.stdout != "DEL-1 deleted.\n" || result.stderr != "" {
+		t.Fatalf("expected short human deletion confirmation, got exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+	showDeleted := runITO(t, t.TempDir(), itoHome, "show", "--json", "DEL-1")
+	if showDeleted.exitCode != 3 {
+		t.Fatalf("deleted Issue must be unknown, got exit %d\nstdout: %s\nstderr: %s", showDeleted.exitCode, showDeleted.stdout, showDeleted.stderr)
+	}
+	for _, id := range []string{"DEL-2", "DEL-3"} {
+		show := runITO(t, t.TempDir(), itoHome, "show", "--json", id)
+		if show.exitCode != 0 {
+			t.Fatalf("survivor %s was deleted or unreadable: exit %d\nstdout: %s\nstderr: %s", id, show.exitCode, show.stdout, show.stderr)
+		}
+		var issue issueJSON
+		if err := json.Unmarshal([]byte(show.stdout), &issue); err != nil {
+			t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, show.stdout)
+		}
+		if len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 {
+			t.Fatalf("links to deleted Issue must be removed from %s, got %#v", id, issue)
+		}
+	}
+
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	var issuesCount, labelsCount, linksCount, ftsMatches int
+	if err := db.QueryRow(`SELECT count(*) FROM issues WHERE project_id = ?`, project.ID).Scan(&issuesCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM issue_labels WHERE project_id = ? AND issue_id = 'DEL-1'`, project.ID).Scan(&labelsCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM issue_links WHERE project_id = ? AND (source_id = 'DEL-1' OR target_id = 'DEL-1')`, project.ID).Scan(&linksCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM issues_fts WHERE issues_fts MATCH 'deleteonlytoken'`).Scan(&ftsMatches); err != nil {
+		t.Fatal(err)
+	}
+	if issuesCount != 2 || labelsCount != 0 || linksCount != 0 || ftsMatches != 0 {
+		t.Fatalf("delete cleanup mismatch: issues=%d labels=%d links=%d fts=%d", issuesCount, labelsCount, linksCount, ftsMatches)
+	}
+}
+
+func TestRmPreservesProjectCounter(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "counter-delete", "--prefix", "CTR"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, title := range []string{"First", "Second"} {
+		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title); result.exitCode != 0 {
+			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, t.TempDir(), itoHome, "rm", "--json", "CTR-2"); result.exitCode != 0 {
+		t.Fatalf("ito rm failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	result := runITO(t, repo, itoHome, "new", "--json", "--title", "Third")
+	if result.exitCode != 0 {
+		t.Fatalf("ito new after delete failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.ID != "CTR-3" {
+		t.Fatalf("deleted IDs must not be reused, got %#v", issue)
+	}
+}
+
+func TestRmRejectsMalformedAndUnknownIDs(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "rm-unknown", "--prefix", "RUK"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		code int
+	}{
+		{name: "malformed ID", args: []string{"rm", "--json", "RUK"}, code: 2},
+		{name: "unknown ID", args: []string{"rm", "--json", "RUK-99"}, code: 3},
+		{name: "unknown prefix", args: []string{"rm", "--json", "ZZZ-1"}, code: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, t.TempDir(), itoHome, tt.args...)
+			if result.exitCode != tt.code {
+				t.Fatalf("expected exit %d, got %d\nstdout: %s\nstderr: %s", tt.code, result.exitCode, result.stdout, result.stderr)
+			}
+			if result.stdout != "" {
+				t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+			}
+			var errObject struct {
+				Error string `json:"error"`
+				Code  int    `json:"code"`
+				Hint  string `json:"hint"`
+			}
+			if err := json.Unmarshal([]byte(result.stderr), &errObject); err != nil {
+				t.Fatalf("stderr is not a JSON error object: %v\nstderr: %s", err, result.stderr)
+			}
+			if errObject.Code != tt.code || errObject.Error == "" || errObject.Hint == "" {
+				t.Fatalf("expected actionable error object with code %d, got %#v", tt.code, errObject)
+			}
+		})
+	}
+}
+
+func TestRmJSONOutput(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "json-delete", "--prefix", "JRM"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Delete JSON"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "rm", "--json", "JRM-1")
+	if result.exitCode != 0 || result.stdout != "{\"deleted\":1,\"id\":\"JRM-1\"}\n" || result.stderr != "" {
+		t.Fatalf("expected exact JSON deletion output, got exit=%d stdout=%q stderr=%q", result.exitCode, result.stdout, result.stderr)
+	}
+}
+
 func TestInitCreatesCentralStoreForGitProject(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")
