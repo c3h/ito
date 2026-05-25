@@ -2735,3 +2735,56 @@ func openTestDB(t *testing.T, itoHome string) *sql.DB {
 	}
 	return db
 }
+
+// TestFlagsAfterPositionalAreAccepted hardens the agent-native contract: commands
+// with a positional (show/move/rm/rename) must accept flags in any position,
+// not only before the positional. The stdlib flag.Parse stops at the first non-flag,
+// so without the split the natural invocation `<command> <ID> --json` failed with
+// exit 2 ("takes exactly one ID") even with the ID present.
+func TestFlagsAfterPositionalAreAccepted(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "flag-order", "--prefix", "FLO"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Reorderable"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+
+	// show <ID> --json
+	if result := runITO(t, repo, itoHome, "show", "FLO-1", "--json"); result.exitCode != 0 {
+		t.Fatalf("show <ID> --json must succeed, got exit %d\nstderr: %s", result.exitCode, result.stderr)
+	} else {
+		var issue issueJSON
+		if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil || issue.ID != "FLO-1" {
+			t.Fatalf("show <ID> --json produced unexpected output: err=%v stdout=%s", err, result.stdout)
+		}
+	}
+
+	// move <ID> <status> --json
+	if result := runITO(t, repo, itoHome, "move", "FLO-1", "in_progress", "--json"); result.exitCode != 0 {
+		t.Fatalf("move <ID> <status> --json must succeed, got exit %d\nstderr: %s", result.exitCode, result.stderr)
+	} else {
+		var issue issueJSON
+		if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil || issue.Status != "in_progress" {
+			t.Fatalf("move <ID> <status> --json produced unexpected output: err=%v stdout=%s", err, result.stdout)
+		}
+	}
+
+	// rename <name> --json
+	if result := runITO(t, repo, itoHome, "rename", "flag-order-2", "--json"); result.exitCode != 0 {
+		t.Fatalf("rename <name> --json must succeed, got exit %d\nstderr: %s", result.exitCode, result.stderr)
+	} else {
+		var project projectJSON
+		if err := json.Unmarshal([]byte(result.stdout), &project); err != nil || project.Name != "flag-order-2" {
+			t.Fatalf("rename <name> --json produced unexpected output: err=%v stdout=%s", err, result.stdout)
+		}
+	}
+
+	// rm <ID> --json
+	if result := runITO(t, repo, itoHome, "rm", "FLO-1", "--json"); result.exitCode != 0 {
+		t.Fatalf("rm <ID> --json must succeed, got exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+}

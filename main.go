@@ -360,13 +360,14 @@ func runRename(args []string) int {
 	var projectName string
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
-	if err := fs.Parse(args); err != nil {
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
 		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito rename --help' to see the accepted flags.")
 	}
-	if fs.NArg() != 1 {
+	if len(positionals) != 1 {
 		return fail(jsonMode, exitBadUsage, "ito rename takes exactly one new name.", "use: ito rename <name>.")
 	}
-	newName := fs.Arg(0)
+	newName := positionals[0]
 	if !projectNamePattern.MatchString(newName) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", newName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 	}
@@ -484,13 +485,14 @@ func runShow(args []string) int {
 	var projectName string
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
-	if err := fs.Parse(args); err != nil {
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
 		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito show --help' to see the accepted flags.")
 	}
-	if fs.NArg() != 1 {
+	if len(positionals) != 1 {
 		return fail(jsonMode, exitBadUsage, "ito show takes exactly one full ID.", "use: ito show <PREFIX>-<n>.")
 	}
-	issueID := fs.Arg(0)
+	issueID := positionals[0]
 	matches := issueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
@@ -550,14 +552,15 @@ func runMove(args []string) int {
 	var projectName string
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
-	if err := fs.Parse(args); err != nil {
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
 		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito move --help' to see the accepted flags.")
 	}
-	if fs.NArg() != 2 {
+	if len(positionals) != 2 {
 		return fail(jsonMode, exitBadUsage, "ito move takes exactly one full ID and a target status.", "use: ito move <PREFIX>-<n> <status>.")
 	}
-	issueID := fs.Arg(0)
-	targetStatus := fs.Arg(1)
+	issueID := positionals[0]
+	targetStatus := positionals[1]
 	matches := issueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
@@ -784,13 +787,14 @@ func runRm(args []string) int {
 	var projectName string
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
-	if err := fs.Parse(args); err != nil {
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
 		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito rm --help' to see the accepted flags.")
 	}
-	if fs.NArg() != 1 {
+	if len(positionals) != 1 {
 		return fail(jsonMode, exitBadUsage, "ito rm takes exactly one full ID.", "use: ito rm <PREFIX>-<n>.")
 	}
-	issueID := fs.Arg(0)
+	issueID := positionals[0]
 	matches := issueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
@@ -1351,6 +1355,33 @@ func searchQuery(input string) string {
 	return strings.Join(terms, " ")
 }
 
+// splitFlagsAndPositionals separates flag tokens from the positional arguments,
+// allowing flags to appear in any position relative to the positionals
+// (the stdlib flag.Parse stops at the first non-flag token). valueFlags names
+// the flags that consume the next argument as a value, so that value
+// is not mistaken for a positional.
+func splitFlagsAndPositionals(args []string, valueFlags map[string]struct{}) (flagArgs, positionals []string) {
+	flagArgs = make([]string, 0, len(args))
+	positionals = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionals = append(positionals, arg)
+			continue
+		}
+		flagArgs = append(flagArgs, arg)
+		name := strings.TrimLeft(arg, "-")
+		if idx := strings.IndexByte(name, '='); idx >= 0 {
+			name = name[:idx]
+		}
+		if _, ok := valueFlags[name]; ok && !strings.Contains(arg, "=") && i+1 < len(args) {
+			i++
+			flagArgs = append(flagArgs, args[i])
+		}
+	}
+	return flagArgs, positionals
+}
+
 func splitEditArgs(args []string) ([]string, string, int) {
 	valueFlags := map[string]struct{}{
 		"project":      {},
@@ -1364,29 +1395,12 @@ func splitEditArgs(args []string) ([]string, string, int) {
 		"relate":       {},
 		"unrelate":     {},
 	}
-	parseArgs := make([]string, 0, len(args))
+	flagArgs, positionals := splitFlagsAndPositionals(args, valueFlags)
 	issueID := ""
-	positionalCount := 0
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			positionalCount++
-			if positionalCount == 1 {
-				issueID = arg
-			}
-			continue
-		}
-		parseArgs = append(parseArgs, arg)
-		name := strings.TrimLeft(arg, "-")
-		if idx := strings.IndexByte(name, '='); idx >= 0 {
-			name = name[:idx]
-		}
-		if _, ok := valueFlags[name]; ok && !strings.Contains(arg, "=") && i+1 < len(args) {
-			i++
-			parseArgs = append(parseArgs, args[i])
-		}
+	if len(positionals) > 0 {
+		issueID = positionals[0]
 	}
-	return parseArgs, issueID, positionalCount
+	return flagArgs, issueID, len(positionals)
 }
 
 func openStore() (*sql.DB, error) {
