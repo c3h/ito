@@ -28,6 +28,7 @@ var (
 	projectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 	prefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
 	issueIDPattern     = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,7})-([1-9][0-9]*)$`)
+	searchTermPattern  = regexp.MustCompile(`[\pL\pN]+`)
 	validStatuses      = map[string]struct{}{"backlog": {}, "todo": {}, "in_progress": {}, "in_review": {}, "done": {}}
 	validPriorities    = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "urgent": {}}
 	validLabels        = map[string]struct{}{"feature": {}, "bug": {}, "docs": {}, "tests": {}, "refactor": {}, "chore": {}, "research": {}, "infra": {}}
@@ -148,6 +149,7 @@ type listOptions struct {
 	Status      string
 	Priority    string
 	Labels      []string
+	Search      string
 }
 
 type issueDeletionRow struct {
@@ -871,12 +873,14 @@ func runList(args []string) int {
 	var allProjects bool
 	var status string
 	var priority string
+	var search string
 	var labels stringSliceFlag
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
 	fs.BoolVar(&allProjects, "all-projects", false, "")
 	fs.StringVar(&status, "status", "", "")
 	fs.StringVar(&priority, "priority", "", "")
+	fs.StringVar(&search, "search", "", "")
 	fs.Var(&labels, "label", "")
 	if err := fs.Parse(args); err != nil {
 		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito list --help' to see the accepted flags.")
@@ -913,6 +917,7 @@ func runList(args []string) int {
 		Status:      status,
 		Priority:    priority,
 		Labels:      append([]string{}, labels...),
+		Search:      search,
 	}
 	if !allProjects {
 		rootPath, inGit, err := resolveCurrentRoot()
@@ -1140,6 +1145,17 @@ func formatList(values []string) string {
 func isValidValue(value string, valid map[string]struct{}) bool {
 	_, ok := valid[value]
 	return ok
+}
+
+func searchQuery(input string) string {
+	terms := searchTermPattern.FindAllString(input, -1)
+	if len(terms) == 0 {
+		return ""
+	}
+	for i, term := range terms {
+		terms[i] = strings.ToLower(term) + "*"
+	}
+	return strings.Join(terms, " ")
 }
 
 func splitEditArgs(args []string) ([]string, string, int) {
@@ -1902,6 +1918,15 @@ ORDER BY 1`, id, p.ID, id, id)
 func listIssues(db *sql.DB, options listOptions) ([]issue, error) {
 	where := []string{}
 	args := []any{}
+	ftsQuery := searchQuery(options.Search)
+	searching := strings.TrimSpace(options.Search) != ""
+	if searching {
+		if ftsQuery == "" {
+			return []issue{}, nil
+		}
+		where = append(where, "issues_fts MATCH ?")
+		args = append(args, ftsQuery)
+	}
 	if !options.AllProjects {
 		where = append(where, "issues.project_id = ?")
 		args = append(args, options.ProjectID)
@@ -1930,11 +1955,18 @@ WHERE issue_labels.project_id = issues.project_id
 SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.body, issues.created, issues.updated, issues.project_id
 FROM issues
 JOIN projects ON projects.id = issues.project_id`
+	if searching {
+		query += `
+JOIN issues_fts ON issues_fts.rowid = issues.row_id`
+	}
 	if len(where) > 0 {
 		query += "\nWHERE " + strings.Join(where, " AND ")
 	}
 	query += `
 ORDER BY `
+	if searching {
+		query += "bm25(issues_fts), "
+	}
 	if options.AllProjects {
 		query += "projects.name ASC, "
 	}

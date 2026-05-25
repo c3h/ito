@@ -511,6 +511,176 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'LNK-
 	}
 }
 
+func TestListSearchMatchesTextOnlyAndComposesWithFilters(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "search-app", "--prefix", "SRC"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	fixtures := [][]string{
+		{"new", "--json", "--title", "Alpha gateway", "--status", "todo", "--priority", "high", "--label", "bug", "--body", "plain body"},
+		{"new", "--json", "--title", "Body carrier", "--status", "in_progress", "--priority", "low", "--label", "feature", "--body", "contains alpha marker"},
+		{"new", "--json", "--title", "Metadata only", "--status", "todo", "--priority", "urgent", "--label", "docs", "--body", "plain body"},
+		{"new", "--json", "--title", "Finished alpha", "--status", "done", "--priority", "urgent", "--label", "feature", "--body", "plain body"},
+	}
+	for _, args := range fixtures {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "title and body matches hide done by default", args: []string{"list", "--json", "--search", "alpha"}, want: []string{"SRC-1", "SRC-2"}},
+		{name: "prefix terms", args: []string{"list", "--json", "--search", "gate"}, want: []string{"SRC-1"}},
+		{name: "metadata is not searched", args: []string{"list", "--json", "--search", "docs"}, want: []string{}},
+		{name: "status filter", args: []string{"list", "--json", "--search", "alpha", "--status", "in_progress"}, want: []string{"SRC-2"}},
+		{name: "label filter", args: []string{"list", "--json", "--search", "alpha", "--label", "feature"}, want: []string{"SRC-2"}},
+		{name: "priority filter", args: []string{"list", "--json", "--search", "alpha", "--priority", "high"}, want: []string{"SRC-1"}},
+		{name: "explicit done status", args: []string{"list", "--json", "--search", "alpha", "--status", "done"}, want: []string{"SRC-4"}},
+		{name: "empty results", args: []string{"list", "--json", "--search", "missingterm"}, want: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, repo, itoHome, tt.args...)
+			if result.exitCode != 0 {
+				t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", tt.args, result.exitCode, result.stdout, result.stderr)
+			}
+			if got := issueIDs(decodeIssueList(t, result.stdout)); !stringSlicesEqual(got, tt.want) {
+				t.Fatalf("expected IDs %v, got %v\nstdout: %s", tt.want, got, result.stdout)
+			}
+			var raw []map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(result.stdout), &raw); err != nil {
+				t.Fatal(err)
+			}
+			if len(raw) > 0 {
+				if _, ok := raw[0]["body"]; ok {
+					t.Fatalf("list search JSON must omit body, got %s", result.stdout)
+				}
+			}
+		})
+	}
+}
+
+func TestListSearchScopesProjects(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "first")
+	secondRepo := filepath.Join(parent, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "first-search", "--prefix", "FSE"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "second-search", "--prefix", "SSE"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, firstRepo, itoHome, "new", "--json", "--title", "Shared needle"); result.exitCode != 0 {
+		t.Fatalf("first new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "new", "--json", "--title", "Shared needle"); result.exitCode != 0 {
+		t.Fatalf("second new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	explicit := runITO(t, t.TempDir(), itoHome, "list", "--json", "--project", "second-search", "--search", "needle")
+	if explicit.exitCode != 0 {
+		t.Fatalf("ito list explicit project search failed with exit %d\nstdout: %s\nstderr: %s", explicit.exitCode, explicit.stdout, explicit.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, explicit.stdout)); !stringSlicesEqual(got, []string{"SSE-1"}) {
+		t.Fatalf("expected explicit second project result, got %v", got)
+	}
+
+	all := runITO(t, t.TempDir(), itoHome, "list", "--json", "--all-projects", "--search", "needle")
+	if all.exitCode != 0 {
+		t.Fatalf("ito list all projects search failed with exit %d\nstdout: %s\nstderr: %s", all.exitCode, all.stdout, all.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, all.stdout)); !stringSlicesEqual(got, []string{"FSE-1", "SSE-1"}) {
+		t.Fatalf("expected all project search results ordered by project, got %v", got)
+	}
+}
+
+func TestListSearchRanksByTextualRelevanceBeforeListOrdering(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "rank-search", "--prefix", "RNK"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Sparse", "--body", "rankword"); result.exitCode != 0 {
+		t.Fatalf("sparse new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Dense", "--body", "rankword rankword rankword rankword rankword"); result.exitCode != 0 {
+		t.Fatalf("dense new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE issues SET updated = CASE id WHEN 'RNK-1' THEN '2026-05-24T12:00:00Z' ELSE '2026-05-24T10:00:00Z' END WHERE id IN ('RNK-1', 'RNK-2')`); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runITO(t, repo, itoHome, "list", "--json", "--search", "rankword")
+	if result.exitCode != 0 {
+		t.Fatalf("ito list search failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, result.stdout)); !stringSlicesEqual(got, []string{"RNK-2", "RNK-1"}) {
+		t.Fatalf("expected textual rank before updated tie-breaker, got %v\nstdout: %s", got, result.stdout)
+	}
+}
+
+func TestListSearchStaysSynchronizedAfterEditDeleteAndPrune(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "sync-search", "--prefix", "SYN"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Original oldtoken", "--body", "body"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, runITO(t, repo, itoHome, "list", "--json", "--search", "oldtoken").stdout)); !stringSlicesEqual(got, []string{"SYN-1"}) {
+		t.Fatalf("expected old token before edit, got %v", got)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "SYN-1", "--title", "Replacement", "--body", "newtoken body"); result.exitCode != 0 {
+		t.Fatalf("ito edit failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, runITO(t, repo, itoHome, "list", "--json", "--search", "oldtoken").stdout)); len(got) != 0 {
+		t.Fatalf("old token must leave FTS after edit, got %v", got)
+	}
+	if got := issueIDs(decodeIssueList(t, runITO(t, repo, itoHome, "list", "--json", "--search", "newtoken").stdout)); !stringSlicesEqual(got, []string{"SYN-1"}) {
+		t.Fatalf("new token must enter FTS after edit, got %v", got)
+	}
+	if result := runITO(t, repo, itoHome, "rm", "--json", "SYN-1"); result.exitCode != 0 {
+		t.Fatalf("ito rm failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, runITO(t, repo, itoHome, "list", "--json", "--search", "newtoken").stdout)); len(got) != 0 {
+		t.Fatalf("deleted token must leave FTS, got %v", got)
+	}
+
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Pruned prunefts", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("ito new done failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, runITO(t, repo, itoHome, "list", "--json", "--search", "prunefts", "--status", "done").stdout)); !stringSlicesEqual(got, []string{"SYN-2"}) {
+		t.Fatalf("expected done token before prune, got %v", got)
+	}
+	if result := runITO(t, repo, itoHome, "prune", "--json", "--status", "done", "--yes"); result.exitCode != 0 {
+		t.Fatalf("ito prune failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, runITO(t, repo, itoHome, "list", "--json", "--search", "prunefts", "--status", "done").stdout)); len(got) != 0 {
+		t.Fatalf("pruned token must leave FTS, got %v", got)
+	}
+}
+
 func TestShowResolvesGlobalIDFromAnyCwd(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")
