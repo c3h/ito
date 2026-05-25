@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -18,6 +21,255 @@ type projectJSON struct {
 	Name     string `json:"name"`
 	Prefix   string `json:"prefix"`
 	RootPath string `json:"root_path"`
+}
+
+type issueJSON struct {
+	ID        string   `json:"id"`
+	Project   string   `json:"project"`
+	Title     string   `json:"title"`
+	Status    string   `json:"status"`
+	Priority  string   `json:"priority"`
+	Labels    []string `json:"labels"`
+	BlockedBy []string `json:"blocked_by"`
+	RelatesTo []string `json:"relates_to"`
+	Body      string   `json:"body"`
+	Created   string   `json:"created"`
+	Updated   string   `json:"updated"`
+}
+
+func TestNewCreatesIssueWithDefaults(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "new-app", "--prefix", "NEW")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+
+	result := runITO(t, repo, itoHome, "new", "--json", "--title", "First tracked work")
+	if result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.ID != "NEW-1" || issue.Project != "new-app" || issue.Title != "First tracked work" {
+		t.Fatalf("unexpected issue identity: %#v", issue)
+	}
+	if issue.Status != "backlog" || issue.Priority != "low" || issue.Body != "" {
+		t.Fatalf("unexpected issue defaults: %#v", issue)
+	}
+	if len(issue.Labels) != 0 || len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 {
+		t.Fatalf("expected empty arrays for labels and links, got %#v", issue)
+	}
+	if issue.Created == "" || issue.Updated == "" || issue.Created != issue.Updated {
+		t.Fatalf("expected equal created/updated timestamps, got %#v", issue)
+	}
+	createdAt, err := time.Parse(time.RFC3339, issue.Created)
+	if err != nil {
+		t.Fatalf("created timestamp must be RFC3339, got %q: %v", issue.Created, err)
+	}
+	if createdAt.Location() != time.UTC {
+		t.Fatalf("created timestamp must be UTC, got %q", issue.Created)
+	}
+}
+
+func TestNewHumanModePrintsOnlyMintedIDAndAdvancesCounter(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "human-app", "--prefix", "HUM"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	first := runITO(t, repo, itoHome, "new", "--title", "First")
+	if first.exitCode != 0 {
+		t.Fatalf("first ito new failed with exit %d\nstdout: %s\nstderr: %s", first.exitCode, first.stdout, first.stderr)
+	}
+	if first.stdout != "HUM-1\n" || first.stderr != "" {
+		t.Fatalf("expected only minted ID on stdout, got stdout=%q stderr=%q", first.stdout, first.stderr)
+	}
+
+	second := runITO(t, repo, itoHome, "new", "--title", "Second")
+	if second.exitCode != 0 {
+		t.Fatalf("second ito new failed with exit %d\nstdout: %s\nstderr: %s", second.exitCode, second.stdout, second.stderr)
+	}
+	if second.stdout != "HUM-2\n" || second.stderr != "" {
+		t.Fatalf("expected next minted ID on stdout, got stdout=%q stderr=%q", second.stdout, second.stderr)
+	}
+}
+
+func TestNewCreatesIssueWithExplicitFields(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "explicit-app", "--prefix", "EXP"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, repo, itoHome, "new", "--json",
+		"--title", "Implement explicit fields",
+		"--status", "todo",
+		"--priority", "high",
+		"--label", "feature",
+		"--label", "tests",
+		"--body", "## Notes\npreserve markdown",
+	)
+	if result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.ID != "EXP-1" || issue.Status != "todo" || issue.Priority != "high" || issue.Body != "## Notes\npreserve markdown" {
+		t.Fatalf("unexpected explicit fields: %#v", issue)
+	}
+	if !stringSlicesEqual(issue.Labels, []string{"feature", "tests"}) {
+		t.Fatalf("expected labels in input order, got %#v", issue.Labels)
+	}
+}
+
+func TestNewReadsBodyFromStdin(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "stdin-app", "--prefix", "STD"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	body := "# Plan\n\n- keep markdown\n"
+	result := runITOWithInput(t, repo, itoHome, body, "new", "--json", "--title", "From stdin", "--body", "-")
+	if result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.Body != body {
+		t.Fatalf("expected stdin body %q, got %#v", body, issue)
+	}
+}
+
+func TestNewRejectsInvalidInput(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "invalid-new", "--prefix", "INV"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing title", args: []string{"new", "--json"}},
+		{name: "blank title", args: []string{"new", "--json", "--title", " \t\n"}},
+		{name: "invalid status", args: []string{"new", "--json", "--title", "Bad status", "--status", "doing"}},
+		{name: "invalid priority", args: []string{"new", "--json", "--title", "Bad priority", "--priority", "critical"}},
+		{name: "invalid label", args: []string{"new", "--json", "--title", "Bad label", "--label", "custom"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, repo, itoHome, tt.args...)
+			if result.exitCode != 2 {
+				t.Fatalf("expected exit 2, got %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+			}
+			if result.stdout != "" {
+				t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+			}
+			var errObject struct {
+				Error string `json:"error"`
+				Code  int    `json:"code"`
+				Hint  string `json:"hint"`
+			}
+			if err := json.Unmarshal([]byte(result.stderr), &errObject); err != nil {
+				t.Fatalf("stderr is not a JSON error object: %v\nstderr: %s", err, result.stderr)
+			}
+			if errObject.Code != 2 || errObject.Error == "" || errObject.Hint == "" {
+				t.Fatalf("expected actionable bad-usage error object, got %#v", errObject)
+			}
+		})
+	}
+}
+
+func TestNewFromUnregisteredCwdPointsToInit(t *testing.T) {
+	result := runITO(t, t.TempDir(), t.TempDir(), "new", "--json", "--title", "No project")
+	if result.exitCode != 4 {
+		t.Fatalf("expected exit 4, got %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result.stdout != "" {
+		t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+	}
+	var errObject struct {
+		Error string `json:"error"`
+		Code  int    `json:"code"`
+		Hint  string `json:"hint"`
+	}
+	if err := json.Unmarshal([]byte(result.stderr), &errObject); err != nil {
+		t.Fatalf("stderr is not a JSON error object: %v\nstderr: %s", err, result.stderr)
+	}
+	if errObject.Code != 4 || !strings.Contains(errObject.Hint, "ito init") {
+		t.Fatalf("expected actionable init hint, got %#v", errObject)
+	}
+}
+
+func TestNewConcurrentCallsMintUniqueProjectScopedIDs(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "concurrent-app", "--prefix", "CON"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	const total = 16
+	start := make(chan struct{})
+	results := make(chan commandResult, total)
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			<-start
+			results <- runITO(t, repo, itoHome, "new", "--json", "--title", fmt.Sprintf("Concurrent %02d", n))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	seen := make(map[string]bool, total)
+	for result := range results {
+		if result.exitCode != 0 {
+			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+		var issue issueJSON
+		if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+			t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+		}
+		if seen[issue.ID] {
+			t.Fatalf("duplicate minted ID %s", issue.ID)
+		}
+		seen[issue.ID] = true
+	}
+	for i := 1; i <= total; i++ {
+		id := fmt.Sprintf("CON-%d", i)
+		if !seen[id] {
+			t.Fatalf("expected minted ID %s in %v", id, seen)
+		}
+	}
 }
 
 func TestInitCreatesCentralStoreForGitProject(t *testing.T) {
@@ -468,12 +720,18 @@ type commandResult struct {
 
 func runITO(t *testing.T, dir, itoHome string, args ...string) commandResult {
 	t.Helper()
+	return runITOWithInput(t, dir, itoHome, "", args...)
+}
+
+func runITOWithInput(t *testing.T, dir, itoHome string, stdin string, args ...string) commandResult {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], append([]string{"--test.run=TestHelperProcess", "--"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GO_WANT_HELPER_PROCESS=1",
 		"ITO_HOME="+itoHome,
 	)
+	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

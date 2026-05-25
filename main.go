@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -25,7 +26,21 @@ const (
 var (
 	projectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 	prefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
+	validStatuses      = map[string]struct{}{"backlog": {}, "todo": {}, "in_progress": {}, "in_review": {}, "done": {}}
+	validPriorities    = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "urgent": {}}
+	validLabels        = map[string]struct{}{"feature": {}, "bug": {}, "docs": {}, "tests": {}, "refactor": {}, "chore": {}, "research": {}, "infra": {}}
 )
+
+type stringSliceFlag []string
+
+func (f *stringSliceFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringSliceFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
 
 type project struct {
 	ID       int64  `json:"id"`
@@ -38,6 +53,20 @@ type cliError struct {
 	Error string `json:"error"`
 	Code  int    `json:"code"`
 	Hint  string `json:"hint"`
+}
+
+type issue struct {
+	ID        string   `json:"id"`
+	Project   string   `json:"project"`
+	Title     string   `json:"title"`
+	Status    string   `json:"status"`
+	Priority  string   `json:"priority"`
+	Labels    []string `json:"labels"`
+	BlockedBy []string `json:"blocked_by"`
+	RelatesTo []string `json:"relates_to"`
+	Body      string   `json:"body"`
+	Created   string   `json:"created"`
+	Updated   string   `json:"updated"`
 }
 
 func main() {
@@ -53,6 +82,8 @@ func runCLI(args []string) int {
 	switch args[0] {
 	case "init":
 		return runInit(args[1:])
+	case "new":
+		return runNew(args[1:])
 	case "rename":
 		return runRename(args[1:])
 	default:
@@ -208,6 +239,75 @@ func runRename(args []string) int {
 	return printProject(renamed, jsonMode)
 }
 
+func runNew(args []string) int {
+	fs := flag.NewFlagSet("new", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	var title string
+	var status string
+	var priority string
+	var labels stringSliceFlag
+	var body string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	fs.StringVar(&title, "title", "", "")
+	fs.StringVar(&status, "status", "backlog", "")
+	fs.StringVar(&priority, "priority", "low", "")
+	fs.Var(&labels, "label", "")
+	fs.StringVar(&body, "body", "", "")
+	if err := fs.Parse(args); err != nil {
+		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito new --help' to see the accepted flags.")
+	}
+	if fs.NArg() != 0 {
+		return fail(jsonMode, exitBadUsage, "ito new takes no positional arguments.", "use --title <title>.")
+	}
+	if strings.TrimSpace(title) == "" {
+		return fail(jsonMode, exitBadUsage, "title is required.", "use --title <title> with non-empty text.")
+	}
+	if !isValidValue(status, validStatuses) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use backlog, todo, in_progress, in_review or done.")
+	}
+	if !isValidValue(priority, validPriorities) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use low, medium, high or urgent.")
+	}
+	for _, label := range labels {
+		if !isValidValue(label, validLabels) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", label), "use feature, bug, docs, tests, refactor, chore, research or infra.")
+		}
+	}
+	if body == "-" {
+		input, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Issue body from stdin: %v", err), "try again by passing --body <text>.")
+		}
+		body = string(input)
+	}
+
+	rootPath, inGit, err := resolveCurrentRoot()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
+	}
+	db, err := openStore()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
+	}
+
+	p, code, message, hint := resolveProject(db, rootPath, inGit, projectName)
+	if code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+	created, err := insertIssue(db, p, title, status, priority, labels, body)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not create the Issue: %v", err), "try again or inspect the central store.")
+	}
+	return printIssue(created, jsonMode)
+}
+
 func runInitReattach(db *sql.DB, rootPath string, name string, jsonMode bool) int {
 	if !projectNamePattern.MatchString(name) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
@@ -315,6 +415,25 @@ func printProject(p project, jsonMode bool) int {
 	return 0
 }
 
+func printIssue(i issue, jsonMode bool) int {
+	if jsonMode {
+		encoded, err := json.Marshal(i)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not serialize the Issue: %v\n", err)
+			return exitGeneric
+		}
+		fmt.Println(string(encoded))
+		return 0
+	}
+	fmt.Println(i.ID)
+	return 0
+}
+
+func isValidValue(value string, valid map[string]struct{}) bool {
+	_, ok := valid[value]
+	return ok
+}
+
 func openStore() (*sql.DB, error) {
 	home := os.Getenv("ITO_HOME")
 	if home == "" {
@@ -331,7 +450,10 @@ func openStore() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+	if _, err := db.Exec(`
+PRAGMA busy_timeout = 5000;
+PRAGMA foreign_keys = ON;
+`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -629,6 +751,72 @@ func updateProjectName(db *sql.DB, p project, name string) (project, error) {
 	}
 	p.Name = name
 	return p, nil
+}
+
+func insertIssue(db *sql.DB, p project, title, status, priority string, labels []string, body string) (issue, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return issue{}, err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(`UPDATE projects SET last_id = last_id + 1 WHERE id = ?`, p.ID)
+	if err != nil {
+		return issue{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return issue{}, err
+	}
+	if affected != 1 {
+		return issue{}, sql.ErrNoRows
+	}
+
+	var nextID int64
+	if err := tx.QueryRow(`SELECT last_id FROM projects WHERE id = ?`, p.ID).Scan(&nextID); err != nil {
+		return issue{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	created := issue{
+		ID:        fmt.Sprintf("%s-%d", p.Prefix, nextID),
+		Project:   p.Name,
+		Title:     title,
+		Status:    status,
+		Priority:  priority,
+		Labels:    append([]string{}, labels...),
+		BlockedBy: []string{},
+		RelatesTo: []string{},
+		Body:      body,
+		Created:   now,
+		Updated:   now,
+	}
+	if created.Labels == nil {
+		created.Labels = []string{}
+	}
+
+	result, err = tx.Exec(`
+INSERT INTO issues(project_id, id, title, status, priority, body, created, updated)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, created.ID, created.Title, created.Status, created.Priority, created.Body, created.Created, created.Updated)
+	if err != nil {
+		return issue{}, err
+	}
+	rowID, err := result.LastInsertId()
+	if err != nil {
+		return issue{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, created.Title, created.Body); err != nil {
+		return issue{}, err
+	}
+	for _, label := range created.Labels {
+		if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, created.ID, label); err != nil {
+			return issue{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return issue{}, err
+	}
+	return created, nil
 }
 
 func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, error) {
