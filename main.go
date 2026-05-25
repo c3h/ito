@@ -11,10 +11,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "modernc.org/sqlite"
+	"golang.org/x/text/runes"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -32,7 +37,19 @@ var (
 	validStatuses      = map[string]struct{}{"backlog": {}, "todo": {}, "in_progress": {}, "in_review": {}, "done": {}}
 	validPriorities    = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "urgent": {}}
 	validLabels        = map[string]struct{}{"feature": {}, "bug": {}, "docs": {}, "tests": {}, "refactor": {}, "chore": {}, "research": {}, "infra": {}}
+	// asciiFold decomposes (NFD) and strips combining marks, transliterating
+	// Latin accents to ASCII (café → cafe). Scripts with no decomposition to
+	// ASCII (Cyrillic, CJK) pass through intact and are discarded downstream.
+	asciiFold = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
 )
+
+func transliterateASCII(input string) string {
+	folded, _, err := transform.String(asciiFold, input)
+	if err != nil {
+		return input
+	}
+	return folded
+}
 
 type stringSliceFlag []string
 
@@ -104,10 +121,10 @@ func (f linkEditFlag) Set(value string) error {
 }
 
 type project struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Prefix   string `json:"prefix"`
-	RootPath string `json:"root_path"`
+	ID       int64   `json:"id"`
+	Name     string  `json:"name"`
+	Prefix   string  `json:"prefix"`
+	RootPath *string `json:"root_path"`
 }
 
 type cliError struct {
@@ -956,7 +973,7 @@ func runInitReattach(db *sql.DB, rootPath string, name string, jsonMode bool) in
 	if !found {
 		return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", name), "check the registered Project name.")
 	}
-	p.RootPath = rootPath
+	p.RootPath = &rootPath
 	reattached, err := updateProjectRoot(db, p)
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not re-point project %q: %v", name, err), "check for root_path collisions in the central store.")
@@ -1041,7 +1058,11 @@ func printProject(p project, jsonMode bool) int {
 		fmt.Println(string(encoded))
 		return 0
 	}
-	fmt.Printf("%s %s %s\n", p.Name, p.Prefix, p.RootPath)
+	rootPath := "(detached)"
+	if p.RootPath != nil {
+		rootPath = *p.RootPath
+	}
+	fmt.Printf("%s %s %s\n", p.Name, p.Prefix, rootPath)
 	return 0
 }
 
@@ -1318,7 +1339,7 @@ func canonicalPath(path string) (string, error) {
 func normalizeProjectName(input string) string {
 	var b strings.Builder
 	lastDash := false
-	for _, r := range strings.ToLower(input) {
+	for _, r := range strings.ToLower(transliterateASCII(input)) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 			lastDash = false
@@ -1370,7 +1391,7 @@ func nextGeneratedPrefix(db *sql.DB, input string) (string, error) {
 
 func generatedPrefixBase(input string) string {
 	var b strings.Builder
-	for _, r := range strings.ToUpper(input) {
+	for _, r := range strings.ToUpper(transliterateASCII(input)) {
 		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 		}
@@ -1401,7 +1422,7 @@ func findProjectByRoot(db *sql.DB, rootPath string) (project, bool, error) {
 }
 
 func findProjectByName(db *sql.DB, name string) (project, bool, error) {
-	row := db.QueryRow(`SELECT id, name, prefix, COALESCE(root_path, '') FROM projects WHERE name = ?`, name)
+	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
 	var p project
 	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1413,7 +1434,7 @@ func findProjectByName(db *sql.DB, name string) (project, bool, error) {
 }
 
 func findProjectByPrefix(db *sql.DB, prefix string) (project, bool, error) {
-	row := db.QueryRow(`SELECT id, name, prefix, COALESCE(root_path, '') FROM projects WHERE prefix = ?`, prefix)
+	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, prefix)
 	var p project
 	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1438,9 +1459,12 @@ func findClosestProjectAncestor(db *sql.DB, cwd string) (project, bool, error) {
 		if err := rows.Scan(&candidate.ID, &candidate.Name, &candidate.Prefix, &candidate.RootPath); err != nil {
 			return project{}, false, err
 		}
-		if isPathAncestor(candidate.RootPath, cwd) && len(candidate.RootPath) > bestLen {
+		if candidate.RootPath == nil {
+			continue
+		}
+		if isPathAncestor(*candidate.RootPath, cwd) && len(*candidate.RootPath) > bestLen {
 			best = candidate
-			bestLen = len(candidate.RootPath)
+			bestLen = len(*candidate.RootPath)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1453,7 +1477,7 @@ func findClosestProjectAncestor(db *sql.DB, cwd string) (project, bool, error) {
 }
 
 func findDetachedProjectByName(db *sql.DB, name string) (project, bool, error) {
-	row := db.QueryRow(`SELECT id, name, prefix, COALESCE(root_path, '') FROM projects WHERE name = ?`, name)
+	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
 	var p project
 	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1461,11 +1485,16 @@ func findDetachedProjectByName(db *sql.DB, name string) (project, bool, error) {
 		}
 		return project{}, false, err
 	}
-	if p.RootPath == "" {
+	if p.RootPath == nil {
 		return p, true, nil
 	}
-	if _, err := os.Stat(p.RootPath); err != nil {
+	if _, err := os.Stat(*p.RootPath); err != nil {
 		if os.IsNotExist(err) {
+			// The repo moved: clears the stale pointer to reflect "detached" (NULL).
+			if _, err := db.Exec(`UPDATE projects SET root_path = NULL WHERE id = ?`, p.ID); err != nil {
+				return project{}, false, err
+			}
+			p.RootPath = nil
 			return p, true, nil
 		}
 		return project{}, false, err
@@ -1493,7 +1522,7 @@ func insertProject(db *sql.DB, name, prefix, rootPath string) (project, error) {
 	if err != nil {
 		return project{}, err
 	}
-	return project{ID: id, Name: name, Prefix: prefix, RootPath: rootPath}, nil
+	return project{ID: id, Name: name, Prefix: prefix, RootPath: &rootPath}, nil
 }
 
 func updateProjectRoot(db *sql.DB, p project) (project, error) {
@@ -1910,8 +1939,8 @@ ORDER BY 1`, id, p.ID, id, id)
 		return issue{}, false, err
 	}
 	found.Labels = labels
-	found.BlockedBy = blockedBy
-	found.RelatesTo = relatesTo
+	found.BlockedBy = sortIssueIDs(blockedBy)
+	found.RelatesTo = sortIssueIDs(relatesTo)
 	return found, true, nil
 }
 
@@ -1964,11 +1993,11 @@ JOIN issues_fts ON issues_fts.rowid = issues.row_id`
 	}
 	query += `
 ORDER BY `
-	if searching {
-		query += "bm25(issues_fts), "
-	}
 	if options.AllProjects {
 		query += "projects.name ASC, "
+	}
+	if searching {
+		query += "bm25(issues_fts), "
 	}
 	query += `CASE issues.status
   WHEN 'backlog' THEN 1
@@ -2042,8 +2071,8 @@ ORDER BY 1`, rowIssue.ID, rowIssue.ProjectID, rowIssue.ID, rowIssue.ID)
 			return nil, err
 		}
 		rowIssue.Labels = labels
-		rowIssue.BlockedBy = blockedBy
-		rowIssue.RelatesTo = relatesTo
+		rowIssue.BlockedBy = sortIssueIDs(blockedBy)
+		rowIssue.RelatesTo = sortIssueIDs(relatesTo)
 		issues = append(issues, rowIssue.issue)
 	}
 	return issues, nil
@@ -2122,7 +2151,7 @@ func findProjectByIssueIDTx(tx *sql.Tx, issueID string) (project, bool, error) {
 	if matches == nil {
 		return project{}, false, nil
 	}
-	row := tx.QueryRow(`SELECT id, name, prefix, COALESCE(root_path, '') FROM projects WHERE prefix = ?`, matches[1])
+	row := tx.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, matches[1])
 	var p project
 	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2150,6 +2179,13 @@ func normalizedLinkIDs(sourceID, targetID, kind string) (string, string) {
 		return targetID, sourceID
 	}
 	return sourceID, targetID
+}
+
+func sortIssueIDs(ids []string) []string {
+	sort.SliceStable(ids, func(i, j int) bool {
+		return issueIDLess(ids[i], ids[j])
+	})
+	return ids
 }
 
 func issueIDLess(left, right string) bool {

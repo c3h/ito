@@ -2310,6 +2310,269 @@ func TestRenameValidatesFormatUniquenessAndUnknownProject(t *testing.T) {
 	}
 }
 
+func TestListAllProjectsSearchGroupsByProjectDespiteRelevance(t *testing.T) {
+	parent := t.TempDir()
+	aaaRepo := filepath.Join(parent, "aaa")
+	zzzRepo := filepath.Join(parent, "zzz")
+	for _, repo := range []string{aaaRepo, zzzRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+	if result := runITO(t, aaaRepo, itoHome, "init", "--json", "--name", "aaa-proj", "--prefix", "AAA"); result.exitCode != 0 {
+		t.Fatalf("aaa init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	if result := runITO(t, zzzRepo, itoHome, "init", "--json", "--name", "zzz-proj", "--prefix", "ZZZ"); result.exitCode != 0 {
+		t.Fatalf("zzz init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	// Distinct relevance across Projects: if bm25 were the primary key under
+	// --all-projects, the global order would be AAA-1 (dense), ZZZ-1 (medium), AAA-2
+	// (sparse), interleaving the Projects. The contract (§6/§6.2) requires Project
+	// as the primary key, with textual ranking as the intra-Project tie-breaker.
+	if result := runITO(t, aaaRepo, itoHome, "new", "--json", "--title", "Dense", "--body", "needle needle needle needle"); result.exitCode != 0 {
+		t.Fatalf("AAA-1 new failed: %s", result.stderr)
+	}
+	if result := runITO(t, aaaRepo, itoHome, "new", "--json", "--title", "Sparse", "--body", "needle"); result.exitCode != 0 {
+		t.Fatalf("AAA-2 new failed: %s", result.stderr)
+	}
+	if result := runITO(t, zzzRepo, itoHome, "new", "--json", "--title", "Medium", "--body", "needle needle"); result.exitCode != 0 {
+		t.Fatalf("ZZZ-1 new failed: %s", result.stderr)
+	}
+
+	allJSON := runITO(t, t.TempDir(), itoHome, "list", "--json", "--all-projects", "--search", "needle")
+	if allJSON.exitCode != 0 {
+		t.Fatalf("ito list --all-projects --search failed with exit %d\nstderr: %s", allJSON.exitCode, allJSON.stderr)
+	}
+	want := []string{"AAA-1", "AAA-2", "ZZZ-1"}
+	if got := issueIDs(decodeIssueList(t, allJSON.stdout)); !stringSlicesEqual(got, want) {
+		t.Fatalf("expected project-primary ordering %v, got %v\nstdout: %s", want, got, allJSON.stdout)
+	}
+
+	human := runITO(t, t.TempDir(), itoHome, "list", "--all-projects", "--search", "needle")
+	if human.exitCode != 0 {
+		t.Fatalf("ito list --all-projects --search human failed: %s", human.stderr)
+	}
+	if n := strings.Count(human.stdout, "aaa-proj:"); n != 1 {
+		t.Fatalf("each Project must group under a single header; aaa-proj appeared %d times\nstdout: %s", n, human.stdout)
+	}
+}
+
+func TestDetachedProjectSerializesNullRootPath(t *testing.T) {
+	parent := t.TempDir()
+	originalRepo := filepath.Join(parent, "detach-app")
+	if err := os.MkdirAll(originalRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, originalRepo, "git", "init", "-q")
+	itoHome := t.TempDir()
+	if result := runITO(t, originalRepo, itoHome, "init", "--json", "--name", "detach-app", "--prefix", "DET"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+
+	movedRepo := filepath.Join(t.TempDir(), "detach-app")
+	if err := os.Rename(originalRepo, movedRepo); err != nil {
+		t.Fatal(err)
+	}
+	// Detects the moved repo: must diagnose (exit 4) and clear the stale pointer.
+	if result := runITO(t, movedRepo, itoHome, "init", "--json"); result.exitCode != 4 {
+		t.Fatalf("expected moved-repo diagnostic exit 4, got %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	var rootPath sql.NullString
+	if err := db.QueryRow(`SELECT root_path FROM projects WHERE name = 'detach-app'`).Scan(&rootPath); err != nil {
+		t.Fatal(err)
+	}
+	if rootPath.Valid {
+		t.Fatalf("detached Project must persist root_path NULL, got %q", rootPath.String)
+	}
+
+	// The Project object serializes root_path as null (not "").
+	renamed := runITO(t, t.TempDir(), itoHome, "rename", "--json", "--project", "detach-app", "detached-app")
+	if renamed.exitCode != 0 {
+		t.Fatalf("ito rename failed with exit %d\nstderr: %s", renamed.exitCode, renamed.stderr)
+	}
+	var project struct {
+		RootPath *string `json:"root_path"`
+	}
+	if err := json.Unmarshal([]byte(renamed.stdout), &project); err != nil {
+		t.Fatalf("stdout is not a project object: %v\nstdout: %s", err, renamed.stdout)
+	}
+	if project.RootPath != nil {
+		t.Fatalf("detached Project must serialize root_path null, got %q", *project.RootPath)
+	}
+	if !strings.Contains(renamed.stdout, `"root_path":null`) {
+		t.Fatalf("expected literal null root_path in JSON, got %s", renamed.stdout)
+	}
+}
+
+func TestInitNormalizesUnicodeNameAndPrefix(t *testing.T) {
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "café-app")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	result := runITO(t, repo, itoHome, "init", "--json")
+	if result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(result.stdout), &project); err != nil {
+		t.Fatalf("stdout is not a project object: %v\nstdout: %s", err, result.stdout)
+	}
+	if project.Name != "cafe-app" {
+		t.Fatalf("expected transliterated name %q, got %q", "cafe-app", project.Name)
+	}
+	if project.Prefix != "CAFEAP" {
+		t.Fatalf("expected transliterated prefix %q, got %q", "CAFEAP", project.Prefix)
+	}
+}
+
+func TestLinkArraysSortNumericallyForMultiDigitIDs(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "link-order", "--prefix", "LNK"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	for i := 0; i < 12; i++ {
+		if result := runITO(t, repo, itoHome, "new", "--json", "--title", fmt.Sprintf("Issue %d", i+1)); result.exitCode != 0 {
+			t.Fatalf("new %d failed: %s", i+1, result.stderr)
+		}
+	}
+	// Applies the links out of order; multi-digit IDs require numeric ordering.
+	for _, target := range []string{"LNK-10", "LNK-2", "LNK-11", "LNK-3"} {
+		if result := runITO(t, repo, itoHome, "edit", "--json", "LNK-1", "--block", target); result.exitCode != 0 {
+			t.Fatalf("block %s failed: %s", target, result.stderr)
+		}
+	}
+	for _, target := range []string{"LNK-12", "LNK-4", "LNK-9"} {
+		if result := runITO(t, repo, itoHome, "edit", "--json", "LNK-1", "--relate", target); result.exitCode != 0 {
+			t.Fatalf("relate %s failed: %s", target, result.stderr)
+		}
+	}
+
+	show := runITO(t, repo, itoHome, "show", "--json", "LNK-1")
+	if show.exitCode != 0 {
+		t.Fatalf("ito show failed: %s", show.stderr)
+	}
+	var shown issueJSON
+	if err := json.Unmarshal([]byte(show.stdout), &shown); err != nil {
+		t.Fatalf("stdout is not an issue object: %v\nstdout: %s", err, show.stdout)
+	}
+	if want := []string{"LNK-2", "LNK-3", "LNK-10", "LNK-11"}; !stringSlicesEqual(shown.BlockedBy, want) {
+		t.Fatalf("blocked_by must sort numerically; want %v got %v", want, shown.BlockedBy)
+	}
+	if want := []string{"LNK-4", "LNK-9", "LNK-12"}; !stringSlicesEqual(shown.RelatesTo, want) {
+		t.Fatalf("relates_to must sort numerically; want %v got %v", want, shown.RelatesTo)
+	}
+
+	list := runITO(t, repo, itoHome, "list", "--json")
+	if list.exitCode != 0 {
+		t.Fatalf("ito list failed: %s", list.stderr)
+	}
+	for _, item := range decodeIssueList(t, list.stdout) {
+		if item.ID != "LNK-1" {
+			continue
+		}
+		if want := []string{"LNK-2", "LNK-3", "LNK-10", "LNK-11"}; !stringSlicesEqual(item.BlockedBy, want) {
+			t.Fatalf("list blocked_by must sort numerically; want %v got %v", want, item.BlockedBy)
+		}
+	}
+}
+
+func TestWritingCommandsLeaveRepoUntouched(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "footprint", "--prefix", "FOO"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	before := dirEntries(t, repo)
+
+	steps := [][]string{
+		{"new", "--json", "--title", "First", "--label", "bug"},
+		{"new", "--json", "--title", "Second", "--status", "todo"},
+		{"edit", "--json", "FOO-1", "--title", "First edited", "--add-label", "infra", "--block", "FOO-2"},
+		{"move", "--json", "FOO-2", "in_progress"},
+		{"rm", "--json", "FOO-2"},
+		{"new", "--json", "--title", "Throwaway", "--status", "done"},
+		{"prune", "--json", "--status", "done", "--yes"},
+	}
+	for _, args := range steps {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstderr: %s", args, result.exitCode, result.stderr)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(repo, ".ito")); !os.IsNotExist(err) {
+		t.Fatalf("mutations must not create .ito inside repo, stat err=%v", err)
+	}
+	if after := dirEntries(t, repo); !stringSlicesEqual(before, after) {
+		t.Fatalf("writing commands must not touch repo entries; before=%v after=%v", before, after)
+	}
+}
+
+func TestInitOutsideGitLeavesDirUntouched(t *testing.T) {
+	dir := t.TempDir()
+	itoHome := t.TempDir()
+	before := dirEntries(t, dir)
+	if result := runITO(t, dir, itoHome, "init", "--json", "--name", "no-git", "--prefix", "NOG"); result.exitCode != 0 {
+		t.Fatalf("ito init outside git failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	if after := dirEntries(t, dir); !stringSlicesEqual(before, after) {
+		t.Fatalf("init outside git must not write to the dir; before=%v after=%v", before, after)
+	}
+}
+
+func TestNewAndListResolveSharedProjectFromWorktree(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "add", "README.md")
+	run(t, repo, "git", "-c", "user.name=Ito Test", "-c", "user.email=ito@example.test", "commit", "-q", "-m", "init")
+	worktree := filepath.Join(t.TempDir(), "linked")
+	run(t, repo, "git", "worktree", "add", "-q", worktree)
+	t.Cleanup(func() {
+		_ = exec.Command("git", "-C", repo, "worktree", "remove", "--force", worktree).Run()
+	})
+
+	itoHome := t.TempDir()
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "shared-wt", "--prefix", "WKT"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	// An Issue created from the linked worktree lands in the shared git root's Project.
+	created := runITO(t, worktree, itoHome, "new", "--json", "--title", "From worktree")
+	if created.exitCode != 0 {
+		t.Fatalf("ito new from worktree failed with exit %d\nstderr: %s", created.exitCode, created.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(created.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue object: %v\nstdout: %s", err, created.stdout)
+	}
+	if issue.ID != "WKT-1" || issue.Project != "shared-wt" {
+		t.Fatalf("worktree issue must belong to the shared Project, got %#v", issue)
+	}
+	// And it is visible from both the worktree and the main root.
+	for _, dir := range []string{worktree, repo} {
+		listed := runITO(t, dir, itoHome, "list", "--json")
+		if listed.exitCode != 0 {
+			t.Fatalf("ito list from %s failed: %s", dir, listed.stderr)
+		}
+		if got := issueIDs(decodeIssueList(t, listed.stdout)); !stringSlicesEqual(got, []string{"WKT-1"}) {
+			t.Fatalf("worktree-shared issue must list from %s, got %v", dir, got)
+		}
+	}
+}
+
 type commandResult struct {
 	stdout   string
 	stderr   string
