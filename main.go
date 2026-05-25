@@ -16,10 +16,10 @@ import (
 	"time"
 	"unicode"
 
-	_ "modernc.org/sqlite"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -212,8 +212,12 @@ func main() {
 
 func runCLI(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: ito <command> [flags]")
+		printRootHelp(os.Stderr)
 		return exitBadUsage
+	}
+	if isHelpArg(args[0]) {
+		printRootHelp(os.Stdout)
+		return 0
 	}
 
 	switch args[0] {
@@ -242,6 +246,10 @@ func runCLI(args []string) int {
 }
 
 func runInit(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("init")
+		return 0
+	}
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -342,6 +350,10 @@ func runInit(args []string) int {
 }
 
 func runRename(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("rename")
+		return 0
+	}
 	fs := flag.NewFlagSet("rename", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -389,6 +401,10 @@ func runRename(args []string) int {
 }
 
 func runNew(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("new")
+		return 0
+	}
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -458,6 +474,10 @@ func runNew(args []string) int {
 }
 
 func runShow(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("show")
+		return 0
+	}
 	fs := flag.NewFlagSet("show", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -520,6 +540,10 @@ func runShow(args []string) int {
 }
 
 func runMove(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("move")
+		return 0
+	}
 	fs := flag.NewFlagSet("move", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -601,6 +625,10 @@ func runMove(args []string) int {
 }
 
 func runEdit(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("edit")
+		return 0
+	}
 	fs := flag.NewFlagSet("edit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -746,6 +774,10 @@ func runEdit(args []string) int {
 }
 
 func runRm(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("rm")
+		return 0
+	}
 	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -818,6 +850,10 @@ func runRm(args []string) int {
 }
 
 func runPrune(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("prune")
+		return 0
+	}
 	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -883,6 +919,10 @@ func runPrune(args []string) int {
 }
 
 func runList(args []string) int {
+	if wantsHelp(args) {
+		printCommandHelp("list")
+		return 0
+	}
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
@@ -1030,6 +1070,138 @@ func wantsJSON(args []string) bool {
 		}
 	}
 	return false
+}
+
+func wantsHelp(args []string) bool {
+	for _, arg := range args {
+		if isHelpArg(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHelpArg(arg string) bool {
+	return arg == "--help" || arg == "-help" || arg == "-h"
+}
+
+func printRootHelp(w io.Writer) {
+	fmt.Fprintln(w, `usage: ito <command> [flags]
+
+Local issue tracker with a central SQLite store at ~/.ito/ito.db.
+
+Commands:
+  init     Registers or re-points the Project for the current directory.
+  new      Creates an Issue in the current Project.
+  list     Lists Issues.
+  show     Shows an Issue by full ID.
+  move     Moves an Issue to another status.
+  edit     Edits an Issue's fields, Labels and Links.
+  rm       Deletes an Issue.
+  prune    Deletes Issues in bulk with an explicit filter.
+  rename   Renames the current Project.
+
+Use "ito <command> --help" to see the command's flags.`)
+}
+
+func printCommandHelp(command string) {
+	switch command {
+	case "init":
+		fmt.Println(`usage: ito init [--name <name>] [--prefix <PREFIX>] [--reattach <name>] [--json]
+
+Registers the current git root, or the cwd outside git, in the central store. Does not write to the repo.
+
+Flags:
+  --name <name>        Initial Project name. Format: [a-z0-9][a-z0-9-]{1,62}.
+  --prefix <PREFIX>    Manual Prefix. Format: [A-Z][A-Z0-9]{1,7}.
+  --reattach <name>    Re-points an existing Project to the current root.
+  --json               Prints JSON.`)
+	case "rename":
+		fmt.Println(`usage: ito rename [--project <name>] [--json] <name>
+
+Renames the current Project or an explicit Project.
+
+Flags:
+  --project <name>     Target Project when the cwd should not resolve implicitly.
+  --json               Prints JSON.`)
+	case "new":
+		fmt.Println(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--label <label>] [--body <text>|-] [--project <name>] [--json]
+
+Creates an Issue and prints the ID in human mode.
+
+Flags:
+  --title <title>          Title is required.
+  --status <status>        backlog, todo, in_progress, in_review or done. Default: backlog.
+  --priority <priority>    low, medium, high or urgent. Default: low.
+  --label <label>          Repeatable initial Label: feature, bug, docs, tests, refactor, chore, research or infra.
+  --body <text>|-          Markdown body. Use "-" to read stdin.
+  --project <name>         Explicit Project.
+  --json                   Prints JSON.`)
+	case "show":
+		fmt.Println(`usage: ito show [--project <name>] [--json] <PREFIX>-<n>
+
+Shows an Issue by full ID.
+
+Flags:
+  --project <name>     Validates that the Issue belongs to the given Project.
+  --json               Prints JSON.`)
+	case "list":
+		fmt.Println(`usage: ito list [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--project <name>|--all-projects] [--json]
+
+Lists Issues in the current Project. Issues in done are hidden by default, except with --status done.
+
+Flags:
+  --status <status>        Filter by backlog, todo, in_progress, in_review or done.
+  --priority <priority>    Filter by low, medium, high or urgent.
+  --label <label>          Filter by Label. Repeatable.
+  --search <text>          Full-text search in title and body.
+  --project <name>         Explicit Project.
+  --all-projects           Lists all Projects.
+  --json                   Prints JSON.`)
+	case "move":
+		fmt.Println(`usage: ito move [--project <name>] [--json] <PREFIX>-<n> <status>
+
+Moves an Issue to any valid status.
+
+Flags:
+  --project <name>     Validates that the Issue belongs to the given Project.
+  --json               Prints JSON.`)
+	case "edit":
+		fmt.Println(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--project <name>] [--json]
+
+Edits an Issue. Requires at least one change.
+
+Flags:
+  --title <title>          New title.
+  --priority <priority>    low, medium, high or urgent.
+  --body <text>|-          New markdown body. Use "-" to read stdin.
+  --add-label <label>      Adds a Label. Repeatable.
+  --remove-label <label>   Removes a Label. Repeatable.
+  --block <ID>             Adds a blocked_by link.
+  --unblock <ID>           Removes a blocked_by link.
+  --relate <ID>            Adds a relates_to link.
+  --unrelate <ID>          Removes a relates_to link.
+  --project <name>         Validates that the Issue belongs to the given Project.
+  --json                   Prints JSON.`)
+	case "rm":
+		fmt.Println(`usage: ito rm [--project <name>] [--json] <PREFIX>-<n>
+
+Deletes an Issue and its Links/Labels.
+
+Flags:
+  --project <name>     Validates that the Issue belongs to the given Project.
+  --json               Prints JSON.`)
+	case "prune":
+		fmt.Println(`usage: ito prune --status <status> --yes [--project <name>] [--json]
+
+Deletes Issues in bulk. Requires an explicit filter and flag confirmation.
+
+Flags:
+  --status <status>    Filter by backlog, todo, in_progress, in_review or done.
+  --yes                Confirms the destructive deletion.
+  --project <name>     Explicit Project.
+  --json               Prints JSON.`)
+	}
 }
 
 func fail(jsonMode bool, code int, message string, hint string) int {

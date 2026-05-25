@@ -37,6 +37,60 @@ type issueJSON struct {
 	Updated   string   `json:"updated"`
 }
 
+func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
+	repo := t.TempDir()
+	itoHome := t.TempDir()
+
+	tests := []struct {
+		name     string
+		args     []string
+		contains []string
+	}{
+		{
+			name:     "root long help",
+			args:     []string{"--help"},
+			contains: []string{"usage: ito <command> [flags]", "Commands:", "init", "new", "list"},
+		},
+		{
+			name:     "root short help",
+			args:     []string{"-h"},
+			contains: []string{"usage: ito <command> [flags]", "Commands:"},
+		},
+		{
+			name:     "init help",
+			args:     []string{"init", "--help"},
+			contains: []string{"usage: ito init", "--name", "--prefix", "--reattach", "--json"},
+		},
+		{
+			name:     "new help",
+			args:     []string{"new", "--help"},
+			contains: []string{"usage: ito new", "--title", "--status", "--priority", "--label", "--body"},
+		},
+		{
+			name:     "edit help",
+			args:     []string{"edit", "--help"},
+			contains: []string{"usage: ito edit", "--title", "--priority", "--add-label", "--block", "--relate"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, repo, itoHome, tt.args...)
+			if result.exitCode != 0 {
+				t.Fatalf("expected help to exit 0, got %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+			}
+			if result.stderr != "" {
+				t.Fatalf("expected empty stderr for help, got %q", result.stderr)
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(result.stdout, want) {
+					t.Fatalf("expected help output to contain %q\nstdout: %s", want, result.stdout)
+				}
+			}
+		})
+	}
+}
+
 func TestNewCreatesIssueWithDefaults(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")
