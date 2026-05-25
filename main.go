@@ -72,6 +72,36 @@ func (f labelEditFlag) Set(value string) error {
 	return nil
 }
 
+type linkEditOp struct {
+	Kind   string
+	Action string
+	Target string
+}
+
+type linkEditFlag struct {
+	kind   string
+	action string
+	ops    *[]linkEditOp
+}
+
+func (f linkEditFlag) String() string {
+	if f.ops == nil {
+		return ""
+	}
+	targets := make([]string, 0, len(*f.ops))
+	for _, op := range *f.ops {
+		if op.Kind == f.kind && op.Action == f.action {
+			targets = append(targets, op.Target)
+		}
+	}
+	return strings.Join(targets, ",")
+}
+
+func (f linkEditFlag) Set(value string) error {
+	*f.ops = append(*f.ops, linkEditOp{Kind: f.kind, Action: f.action, Target: value})
+	return nil
+}
+
 type project struct {
 	ID       int64  `json:"id"`
 	Name     string `json:"name"`
@@ -128,6 +158,17 @@ type editIssueOptions struct {
 	BodySet     bool
 	Body        string
 	LabelOps    []labelEditOp
+	LinkOps     []linkEditOp
+}
+
+type commandFailure struct {
+	code    int
+	message string
+	hint    string
+}
+
+func (e commandFailure) Error() string {
+	return e.message
 }
 
 func main() {
@@ -529,6 +570,7 @@ func runEdit(args []string) int {
 	var priority string
 	var body string
 	var labelOps []labelEditOp
+	var linkOps []linkEditOp
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
 	fs.StringVar(&title, "title", "", "")
@@ -536,12 +578,16 @@ func runEdit(args []string) int {
 	fs.StringVar(&body, "body", "", "")
 	fs.Var(labelEditFlag{kind: "add", ops: &labelOps}, "add-label", "")
 	fs.Var(labelEditFlag{kind: "remove", ops: &labelOps}, "remove-label", "")
+	fs.Var(linkEditFlag{kind: "blocked_by", action: "add", ops: &linkOps}, "block", "")
+	fs.Var(linkEditFlag{kind: "blocked_by", action: "remove", ops: &linkOps}, "unblock", "")
+	fs.Var(linkEditFlag{kind: "relates_to", action: "add", ops: &linkOps}, "relate", "")
+	fs.Var(linkEditFlag{kind: "relates_to", action: "remove", ops: &linkOps}, "unrelate", "")
 	parseArgs, issueID, positionalCount := splitEditArgs(args)
 	if err := fs.Parse(parseArgs); err != nil {
 		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito edit --help' to see the accepted flags.")
 	}
 	if fs.NArg() != 0 || positionalCount != 1 {
-		return fail(jsonMode, exitBadUsage, "ito edit takes exactly one full ID.", "use: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-].")
+		return fail(jsonMode, exitBadUsage, "ito edit takes exactly one full ID.", "use: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--block <ID>].")
 	}
 	matches := issueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
@@ -552,7 +598,7 @@ func runEdit(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 	}
 
-	options := editIssueOptions{LabelOps: labelOps}
+	options := editIssueOptions{LabelOps: labelOps, LinkOps: linkOps}
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "title":
@@ -563,8 +609,8 @@ func runEdit(args []string) int {
 			options.BodySet = true
 		}
 	})
-	if !options.TitleSet && !options.PrioritySet && !options.BodySet && len(options.LabelOps) == 0 {
-		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --add-label or --remove-label.")
+	if !options.TitleSet && !options.PrioritySet && !options.BodySet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
+		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --add-label, --block or --relate.")
 	}
 	if options.TitleSet {
 		if strings.TrimSpace(title) == "" {
@@ -591,6 +637,14 @@ func runEdit(args []string) int {
 	for _, op := range options.LabelOps {
 		if !isValidValue(op.Label, validLabels) {
 			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", op.Label), "use feature, bug, docs, tests, refactor, chore, research or infra.")
+		}
+	}
+	for _, op := range options.LinkOps {
+		if !issueIDPattern.MatchString(op.Target) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", op.Target), "use the full format <PREFIX>-<n>, for example AUTH-12.")
+		}
+		if op.Target == issueID {
+			return fail(jsonMode, exitBadUsage, "Links to the Issue itself are not allowed.", "specify an Issue different from the source.")
 		}
 	}
 
@@ -627,6 +681,10 @@ func runEdit(args []string) int {
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+		}
+		var commandErr commandFailure
+		if errors.As(err, &commandErr) {
+			return fail(jsonMode, commandErr.code, commandErr.message, commandErr.hint)
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not edit Issue %q: %v", issueID, err), "try again or inspect the central store.")
 	}
@@ -935,6 +993,10 @@ func splitEditArgs(args []string) ([]string, string, int) {
 		"body":         {},
 		"add-label":    {},
 		"remove-label": {},
+		"block":        {},
+		"unblock":      {},
+		"relate":       {},
+		"unrelate":     {},
 	}
 	parseArgs := make([]string, 0, len(args))
 	issueID := ""
@@ -1426,6 +1488,51 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 			delete(nextLabels, op.Label)
 		}
 	}
+	currentLinks, err := linkSetTx(tx, p.ID, id)
+	if err != nil {
+		return false, err
+	}
+	nextLinks := make(map[string]struct{}, len(currentLinks))
+	for linkKey := range currentLinks {
+		nextLinks[linkKey] = struct{}{}
+	}
+	for _, op := range options.LinkOps {
+		targetProject, found, err := findProjectByIssueIDTx(tx, op.Target)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, commandFailure{
+				code:    exitNotFound,
+				message: fmt.Sprintf("Issue %q not found.", op.Target),
+				hint:    "verifique o ID completo da Issue vinculada.",
+			}
+		}
+		if targetProject.ID != p.ID {
+			return false, commandFailure{
+				code:    exitBadUsage,
+				message: fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", op.Target, targetProject.Name, p.Name),
+				hint:    "In v1, links can only point to Issues in the same Project.",
+			}
+		}
+		if exists, err := issueExistsTx(tx, p.ID, op.Target); err != nil {
+			return false, err
+		} else if !exists {
+			return false, commandFailure{
+				code:    exitNotFound,
+				message: fmt.Sprintf("Issue %q not found.", op.Target),
+				hint:    "verifique o ID completo da Issue vinculada.",
+			}
+		}
+		sourceID, targetID := normalizedLinkIDs(id, op.Target, op.Kind)
+		linkKey := issueLinkKey(sourceID, targetID, op.Kind)
+		switch op.Action {
+		case "add":
+			nextLinks[linkKey] = struct{}{}
+		case "remove":
+			delete(nextLinks, linkKey)
+		}
+	}
 
 	nextTitle := currentTitle
 	if options.TitleSet {
@@ -1442,7 +1549,8 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 
 	scalarChanged := nextTitle != currentTitle || nextPriority != currentPriority || nextBody != currentBody
 	labelsChanged := !labelSetMatches(currentLabels, nextLabels)
-	changed := scalarChanged || labelsChanged
+	linksChanged := !stringSetMatches(currentLinks, nextLinks)
+	changed := scalarChanged || labelsChanged || linksChanged
 	if !changed {
 		if err := tx.Commit(); err != nil {
 			return false, err
@@ -1483,6 +1591,17 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextBody, now, p.ID, 
 			}
 		}
 	}
+	if linksChanged {
+		if _, err := tx.Exec(`DELETE FROM issue_links WHERE project_id = ? AND (source_id = ? OR target_id = ?)`, p.ID, id, id); err != nil {
+			return false, err
+		}
+		for linkKey := range nextLinks {
+			sourceID, targetID, kind := parseIssueLinkKey(linkKey)
+			if _, err := tx.Exec(`INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, ?, ?, ?)`, p.ID, sourceID, targetID, kind); err != nil {
+				return false, err
+			}
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
@@ -1514,7 +1633,8 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 	blockedBy, err := stringColumn(db, `
 SELECT target_id
 FROM issue_links
-WHERE project_id = ? AND source_id = ? AND kind = 'blocked_by'
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.project_id = ? AND source_id = ? AND kind = 'blocked_by'
 ORDER BY target_id`, p.ID, id)
 	if err != nil {
 		return issue{}, false, err
@@ -1522,7 +1642,9 @@ ORDER BY target_id`, p.ID, id)
 	relatesTo, err := stringColumn(db, `
 SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END
 FROM issue_links
-WHERE project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
+JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
 ORDER BY 1`, id, p.ID, id, id)
 	if err != nil {
 		return issue{}, false, err
@@ -1627,7 +1749,8 @@ issues.id ASC`
 		blockedBy, err := stringColumn(db, `
 SELECT target_id
 FROM issue_links
-WHERE project_id = ? AND source_id = ? AND kind = 'blocked_by'
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.project_id = ? AND source_id = ? AND kind = 'blocked_by'
 ORDER BY target_id`, rowIssue.ProjectID, rowIssue.ID)
 		if err != nil {
 			return nil, err
@@ -1635,7 +1758,9 @@ ORDER BY target_id`, rowIssue.ProjectID, rowIssue.ID)
 		relatesTo, err := stringColumn(db, `
 SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END
 FROM issue_links
-WHERE project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
+JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
 ORDER BY 1`, rowIssue.ID, rowIssue.ProjectID, rowIssue.ID, rowIssue.ID)
 		if err != nil {
 			return nil, err
@@ -1690,12 +1815,106 @@ func stringColumnTx(tx *sql.Tx, query string, args ...any) ([]string, error) {
 	return values, nil
 }
 
+func linkSetTx(tx *sql.Tx, projectID int64, issueID string) (map[string]struct{}, error) {
+	rows, err := tx.Query(`
+SELECT source_id, target_id, kind
+FROM issue_links
+JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.project_id = ? AND (source_id = ? OR target_id = ?)`, projectID, issueID, issueID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	links := map[string]struct{}{}
+	for rows.Next() {
+		var sourceID, targetID, kind string
+		if err := rows.Scan(&sourceID, &targetID, &kind); err != nil {
+			return nil, err
+		}
+		links[issueLinkKey(sourceID, targetID, kind)] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return links, nil
+}
+
+func findProjectByIssueIDTx(tx *sql.Tx, issueID string) (project, bool, error) {
+	matches := issueIDPattern.FindStringSubmatch(issueID)
+	if matches == nil {
+		return project{}, false, nil
+	}
+	row := tx.QueryRow(`SELECT id, name, prefix, COALESCE(root_path, '') FROM projects WHERE prefix = ?`, matches[1])
+	var p project
+	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return project{}, false, nil
+		}
+		return project{}, false, err
+	}
+	return p, true, nil
+}
+
+func issueExistsTx(tx *sql.Tx, projectID int64, issueID string) (bool, error) {
+	var value int
+	err := tx.QueryRow(`SELECT 1 FROM issues WHERE project_id = ? AND id = ?`, projectID, issueID).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func normalizedLinkIDs(sourceID, targetID, kind string) (string, string) {
+	if kind == "relates_to" && issueIDLess(targetID, sourceID) {
+		return targetID, sourceID
+	}
+	return sourceID, targetID
+}
+
+func issueIDLess(left, right string) bool {
+	leftMatches := issueIDPattern.FindStringSubmatch(left)
+	rightMatches := issueIDPattern.FindStringSubmatch(right)
+	if leftMatches == nil || rightMatches == nil || leftMatches[1] != rightMatches[1] {
+		return left < right
+	}
+	var leftNumber, rightNumber int
+	fmt.Sscanf(leftMatches[2], "%d", &leftNumber)
+	fmt.Sscanf(rightMatches[2], "%d", &rightNumber)
+	return leftNumber < rightNumber
+}
+
+func issueLinkKey(sourceID, targetID, kind string) string {
+	return sourceID + "\x00" + targetID + "\x00" + kind
+}
+
+func parseIssueLinkKey(key string) (string, string, string) {
+	parts := strings.SplitN(key, "\x00", 3)
+	return parts[0], parts[1], parts[2]
+}
+
 func labelSetMatches(labels []string, set map[string]struct{}) bool {
 	if len(labels) != len(set) {
 		return false
 	}
 	for _, label := range labels {
 		if _, ok := set[label]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSetMatches(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if _, ok := right[value]; !ok {
 			return false
 		}
 	}

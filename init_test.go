@@ -1025,6 +1025,229 @@ func TestEditLabelsAndIdempotentOperationsKeepUpdatedWhenFinalStateUnchanged(t *
 	}
 }
 
+func TestEditLinksDirectionalAndSymmetricNormalization(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "edit-links", "--prefix", "EDK")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"Source", "Blocker", "Related"} {
+		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title); result.exitCode != 0 {
+			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "edit", "--json", "EDK-1", "--block", "EDK-2", "--relate", "EDK-3")
+	if result.exitCode != 0 {
+		t.Fatalf("ito edit links failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if !stringSlicesEqual(issue.BlockedBy, []string{"EDK-2"}) || !stringSlicesEqual(issue.RelatesTo, []string{"EDK-3"}) {
+		t.Fatalf("expected directional and symmetric links on source, got %#v", issue)
+	}
+	blocker := runITO(t, t.TempDir(), itoHome, "show", "--json", "EDK-2")
+	if blocker.exitCode != 0 {
+		t.Fatalf("ito show blocker failed with exit %d\nstdout: %s\nstderr: %s", blocker.exitCode, blocker.stdout, blocker.stderr)
+	}
+	if err := json.Unmarshal([]byte(blocker.stdout), &issue); err != nil {
+		t.Fatal(err)
+	}
+	if len(issue.BlockedBy) != 0 {
+		t.Fatalf("blocked_by must be directional, got blocker issue %#v", issue)
+	}
+	related := runITO(t, t.TempDir(), itoHome, "show", "--json", "EDK-3")
+	if related.exitCode != 0 {
+		t.Fatalf("ito show related failed with exit %d\nstdout: %s\nstderr: %s", related.exitCode, related.stdout, related.stderr)
+	}
+	if err := json.Unmarshal([]byte(related.stdout), &issue); err != nil {
+		t.Fatal(err)
+	}
+	if !stringSlicesEqual(issue.RelatesTo, []string{"EDK-1"}) {
+		t.Fatalf("relates_to must display symmetrically, got %#v", issue)
+	}
+
+	duplicate := runITO(t, t.TempDir(), itoHome, "edit", "--json", "EDK-3", "--relate", "EDK-1")
+	if duplicate.exitCode != 0 {
+		t.Fatalf("reverse relate must be idempotent, got exit %d\nstdout: %s\nstderr: %s", duplicate.exitCode, duplicate.stdout, duplicate.stderr)
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM issue_links WHERE project_id = ? AND kind = 'relates_to'`, project.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("expected one normalized relates_to row, got %d", count)
+	}
+	var sourceID, targetID string
+	if err := db.QueryRow(`SELECT source_id, target_id FROM issue_links WHERE project_id = ? AND kind = 'relates_to'`, project.ID).Scan(&sourceID, &targetID); err != nil {
+		t.Fatal(err)
+	}
+	if sourceID != "EDK-1" || targetID != "EDK-3" {
+		t.Fatalf("expected normalized pair EDK-1 -> EDK-3, got %s -> %s", sourceID, targetID)
+	}
+}
+
+func TestEditLinksIdempotencyAndTimestampBehavior(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "link-timestamps", "--prefix", "LTS")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"Source", "Blocker", "Related"} {
+		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title); result.exitCode != 0 {
+			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE issues SET created = '2026-05-24T10:00:00Z', updated = '2026-05-24T10:00:00Z' WHERE project_id = ? AND id = 'LTS-1'`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := runITO(t, t.TempDir(), itoHome, "edit", "--json", "LTS-1", "--block", "LTS-2")
+	if changed.exitCode != 0 {
+		t.Fatalf("ito edit link change failed with exit %d\nstdout: %s\nstderr: %s", changed.exitCode, changed.stdout, changed.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(changed.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, changed.stdout)
+	}
+	if !stringSlicesEqual(issue.BlockedBy, []string{"LTS-2"}) || issue.Updated == "2026-05-24T10:00:00Z" || issue.Created != "2026-05-24T10:00:00Z" {
+		t.Fatalf("expected changed link and updated timestamp, got %#v", issue)
+	}
+	updatedAfterChange := issue.Updated
+
+	noChange := runITO(t, t.TempDir(), itoHome, "edit", "--json", "LTS-1", "--block", "LTS-2", "--relate", "LTS-3", "--unrelate", "LTS-3")
+	if noChange.exitCode != 0 {
+		t.Fatalf("idempotent link edit failed with exit %d\nstdout: %s\nstderr: %s", noChange.exitCode, noChange.stdout, noChange.stderr)
+	}
+	if err := json.Unmarshal([]byte(noChange.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, noChange.stdout)
+	}
+	if !stringSlicesEqual(issue.BlockedBy, []string{"LTS-2"}) || len(issue.RelatesTo) != 0 || issue.Updated != updatedAfterChange {
+		t.Fatalf("idempotent link operations must preserve final state and updated, got %#v", issue)
+	}
+}
+
+func TestEditLinksDeletionIndependentDisplay(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	createdProject := runITO(t, repo, itoHome, "init", "--json", "--name", "deleted-links", "--prefix", "DLK")
+	if createdProject.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", createdProject.exitCode, createdProject.stdout, createdProject.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"Source", "Blocker", "Related"} {
+		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title); result.exitCode != 0 {
+			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, t.TempDir(), itoHome, "edit", "--json", "DLK-1", "--block", "DLK-2", "--relate", "DLK-3"); result.exitCode != 0 {
+		t.Fatalf("ito edit links failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`DELETE FROM issues WHERE project_id = ? AND id IN ('DLK-2', 'DLK-3')`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "show", "--json", "DLK-1")
+	if result.exitCode != 0 {
+		t.Fatalf("ito show after deletion failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatal(err)
+	}
+	if issue.BlockedBy == nil || issue.RelatesTo == nil || len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 {
+		t.Fatalf("deleted linked issues must not leave broken display links, got %#v", issue)
+	}
+}
+
+func TestEditLinksValidationFailures(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "first")
+	secondRepo := filepath.Join(parent, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "first-links", "--prefix", "FLK"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "second-links", "--prefix", "SLK"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, firstRepo, itoHome, "new", "--json", "--title", "Source"); result.exitCode != 0 {
+		t.Fatalf("first ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "new", "--json", "--title", "Other project"); result.exitCode != 0 {
+		t.Fatalf("second ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		code int
+	}{
+		{name: "malformed link target", args: []string{"edit", "--json", "FLK-1", "--block", "FLK"}, code: 2},
+		{name: "self block", args: []string{"edit", "--json", "FLK-1", "--block", "FLK-1"}, code: 2},
+		{name: "self relate", args: []string{"edit", "--json", "FLK-1", "--relate", "FLK-1"}, code: 2},
+		{name: "unknown target issue", args: []string{"edit", "--json", "FLK-1", "--block", "FLK-99"}, code: 3},
+		{name: "unknown target prefix", args: []string{"edit", "--json", "FLK-1", "--relate", "ZZZ-1"}, code: 3},
+		{name: "cross project target", args: []string{"edit", "--json", "FLK-1", "--block", "SLK-1"}, code: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := runITO(t, t.TempDir(), itoHome, tt.args...)
+			if result.exitCode != tt.code {
+				t.Fatalf("expected exit %d, got %d\nstdout: %s\nstderr: %s", tt.code, result.exitCode, result.stdout, result.stderr)
+			}
+			if result.stdout != "" {
+				t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+			}
+			var errObject struct {
+				Error string `json:"error"`
+				Code  int    `json:"code"`
+				Hint  string `json:"hint"`
+			}
+			if err := json.Unmarshal([]byte(result.stderr), &errObject); err != nil {
+				t.Fatalf("stderr is not a JSON error object: %v\nstderr: %s", err, result.stderr)
+			}
+			if errObject.Code != tt.code || errObject.Error == "" || errObject.Hint == "" {
+				t.Fatalf("expected actionable error object with code %d, got %#v", tt.code, errObject)
+			}
+		})
+	}
+}
+
 func TestEditRejectsNoChangeInvalidInputsAndProjectMismatch(t *testing.T) {
 	parent := t.TempDir()
 	firstRepo := filepath.Join(parent, "first")
