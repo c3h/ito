@@ -20,12 +20,14 @@ import (
 const (
 	exitGeneric       = 1
 	exitBadUsage      = 2
+	exitNotFound      = 3
 	exitNotRegistered = 4
 )
 
 var (
 	projectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 	prefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
+	issueIDPattern     = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,7})-([1-9][0-9]*)$`)
 	validStatuses      = map[string]struct{}{"backlog": {}, "todo": {}, "in_progress": {}, "in_review": {}, "done": {}}
 	validPriorities    = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "urgent": {}}
 	validLabels        = map[string]struct{}{"feature": {}, "bug": {}, "docs": {}, "tests": {}, "refactor": {}, "chore": {}, "research": {}, "infra": {}}
@@ -69,6 +71,27 @@ type issue struct {
 	Updated   string   `json:"updated"`
 }
 
+type issueListItem struct {
+	ID        string   `json:"id"`
+	Project   string   `json:"project"`
+	Title     string   `json:"title"`
+	Status    string   `json:"status"`
+	Priority  string   `json:"priority"`
+	Labels    []string `json:"labels"`
+	BlockedBy []string `json:"blocked_by"`
+	RelatesTo []string `json:"relates_to"`
+	Created   string   `json:"created"`
+	Updated   string   `json:"updated"`
+}
+
+type listOptions struct {
+	ProjectID   int64
+	AllProjects bool
+	Status      string
+	Priority    string
+	Labels      []string
+}
+
 func main() {
 	os.Exit(runCLI(os.Args[1:]))
 }
@@ -86,6 +109,10 @@ func runCLI(args []string) int {
 		return runNew(args[1:])
 	case "rename":
 		return runRename(args[1:])
+	case "show":
+		return runShow(args[1:])
+	case "list":
+		return runList(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		return exitBadUsage
@@ -308,6 +335,138 @@ func runNew(args []string) int {
 	return printIssue(created, jsonMode)
 }
 
+func runShow(args []string) int {
+	fs := flag.NewFlagSet("show", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	if err := fs.Parse(args); err != nil {
+		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito show --help' to see the accepted flags.")
+	}
+	if fs.NArg() != 1 {
+		return fail(jsonMode, exitBadUsage, "ito show takes exactly one full ID.", "use: ito show <PREFIX>-<n>.")
+	}
+	issueID := fs.Arg(0)
+	matches := issueIDPattern.FindStringSubmatch(issueID)
+	if matches == nil {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
+	}
+	prefix := matches[1]
+	if projectName != "" && !projectNamePattern.MatchString(projectName) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	}
+
+	db, err := openStore()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
+	}
+
+	p, found, err := findProjectByPrefix(db, prefix)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
+	}
+	if !found {
+		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+	}
+	if projectName != "" {
+		override, found, err := findProjectByName(db, projectName)
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
+		}
+		if !found {
+			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
+		}
+		if override.ID != p.ID {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
+		}
+	}
+
+	foundIssue, found, err := findIssueByID(db, p, issueID)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read Issue %q: %v", issueID, err), "try again or inspect the central store.")
+	}
+	if !found {
+		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
+	}
+	return printIssueDetail(foundIssue, jsonMode)
+}
+
+func runList(args []string) int {
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	var allProjects bool
+	var status string
+	var priority string
+	var labels stringSliceFlag
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	fs.BoolVar(&allProjects, "all-projects", false, "")
+	fs.StringVar(&status, "status", "", "")
+	fs.StringVar(&priority, "priority", "", "")
+	fs.Var(&labels, "label", "")
+	if err := fs.Parse(args); err != nil {
+		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito list --help' to see the accepted flags.")
+	}
+	if fs.NArg() != 0 {
+		return fail(jsonMode, exitBadUsage, "ito list takes no positional arguments.", "use flags like --status, --label, --priority, --project or --all-projects.")
+	}
+	if projectName != "" && allProjects {
+		return fail(jsonMode, exitBadUsage, "--project and --all-projects cannot be used together.", "choose a scope: an explicit Project or all Projects.")
+	}
+	if status != "" && !isValidValue(status, validStatuses) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use backlog, todo, in_progress, in_review or done.")
+	}
+	if priority != "" && !isValidValue(priority, validPriorities) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use low, medium, high or urgent.")
+	}
+	for _, label := range labels {
+		if !isValidValue(label, validLabels) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", label), "use feature, bug, docs, tests, refactor, chore, research or infra.")
+		}
+	}
+
+	db, err := openStore()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
+	}
+
+	options := listOptions{
+		AllProjects: allProjects,
+		Status:      status,
+		Priority:    priority,
+		Labels:      append([]string{}, labels...),
+	}
+	if !allProjects {
+		rootPath, inGit, err := resolveCurrentRoot()
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
+		}
+		p, code, message, hint := resolveProject(db, rootPath, inGit, projectName)
+		if code != 0 {
+			return fail(jsonMode, code, message, hint)
+		}
+		options.ProjectID = p.ID
+	}
+
+	issues, err := listIssues(db, options)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not list Issues: %v", err), "try again or inspect the central store.")
+	}
+	return printIssueList(issues, jsonMode, allProjects)
+}
+
 func runInitReattach(db *sql.DB, rootPath string, name string, jsonMode bool) int {
 	if !projectNamePattern.MatchString(name) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
@@ -427,6 +586,89 @@ func printIssue(i issue, jsonMode bool) int {
 	}
 	fmt.Println(i.ID)
 	return 0
+}
+
+func printIssueDetail(i issue, jsonMode bool) int {
+	if jsonMode {
+		encoded, err := json.Marshal(i)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not serialize the Issue: %v\n", err)
+			return exitGeneric
+		}
+		fmt.Println(string(encoded))
+		return 0
+	}
+	fmt.Printf("ID: %s\n", i.ID)
+	fmt.Printf("Project: %s\n", i.Project)
+	fmt.Printf("Title: %s\n", i.Title)
+	fmt.Printf("Status: %s\n", i.Status)
+	fmt.Printf("Priority: %s\n", i.Priority)
+	fmt.Printf("Created: %s\n", i.Created)
+	fmt.Printf("Updated: %s\n", i.Updated)
+	fmt.Printf("Labels: %s\n", formatList(i.Labels))
+	fmt.Println("Links:")
+	fmt.Printf("  blocked_by: %s\n", formatList(i.BlockedBy))
+	fmt.Printf("  relates_to: %s\n", formatList(i.RelatesTo))
+	fmt.Println("Body:")
+	fmt.Print(i.Body)
+	if i.Body == "" || !strings.HasSuffix(i.Body, "\n") {
+		fmt.Println()
+	}
+	return 0
+}
+
+func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
+	if jsonMode {
+		items := make([]issueListItem, 0, len(issues))
+		for _, i := range issues {
+			items = append(items, issueListItem{
+				ID:        i.ID,
+				Project:   i.Project,
+				Title:     i.Title,
+				Status:    i.Status,
+				Priority:  i.Priority,
+				Labels:    i.Labels,
+				BlockedBy: i.BlockedBy,
+				RelatesTo: i.RelatesTo,
+				Created:   i.Created,
+				Updated:   i.Updated,
+			})
+		}
+		encoded, err := json.Marshal(items)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "could not serialize the Issue list: %v\n", err)
+			return exitGeneric
+		}
+		fmt.Println(string(encoded))
+		return 0
+	}
+	if len(issues) == 0 {
+		fmt.Println("no Issues found. adjust the filters or create one with 'ito new --title <title>'.")
+		return 0
+	}
+	currentProject := ""
+	for _, i := range issues {
+		if allProjects && i.Project != currentProject {
+			if currentProject != "" {
+				fmt.Println()
+			}
+			currentProject = i.Project
+			fmt.Printf("%s:\n", currentProject)
+		}
+		prefix := ""
+		if allProjects {
+			prefix = "  "
+		}
+		fmt.Printf("%s%s [%s %s] %s\n", prefix, i.ID, i.Status, i.Priority, i.Title)
+	}
+	return 0
+}
+
+func formatList(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	return strings.Join(values, ", ")
 }
 
 func isValidValue(value string, valid map[string]struct{}) bool {
@@ -650,6 +892,18 @@ func findProjectByName(db *sql.DB, name string) (project, bool, error) {
 	return p, true, nil
 }
 
+func findProjectByPrefix(db *sql.DB, prefix string) (project, bool, error) {
+	row := db.QueryRow(`SELECT id, name, prefix, COALESCE(root_path, '') FROM projects WHERE prefix = ?`, prefix)
+	var p project
+	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return project{}, false, nil
+		}
+		return project{}, false, err
+	}
+	return p, true, nil
+}
+
 func findClosestProjectAncestor(db *sql.DB, cwd string) (project, bool, error) {
 	rows, err := db.Query(`SELECT id, name, prefix, root_path FROM projects WHERE root_path IS NOT NULL`)
 	if err != nil {
@@ -817,6 +1071,186 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		return issue{}, err
 	}
 	return created, nil
+}
+
+func findIssueByID(db *sql.DB, p project, id string) (issue, bool, error) {
+	row := db.QueryRow(`
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.body, issues.created, issues.updated
+FROM issues
+JOIN projects ON projects.id = issues.project_id
+WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
+	found := issue{
+		Labels:    []string{},
+		BlockedBy: []string{},
+		RelatesTo: []string{},
+	}
+	if err := row.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Body, &found.Created, &found.Updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return issue{}, false, nil
+		}
+		return issue{}, false, err
+	}
+
+	labels, err := stringColumn(db, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, p.ID, id)
+	if err != nil {
+		return issue{}, false, err
+	}
+	blockedBy, err := stringColumn(db, `
+SELECT target_id
+FROM issue_links
+WHERE project_id = ? AND source_id = ? AND kind = 'blocked_by'
+ORDER BY target_id`, p.ID, id)
+	if err != nil {
+		return issue{}, false, err
+	}
+	relatesTo, err := stringColumn(db, `
+SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END
+FROM issue_links
+WHERE project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
+ORDER BY 1`, id, p.ID, id, id)
+	if err != nil {
+		return issue{}, false, err
+	}
+	found.Labels = labels
+	found.BlockedBy = blockedBy
+	found.RelatesTo = relatesTo
+	return found, true, nil
+}
+
+func listIssues(db *sql.DB, options listOptions) ([]issue, error) {
+	where := []string{}
+	args := []any{}
+	if !options.AllProjects {
+		where = append(where, "issues.project_id = ?")
+		args = append(args, options.ProjectID)
+	}
+	if options.Status != "" {
+		where = append(where, "issues.status = ?")
+		args = append(args, options.Status)
+	} else {
+		where = append(where, "issues.status != 'done'")
+	}
+	if options.Priority != "" {
+		where = append(where, "issues.priority = ?")
+		args = append(args, options.Priority)
+	}
+	for _, label := range options.Labels {
+		where = append(where, `EXISTS (
+SELECT 1 FROM issue_labels
+WHERE issue_labels.project_id = issues.project_id
+  AND issue_labels.issue_id = issues.id
+  AND issue_labels.label = ?
+)`)
+		args = append(args, label)
+	}
+
+	query := `
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.body, issues.created, issues.updated, issues.project_id
+FROM issues
+JOIN projects ON projects.id = issues.project_id`
+	if len(where) > 0 {
+		query += "\nWHERE " + strings.Join(where, " AND ")
+	}
+	query += `
+ORDER BY `
+	if options.AllProjects {
+		query += "projects.name ASC, "
+	}
+	query += `CASE issues.status
+  WHEN 'backlog' THEN 1
+  WHEN 'todo' THEN 2
+  WHEN 'in_progress' THEN 3
+  WHEN 'in_review' THEN 4
+  WHEN 'done' THEN 5
+  ELSE 99
+END,
+CASE issues.priority
+  WHEN 'urgent' THEN 1
+  WHEN 'high' THEN 2
+  WHEN 'medium' THEN 3
+  WHEN 'low' THEN 4
+  ELSE 99
+END,
+issues.updated DESC,
+issues.id ASC`
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type rowIssue struct {
+		issue
+		ProjectID int64
+	}
+	rowIssues := []rowIssue{}
+	for rows.Next() {
+		found := rowIssue{
+			issue: issue{
+				Labels:    []string{},
+				BlockedBy: []string{},
+				RelatesTo: []string{},
+			},
+		}
+		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Body, &found.Created, &found.Updated, &found.ProjectID); err != nil {
+			return nil, err
+		}
+		rowIssues = append(rowIssues, found)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	issues := make([]issue, 0, len(rowIssues))
+	for _, rowIssue := range rowIssues {
+		labels, err := stringColumn(db, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, rowIssue.ProjectID, rowIssue.ID)
+		if err != nil {
+			return nil, err
+		}
+		blockedBy, err := stringColumn(db, `
+SELECT target_id
+FROM issue_links
+WHERE project_id = ? AND source_id = ? AND kind = 'blocked_by'
+ORDER BY target_id`, rowIssue.ProjectID, rowIssue.ID)
+		if err != nil {
+			return nil, err
+		}
+		relatesTo, err := stringColumn(db, `
+SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END
+FROM issue_links
+WHERE project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
+ORDER BY 1`, rowIssue.ID, rowIssue.ProjectID, rowIssue.ID, rowIssue.ID)
+		if err != nil {
+			return nil, err
+		}
+		rowIssue.Labels = labels
+		rowIssue.BlockedBy = blockedBy
+		rowIssue.RelatesTo = relatesTo
+		issues = append(issues, rowIssue.issue)
+	}
+	return issues, nil
+}
+
+func stringColumn(db *sql.DB, query string, args ...any) ([]string, error) {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	values := []string{}
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, error) {
