@@ -2032,7 +2032,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 			return false, commandFailure{
 				code:    exitNotFound,
 				message: fmt.Sprintf("Issue %q not found.", op.Target),
-				hint:    "verifique o ID completo da Issue vinculada.",
+				hint:    "check the full ID of the linked Issue.",
 			}
 		}
 		if targetProject.ID != p.ID {
@@ -2048,7 +2048,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 			return false, commandFailure{
 				code:    exitNotFound,
 				message: fmt.Sprintf("Issue %q not found.", op.Target),
-				hint:    "verifique o ID completo da Issue vinculada.",
+				hint:    "check the full ID of the linked Issue.",
 			}
 		}
 		sourceID, targetID := normalizedLinkIDs(id, op.Target, op.Kind)
@@ -2519,9 +2519,8 @@ func issueIDLess(left, right string) bool {
 	if leftMatches == nil || rightMatches == nil || leftMatches[1] != rightMatches[1] {
 		return left < right
 	}
-	var leftNumber, rightNumber int
-	fmt.Sscanf(leftMatches[2], "%d", &leftNumber)
-	fmt.Sscanf(rightMatches[2], "%d", &rightNumber)
+	leftNumber, _ := strconv.Atoi(leftMatches[2])
+	rightNumber, _ := strconv.Atoi(rightMatches[2])
 	return leftNumber < rightNumber
 }
 
