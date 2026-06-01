@@ -325,6 +325,7 @@ func runInit(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("a project named %q already exists.", name), "choose another one with --name.")
 	}
 
+	var created project
 	prefix := manualPrefix
 	if prefix != "" {
 		if !prefixPattern.MatchString(prefix) {
@@ -335,16 +336,15 @@ func runInit(args []string) int {
 		} else if exists {
 			return fail(jsonMode, exitBadUsage, fmt.Sprintf("a project with prefix %q already exists.", prefix), "choose another one with --prefix.")
 		}
-	} else {
-		prefix, err = nextGeneratedPrefix(db, filepath.Base(rootPath))
+		created, err = insertProject(db, name, prefix, rootPath)
 		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not generate a prefix for the project: %v", err), "choose a manual prefix with --prefix.")
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not register the project: %v", err), "check for name, prefix or root_path collisions.")
 		}
-	}
-
-	created, err := insertProject(db, name, prefix, rootPath)
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not register the project: %v", err), "check for name, prefix or root_path collisions.")
+	} else {
+		created, err = insertProjectWithGeneratedPrefix(db, name, filepath.Base(rootPath), rootPath)
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not register the project: %v", err), "check for name, prefix or root_path collisions.")
+		}
 	}
 	return printProject(created, jsonMode)
 }
@@ -1415,15 +1415,17 @@ func openStore() (*sql.DB, error) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(home, "ito.db"))
+	// _txlock=immediate makes db.Begin() emit BEGIN IMMEDIATE so write
+	// transactions take the write lock up front, avoiding lock-upgrade
+	// deadlocks (read-then-write would otherwise fail with SQLITE_BUSY).
+	// WAL improves read/write concurrency. The _pragma settings apply to
+	// every pooled connection, unlike a single post-open db.Exec.
+	dsn := fmt.Sprintf(
+		"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)",
+		filepath.Join(home, "ito.db"),
+	)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, err
-	}
-	if _, err := db.Exec(`
-PRAGMA busy_timeout = 5000;
-PRAGMA foreign_keys = ON;
-`); err != nil {
-		db.Close()
 		return nil, err
 	}
 	return db, nil
@@ -1552,7 +1554,7 @@ func normalizeProjectName(input string) string {
 	return name
 }
 
-func nextGeneratedPrefix(db *sql.DB, input string) (string, error) {
+func nextGeneratedPrefixTx(tx *sql.Tx, input string) (string, error) {
 	base := generatedPrefixBase(input)
 	for i := 0; i < 1000; i++ {
 		candidate := base
@@ -1564,7 +1566,7 @@ func nextGeneratedPrefix(db *sql.DB, input string) (string, error) {
 			}
 			candidate = stem + suffix
 		}
-		exists, err := valueExists(db, `SELECT 1 FROM projects WHERE prefix = ?`, candidate)
+		exists, err := valueExistsTx(tx, `SELECT 1 FROM projects WHERE prefix = ?`, candidate)
 		if err != nil {
 			return "", err
 		}
@@ -1706,6 +1708,35 @@ func insertProject(db *sql.DB, name, prefix, rootPath string) (project, error) {
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
+		return project{}, err
+	}
+	return project{ID: id, Name: name, Prefix: prefix, RootPath: &rootPath}, nil
+}
+
+// insertProjectWithGeneratedPrefix derives an auto-generated prefix and inserts
+// the project inside a single IMMEDIATE transaction, so two concurrent inits
+// deriving the same base prefix cannot both pass the uniqueness check and race
+// on the INSERT. The returned prefix reflects the deterministic auto-suffix.
+func insertProjectWithGeneratedPrefix(db *sql.DB, name, baseInput, rootPath string) (project, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return project{}, err
+	}
+	defer tx.Rollback()
+
+	prefix, err := nextGeneratedPrefixTx(tx, baseInput)
+	if err != nil {
+		return project{}, err
+	}
+	result, err := tx.Exec(`INSERT INTO projects(name, prefix, root_path) VALUES (?, ?, ?)`, name, prefix, rootPath)
+	if err != nil {
+		return project{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return project{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return project{}, err
 	}
 	return project{ID: id, Name: name, Prefix: prefix, RootPath: &rootPath}, nil
@@ -2434,6 +2465,18 @@ func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, err
 func valueExists(db *sql.DB, query string, arg string) (bool, error) {
 	var value int
 	err := db.QueryRow(query, arg).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func valueExistsTx(tx *sql.Tx, query string, arg string) (bool, error) {
+	var value int
+	err := tx.QueryRow(query, arg).Scan(&value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil

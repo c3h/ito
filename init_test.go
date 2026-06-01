@@ -326,6 +326,54 @@ func TestNewConcurrentCallsMintUniqueProjectScopedIDs(t *testing.T) {
 	}
 }
 
+func TestConcurrentMoveAndEditDoNotDeadlock(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "lock-app", "--prefix", "LCK"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Hot issue"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	const total = 16
+	start := make(chan struct{})
+	results := make(chan commandResult, total)
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			<-start
+			var args []string
+			if n%2 == 0 {
+				status := "todo"
+				if n%4 == 0 {
+					status = "in_progress"
+				}
+				args = []string{"move", "LCK-1", status, "--json"}
+			} else {
+				args = []string{"edit", "LCK-1", "--title", fmt.Sprintf("Hot issue %02d", n), "--json"}
+			}
+			results <- runITO(t, repo, itoHome, args...)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	for result := range results {
+		if result.exitCode != 0 {
+			t.Fatalf("concurrent write failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+		if strings.Contains(result.stdout, "database is locked") || strings.Contains(result.stderr, "database is locked") {
+			t.Fatalf("write hit a lock-upgrade deadlock\nstdout: %s\nstderr: %s", result.stdout, result.stderr)
+		}
+	}
+}
+
 func TestListDefaultsToCurrentProjectAndHidesDone(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")
