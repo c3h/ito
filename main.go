@@ -207,6 +207,47 @@ func (e commandFailure) Error() string {
 	return e.message
 }
 
+// openMigratedStore opens the central store and runs the migration, returning a
+// ready *sql.DB (the caller defers Close) or a typed *commandFailure carrying
+// the exact code/message/hint. On migrate failure it closes the DB first.
+func openMigratedStore() (*sql.DB, *commandFailure) {
+	db, err := openStore()
+	if err != nil {
+		return nil, &commandFailure{exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions."}
+	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, &commandFailure{exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database."}
+	}
+	return db, nil
+}
+
+// resolveIssueProject finds the Project that owns the Issue's Prefix and, when an
+// explicit project name is given, validates that it names the same Project. It
+// returns the owning Project or a typed *commandFailure the handler renders.
+func resolveIssueProject(db *sql.DB, prefix string, projectName string, issueID string) (project, *commandFailure) {
+	p, found, err := findProjectByPrefix(db, prefix)
+	if err != nil {
+		return project{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store."}
+	}
+	if !found {
+		return project{}, &commandFailure{exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID."}
+	}
+	if projectName != "" {
+		override, found, err := findProjectByName(db, projectName)
+		if err != nil {
+			return project{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store."}
+		}
+		if !found {
+			return project{}, &commandFailure{exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name."}
+		}
+		if override.ID != p.ID {
+			return project{}, &commandFailure{exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix."}
+		}
+	}
+	return p, nil
+}
+
 func main() {
 	os.Exit(runCLI(os.Args[1:]))
 }
@@ -280,15 +321,11 @@ func runInit(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 	}
 
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
 	if reattachName != "" {
 		return runInitReattach(db, rootPath, reattachName, jsonMode)
@@ -390,14 +427,11 @@ func runRename(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
 	}
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
 	p, code, message, hint := resolveProject(db, rootPath, inGit, projectName)
 	if code != 0 {
@@ -468,14 +502,11 @@ func runNew(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
 	}
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
 	p, code, message, hint := resolveProject(db, rootPath, inGit, projectName)
 	if code != 0 {
@@ -516,33 +547,15 @@ func runShow(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 	}
 
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
-	p, found, err := findProjectByPrefix(db, prefix)
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
-	}
-	if !found {
-		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
-	}
-	if projectName != "" {
-		override, found, err := findProjectByName(db, projectName)
-		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
-		}
-		if !found {
-			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
-		}
-		if override.ID != p.ID {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
-		}
+	p, resolveFail := resolveIssueProject(db, prefix, projectName, issueID)
+	if resolveFail != nil {
+		return fail(jsonMode, resolveFail.code, resolveFail.message, resolveFail.hint)
 	}
 
 	foundIssue, found, err := findIssueByID(db, p, issueID)
@@ -587,33 +600,15 @@ func runMove(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 	}
 
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
-	p, found, err := findProjectByPrefix(db, prefix)
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
-	}
-	if !found {
-		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
-	}
-	if projectName != "" {
-		override, found, err := findProjectByName(db, projectName)
-		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
-		}
-		if !found {
-			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
-		}
-		if override.ID != p.ID {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
-		}
+	p, resolveFail := resolveIssueProject(db, prefix, projectName, issueID)
+	if resolveFail != nil {
+		return fail(jsonMode, resolveFail.code, resolveFail.message, resolveFail.hint)
 	}
 
 	beforeStatus, changed, err := moveIssueStatus(db, p, issueID, targetStatus)
@@ -732,33 +727,15 @@ func runEdit(args []string) int {
 		}
 	}
 
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
-	p, found, err := findProjectByPrefix(db, prefix)
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
-	}
-	if !found {
-		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
-	}
-	if projectName != "" {
-		override, found, err := findProjectByName(db, projectName)
-		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
-		}
-		if !found {
-			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
-		}
-		if override.ID != p.ID {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
-		}
+	p, resolveFail := resolveIssueProject(db, prefix, projectName, issueID)
+	if resolveFail != nil {
+		return fail(jsonMode, resolveFail.code, resolveFail.message, resolveFail.hint)
 	}
 
 	changed, err := editIssue(db, p, issueID, options)
@@ -818,33 +795,15 @@ func runRm(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 	}
 
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
-	p, found, err := findProjectByPrefix(db, prefix)
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Project for prefix %q: %v", prefix, err), "try again or inspect the central store.")
-	}
-	if !found {
-		return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
-	}
-	if projectName != "" {
-		override, found, err := findProjectByName(db, projectName)
-		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read project %q: %v", projectName, err), "try again or inspect the central store.")
-		}
-		if !found {
-			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q not found.", projectName), "check the registered Project name.")
-		}
-		if override.ID != p.ID {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("Issue %q belongs to Project %q, not to %q.", issueID, p.Name, override.Name), "remove --project or specify the Project that owns the Prefix.")
-		}
+	p, resolveFail := resolveIssueProject(db, prefix, projectName, issueID)
+	if resolveFail != nil {
+		return fail(jsonMode, resolveFail.code, resolveFail.message, resolveFail.hint)
 	}
 
 	if err := deleteIssue(db, p, issueID); err != nil {
@@ -905,14 +864,11 @@ func runPrune(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
 	}
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 	p, code, message, hint := resolveProject(db, rootPath, inGit, projectName)
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
@@ -978,14 +934,11 @@ func runList(args []string) int {
 		}
 	}
 
-	db, err := openStore()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions.")
+	db, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	if err := migrate(db); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database.")
-	}
 
 	options := listOptions{
 		AllProjects: allProjects,
