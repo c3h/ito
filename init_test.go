@@ -2836,3 +2836,192 @@ func TestFlagsAfterPositionalAreAccepted(t *testing.T) {
 		t.Fatalf("rm <ID> --json must succeed, got exit %d\nstderr: %s", result.exitCode, result.stderr)
 	}
 }
+
+// decodeErrorEnvelope parses a JSON {error,code,hint} failure envelope.
+func decodeErrorEnvelope(t *testing.T, stderr string) cliError {
+	t.Helper()
+	var envelope cliError
+	if err := json.Unmarshal([]byte(stderr), &envelope); err != nil {
+		t.Fatalf("stderr is not a JSON error envelope: %v\nstderr: %s", err, stderr)
+	}
+	return envelope
+}
+
+func TestJSONValueFormSelectsErrorEnvelope(t *testing.T) {
+	repo := t.TempDir()
+	itoHome := t.TempDir()
+
+	// --json=true on a flag-parse error must emit a JSON envelope on stderr.
+	result := runITO(t, repo, itoHome, "new", "--json=true", "--bogus")
+	if result.exitCode != 2 {
+		t.Fatalf("expected exit 2, got %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	if result.stdout != "" {
+		t.Fatalf("expected empty stdout on failure, got %q", result.stdout)
+	}
+	envelope := decodeErrorEnvelope(t, result.stderr)
+	if envelope.Code != 2 || envelope.Error == "" || envelope.Hint == "" {
+		t.Fatalf("expected actionable envelope, got %#v", envelope)
+	}
+}
+
+func TestJSONValueFormFalseStaysHuman(t *testing.T) {
+	repo := t.TempDir()
+	itoHome := t.TempDir()
+
+	// --json=false (and a bad value) must keep the human, non-JSON failure path.
+	for _, value := range []string{"--json=false", "--json=nope"} {
+		result := runITO(t, repo, itoHome, "new", value, "--bogus")
+		if result.exitCode != 2 {
+			t.Fatalf("%s: expected exit 2, got %d\nstderr: %s", value, result.exitCode, result.stderr)
+		}
+		if strings.HasPrefix(strings.TrimSpace(result.stderr), "{") {
+			t.Fatalf("%s: expected human stderr, got JSON envelope: %s", value, result.stderr)
+		}
+		if result.stderr == "" {
+			t.Fatalf("%s: expected a human error message on stderr", value)
+		}
+	}
+}
+
+func TestHelpDetectionIgnoresFlagValues(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "hijack-app", "--prefix", "HJK"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+
+	// `new --title -h --json` must create an issue titled "-h", not print help.
+	result := runITO(t, repo, itoHome, "new", "--title", "-h", "--json")
+	if result.exitCode != 0 {
+		t.Fatalf("expected issue creation, got exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if issue.Title != "-h" {
+		t.Fatalf("expected title %q, got %q", "-h", issue.Title)
+	}
+
+	// `show --project -h <ID>` must not print help; it fails validating "-h".
+	show := runITO(t, repo, itoHome, "show", "--project", "-h", issue.ID)
+	if show.exitCode == 0 {
+		t.Fatalf("expected failure (project name -h is invalid), got exit 0\nstdout: %s", show.stdout)
+	}
+	if strings.Contains(show.stdout, "usage: ito show") {
+		t.Fatalf("show must not print help when -h is a flag value\nstdout: %s", show.stdout)
+	}
+}
+
+func TestUnknownCommandHonorsJSON(t *testing.T) {
+	repo := t.TempDir()
+	itoHome := t.TempDir()
+
+	// Human mode: plain-text message, exit 2.
+	human := runITO(t, repo, itoHome, "frobnicate")
+	if human.exitCode != 2 {
+		t.Fatalf("expected exit 2, got %d\nstderr: %s", human.exitCode, human.stderr)
+	}
+	if !strings.Contains(human.stderr, "unknown command: frobnicate") {
+		t.Fatalf("expected human unknown-command message, got %q", human.stderr)
+	}
+	if strings.HasPrefix(strings.TrimSpace(human.stderr), "{") {
+		t.Fatalf("human mode must not emit a JSON envelope: %s", human.stderr)
+	}
+
+	// JSON mode: error envelope, exit 2.
+	jsonResult := runITO(t, repo, itoHome, "frobnicate", "--json")
+	if jsonResult.exitCode != 2 {
+		t.Fatalf("expected exit 2, got %d\nstderr: %s", jsonResult.exitCode, jsonResult.stderr)
+	}
+	envelope := decodeErrorEnvelope(t, jsonResult.stderr)
+	if envelope.Code != 2 || !strings.Contains(envelope.Error, "unknown command: frobnicate") || envelope.Hint == "" {
+		t.Fatalf("expected unknown-command envelope, got %#v", envelope)
+	}
+}
+
+func TestEndOfFlagsMarker(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "marker-app", "--prefix", "MRK"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	created := runITO(t, repo, itoHome, "new", "--json", "--title", "Marker target")
+	if created.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstderr: %s", created.exitCode, created.stderr)
+	}
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(created.stdout), &issue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, created.stdout)
+	}
+
+	// `show --json -- <ID>`: the marker ends flag parsing; <ID> is positional.
+	result := runITO(t, repo, itoHome, "show", "--json", "--", issue.ID)
+	if result.exitCode != 0 {
+		t.Fatalf("expected show to succeed past --, got exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var shown issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &shown); err != nil || shown.ID != issue.ID {
+		t.Fatalf("show -- <ID> produced unexpected output: err=%v stdout=%s", err, result.stdout)
+	}
+}
+
+func TestWantsJSONValueAwareness(t *testing.T) {
+	newFlags := commandValueFlags("new")
+	showFlags := commandValueFlags("show")
+	tests := []struct {
+		name      string
+		args      []string
+		valueFlag map[string]struct{}
+		want      bool
+	}{
+		{name: "bare --json", args: []string{"--json"}, valueFlag: newFlags, want: true},
+		{name: "bare -json", args: []string{"-json"}, valueFlag: newFlags, want: true},
+		{name: "--json=true", args: []string{"--json=true"}, valueFlag: newFlags, want: true},
+		{name: "--json=1", args: []string{"--json=1"}, valueFlag: newFlags, want: true},
+		{name: "--json=false", args: []string{"--json=false"}, valueFlag: newFlags, want: false},
+		{name: "--json=bad", args: []string{"--json=nope"}, valueFlag: newFlags, want: false},
+		{name: "no json", args: []string{"--title", "x"}, valueFlag: newFlags, want: false},
+		{name: "json as project value", args: []string{"--project", "-json", "TST-1"}, valueFlag: showFlags, want: false},
+		{name: "json after value flag", args: []string{"--project", "p", "--json"}, valueFlag: showFlags, want: true},
+		{name: "nil value flags", args: []string{"--json"}, valueFlag: nil, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wantsJSON(tt.args, tt.valueFlag); got != tt.want {
+				t.Fatalf("wantsJSON(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWantsHelpValueAwareness(t *testing.T) {
+	newFlags := commandValueFlags("new")
+	showFlags := commandValueFlags("show")
+	tests := []struct {
+		name      string
+		args      []string
+		valueFlag map[string]struct{}
+		want      bool
+	}{
+		{name: "--help", args: []string{"--help"}, valueFlag: newFlags, want: true},
+		{name: "-h", args: []string{"-h"}, valueFlag: newFlags, want: true},
+		{name: "-help", args: []string{"-help"}, valueFlag: newFlags, want: true},
+		{name: "-h as title value", args: []string{"--title", "-h", "--json"}, valueFlag: newFlags, want: false},
+		{name: "--help as project value", args: []string{"--project", "--help", "TST-1"}, valueFlag: showFlags, want: false},
+		{name: "help after value flag", args: []string{"--title", "x", "--help"}, valueFlag: newFlags, want: true},
+		{name: "no help", args: []string{"--title", "x"}, valueFlag: newFlags, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wantsHelp(tt.args, tt.valueFlag); got != tt.want {
+				t.Fatalf("wantsHelp(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}

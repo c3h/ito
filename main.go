@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -240,13 +241,12 @@ func runCLI(args []string) int {
 	case "prune":
 		return runPrune(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
-		return exitBadUsage
+		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0], "run 'ito --help' to see available commands.")
 	}
 }
 
 func runInit(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("init")) {
 		printCommandHelp("init")
 		return 0
 	}
@@ -261,7 +261,7 @@ func runInit(args []string) int {
 	fs.StringVar(&manualPrefix, "prefix", "", "")
 	fs.StringVar(&reattachName, "reattach", "", "")
 	if err := fs.Parse(args); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito init --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("init")), exitBadUsage, err.Error(), "run 'ito init --help' to see the accepted flags.")
 	}
 	if fs.NArg() != 0 {
 		return fail(jsonMode, exitBadUsage, "ito init takes no positional arguments.", "remove the positional arguments and use flags like --name, --prefix or --json.")
@@ -364,7 +364,7 @@ func runInit(args []string) int {
 }
 
 func runRename(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("rename")) {
 		printCommandHelp("rename")
 		return 0
 	}
@@ -376,7 +376,7 @@ func runRename(args []string) int {
 	fs.StringVar(&projectName, "project", "", "")
 	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
 	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito rename --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("rename")), exitBadUsage, err.Error(), "run 'ito rename --help' to see the accepted flags.")
 	}
 	if len(positionals) != 1 {
 		return fail(jsonMode, exitBadUsage, "ito rename takes exactly one new name.", "use: ito rename <name>.")
@@ -416,7 +416,7 @@ func runRename(args []string) int {
 }
 
 func runNew(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("new")) {
 		printCommandHelp("new")
 		return 0
 	}
@@ -437,7 +437,7 @@ func runNew(args []string) int {
 	fs.Var(&labels, "label", "")
 	fs.StringVar(&body, "body", "", "")
 	if err := fs.Parse(args); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito new --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("new")), exitBadUsage, err.Error(), "run 'ito new --help' to see the accepted flags.")
 	}
 	if fs.NArg() != 0 {
 		return fail(jsonMode, exitBadUsage, "ito new takes no positional arguments.", "use --title <title>.")
@@ -489,7 +489,7 @@ func runNew(args []string) int {
 }
 
 func runShow(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("show")) {
 		printCommandHelp("show")
 		return 0
 	}
@@ -501,7 +501,7 @@ func runShow(args []string) int {
 	fs.StringVar(&projectName, "project", "", "")
 	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
 	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito show --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("show")), exitBadUsage, err.Error(), "run 'ito show --help' to see the accepted flags.")
 	}
 	if len(positionals) != 1 {
 		return fail(jsonMode, exitBadUsage, "ito show takes exactly one full ID.", "use: ito show <PREFIX>-<n>.")
@@ -556,7 +556,7 @@ func runShow(args []string) int {
 }
 
 func runMove(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("move")) {
 		printCommandHelp("move")
 		return 0
 	}
@@ -568,7 +568,7 @@ func runMove(args []string) int {
 	fs.StringVar(&projectName, "project", "", "")
 	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
 	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito move --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("move")), exitBadUsage, err.Error(), "run 'ito move --help' to see the accepted flags.")
 	}
 	if len(positionals) != 2 {
 		return fail(jsonMode, exitBadUsage, "ito move takes exactly one full ID and a target status.", "use: ito move <PREFIX>-<n> <status>.")
@@ -642,7 +642,7 @@ func runMove(args []string) int {
 }
 
 func runEdit(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("edit")) {
 		printCommandHelp("edit")
 		return 0
 	}
@@ -668,7 +668,7 @@ func runEdit(args []string) int {
 	fs.Var(linkEditFlag{kind: "relates_to", action: "remove", ops: &linkOps}, "unrelate", "")
 	parseArgs, issueID, positionalCount := splitEditArgs(args)
 	if err := fs.Parse(parseArgs); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito edit --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("edit")), exitBadUsage, err.Error(), "run 'ito edit --help' to see the accepted flags.")
 	}
 	if fs.NArg() != 0 || positionalCount != 1 {
 		return fail(jsonMode, exitBadUsage, "ito edit takes exactly one full ID.", "use: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--block <ID>].")
@@ -791,7 +791,7 @@ func runEdit(args []string) int {
 }
 
 func runRm(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("rm")) {
 		printCommandHelp("rm")
 		return 0
 	}
@@ -803,7 +803,7 @@ func runRm(args []string) int {
 	fs.StringVar(&projectName, "project", "", "")
 	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
 	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito rm --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("rm")), exitBadUsage, err.Error(), "run 'ito rm --help' to see the accepted flags.")
 	}
 	if len(positionals) != 1 {
 		return fail(jsonMode, exitBadUsage, "ito rm takes exactly one full ID.", "use: ito rm <PREFIX>-<n>.")
@@ -868,7 +868,7 @@ func runRm(args []string) int {
 }
 
 func runPrune(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("prune")) {
 		printCommandHelp("prune")
 		return 0
 	}
@@ -883,7 +883,7 @@ func runPrune(args []string) int {
 	fs.StringVar(&status, "status", "", "")
 	fs.BoolVar(&yes, "yes", false, "")
 	if err := fs.Parse(args); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito prune --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("prune")), exitBadUsage, err.Error(), "run 'ito prune --help' to see the accepted flags.")
 	}
 	if fs.NArg() != 0 {
 		return fail(jsonMode, exitBadUsage, "ito prune takes no positional arguments.", "use explicit filters like --status <status> and confirm with --yes.")
@@ -937,7 +937,7 @@ func runPrune(args []string) int {
 }
 
 func runList(args []string) int {
-	if wantsHelp(args) {
+	if wantsHelp(args, commandValueFlags("list")) {
 		printCommandHelp("list")
 		return 0
 	}
@@ -958,7 +958,7 @@ func runList(args []string) int {
 	fs.StringVar(&search, "search", "", "")
 	fs.Var(&labels, "label", "")
 	if err := fs.Parse(args); err != nil {
-		return fail(wantsJSON(args), exitBadUsage, err.Error(), "run 'ito list --help' to see the accepted flags.")
+		return fail(wantsJSON(args, commandValueFlags("list")), exitBadUsage, err.Error(), "run 'ito list --help' to see the accepted flags.")
 	}
 	if fs.NArg() != 0 {
 		return fail(jsonMode, exitBadUsage, "ito list takes no positional arguments.", "use flags like --status, --label, --priority, --project or --all-projects.")
@@ -1081,17 +1081,90 @@ func resolveProject(db *sql.DB, rootPath string, inGit bool, explicitName string
 	return project{}, exitNotRegistered, "no Project registered for the current directory.", "run 'ito init' in this Project or use --project <name>."
 }
 
-func wantsJSON(args []string) bool {
-	for _, arg := range args {
-		if arg == "--json" || arg == "-json" {
-			return true
+// commandValueFlags returns the value-consuming flags for a command, mirroring
+// each handler's fs.Var/fs.StringVar set. It is the single source of truth that
+// keeps help/json detection (which must skip flag values) in sync with parsing.
+func commandValueFlags(command string) map[string]struct{} {
+	switch command {
+	case "init":
+		return map[string]struct{}{"name": {}, "prefix": {}, "reattach": {}}
+	case "rename":
+		return map[string]struct{}{"project": {}}
+	case "new":
+		return map[string]struct{}{"project": {}, "title": {}, "status": {}, "priority": {}, "label": {}, "body": {}}
+	case "show":
+		return map[string]struct{}{"project": {}}
+	case "list":
+		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "search": {}, "label": {}}
+	case "move":
+		return map[string]struct{}{"project": {}}
+	case "edit":
+		return map[string]struct{}{
+			"project": {}, "title": {}, "priority": {}, "body": {},
+			"add-label": {}, "remove-label": {},
+			"block": {}, "unblock": {}, "relate": {}, "unrelate": {},
 		}
+	case "rm":
+		return map[string]struct{}{"project": {}}
+	case "prune":
+		return map[string]struct{}{"project": {}, "status": {}}
+	default:
+		return nil
 	}
-	return false
 }
 
-func wantsHelp(args []string) bool {
-	for _, arg := range args {
+// flagName extracts a flag's name from a token, stripping leading dashes and any
+// inline "=value". Non-flag tokens yield an empty name.
+func flagName(arg string) string {
+	if !strings.HasPrefix(arg, "-") || arg == "-" {
+		return ""
+	}
+	name := strings.TrimLeft(arg, "-")
+	if idx := strings.IndexByte(name, '='); idx >= 0 {
+		name = name[:idx]
+	}
+	return name
+}
+
+// wantsJSON reports whether --json (or -json / --json=true) is set, ignoring any
+// token consumed as a value-flag's value (so a flag value of "-json" is not
+// mistaken for a request). valueFlags names the command's value-consuming flags.
+func wantsJSON(args []string, valueFlags map[string]struct{}) bool {
+	flagArgs, _ := splitFlagsAndPositionals(args, valueFlags)
+	jsonMode := false
+	for i := 0; i < len(flagArgs); i++ {
+		arg := flagArgs[i]
+		name := flagName(arg)
+		if _, ok := valueFlags[name]; ok && !strings.Contains(arg, "=") {
+			// Skip the next token: it is this flag's value, not a request.
+			i++
+			continue
+		}
+		if name != "json" {
+			continue
+		}
+		if idx := strings.IndexByte(arg, '='); idx >= 0 {
+			parsed, err := strconv.ParseBool(arg[idx+1:])
+			jsonMode = err == nil && parsed
+			continue
+		}
+		jsonMode = true
+	}
+	return jsonMode
+}
+
+// wantsHelp reports whether a help flag is set, ignoring any token consumed as a
+// value-flag's value (so a flag value of "-h"/"--help" is not mistaken for a
+// help request). valueFlags names the command's value-consuming flags.
+func wantsHelp(args []string, valueFlags map[string]struct{}) bool {
+	flagArgs, _ := splitFlagsAndPositionals(args, valueFlags)
+	for i := 0; i < len(flagArgs); i++ {
+		arg := flagArgs[i]
+		name := flagName(arg)
+		if _, ok := valueFlags[name]; ok && !strings.Contains(arg, "=") {
+			i++
+			continue
+		}
 		if isHelpArg(arg) {
 			return true
 		}
@@ -1379,6 +1452,12 @@ func splitFlagsAndPositionals(args []string, valueFlags map[string]struct{}) (fl
 	positionals = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--" {
+			// End-of-flags marker: everything after is positional. Consume the
+			// marker itself so it composes with fs.Parse downstream.
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
 		if !strings.HasPrefix(arg, "-") || arg == "-" {
 			positionals = append(positionals, arg)
 			continue
