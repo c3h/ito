@@ -311,12 +311,26 @@ func runInit(args []string) int {
 		}
 	}
 
-	detached, found, err := findDetachedProjectByName(db, name)
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not search for detached projects: %v", err), "try again or inspect the central store.")
-	}
-	if found {
-		return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q exists but does not point to this directory.", detached.Name), fmt.Sprintf("run 'ito init --reattach %s' to re-point this Project.", detached.Name))
+	// Only the derived-name path surfaces the moved-repo reattach hint. An
+	// explicit --name colliding with a live Project is a deliberate name
+	// collision (handled below as exit 2), not a detachment.
+	if manualName == "" {
+		detached, found, err := findDetachedProjectByName(db, name, rootPath)
+		if err != nil {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not search for detached projects: %v", err), "try again or inspect the central store.")
+		}
+		if found {
+			// This is the init write path, so it is the correct place to clear a
+			// stale pointer: if the detached Project still records an old root,
+			// persist root_path = NULL so the Project serializes as detached.
+			if detached.RootPath != nil {
+				detached.RootPath = nil
+				if _, err := updateProjectRoot(db, detached); err != nil {
+					return fail(jsonMode, exitGeneric, fmt.Sprintf("could not clear the stale root for project %q: %v", detached.Name, err), "try again or inspect the central store.")
+				}
+			}
+			return fail(jsonMode, exitNotRegistered, fmt.Sprintf("project %q exists but does not point to this directory.", detached.Name), fmt.Sprintf("run 'ito init --reattach %s' to re-point this Project.", detached.Name))
+		}
 	}
 
 	if exists, err := valueExists(db, `SELECT 1 FROM projects WHERE name = ?`, name); err != nil {
@@ -1057,7 +1071,7 @@ func resolveProject(db *sql.DB, rootPath string, inGit bool, explicitName string
 		}
 	}
 	name := normalizeProjectName(filepath.Base(rootPath))
-	detached, found, err := findDetachedProjectByName(db, name)
+	detached, found, err := findDetachedProjectByName(db, name, rootPath)
 	if err != nil {
 		return project{}, exitGeneric, fmt.Sprintf("could not search for detached projects: %v", err), "try again or inspect the central store."
 	}
@@ -1504,6 +1518,16 @@ func resolveCurrentRoot() (string, bool, error) {
 		root, err := canonicalPath(commonDir)
 		return root, true, err
 	}
+	// Distinguish git authoritatively reporting no work tree (a clean non-zero
+	// exit) from the git invocation itself failing (git missing, exec error,
+	// killed by signal). Only the authoritative no-work-tree case is a genuine
+	// "not in a repo" and may fall back to the cwd with inGit=false; an
+	// invocation failure must surface, so a transient git hiccup inside a real
+	// repo never silently degrades to ancestor matching against the cwd.
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return "", false, fmt.Errorf("could not invoke git: %w", err)
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", false, err
@@ -1664,7 +1688,14 @@ func findClosestProjectAncestor(db *sql.DB, cwd string) (project, bool, error) {
 	return best, true, nil
 }
 
-func findDetachedProjectByName(db *sql.DB, name string) (project, bool, error) {
+// findDetachedProjectByName reports whether a same-named Project exists whose
+// stored root_path no longer matches the current resolved root. Detachment is a
+// path-identity question, not an on-disk-existence one: a Project is detached
+// when its root_path is NULL or, once canonicalized the same way callers
+// canonicalize the current root, points somewhere other than currentRoot. This
+// is a pure read; it never mutates the store (the NULL-clearing on the moved-repo
+// path lives on the init write path, in runInit's detached branch).
+func findDetachedProjectByName(db *sql.DB, name string, currentRoot string) (project, bool, error) {
 	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
 	var p project
 	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
@@ -1676,16 +1707,14 @@ func findDetachedProjectByName(db *sql.DB, name string) (project, bool, error) {
 	if p.RootPath == nil {
 		return p, true, nil
 	}
-	if _, err := os.Stat(*p.RootPath); err != nil {
-		if os.IsNotExist(err) {
-			// The repo moved: clears the stale pointer to reflect "detached" (NULL).
-			if _, err := db.Exec(`UPDATE projects SET root_path = NULL WHERE id = ?`, p.ID); err != nil {
-				return project{}, false, err
-			}
-			p.RootPath = nil
-			return p, true, nil
-		}
-		return project{}, false, err
+	// Canonicalize the stored root with the same EvalSymlinks-based rule the
+	// callers apply to the current root, so the comparison is consistent. A
+	// canonicalize error (ENOTDIR, EACCES, stale NFS, gone) means we cannot
+	// confirm the stored root still names the current root, which is itself a
+	// detached signal rather than an aborting error.
+	storedRoot, err := canonicalPath(*p.RootPath)
+	if err != nil || storedRoot != currentRoot {
+		return p, true, nil
 	}
 	return project{}, false, nil
 }
