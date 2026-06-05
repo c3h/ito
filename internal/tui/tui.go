@@ -341,9 +341,24 @@ func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) reloadDigest() {
+	focusedLabel := ""
+	if m.focusIndex >= 0 && m.focusIndex < len(m.sections) {
+		focusedLabel = m.sections[m.focusIndex].Label
+	}
+	hiddenByLabel := map[string]bool{}
+	selectedByLabel := map[string]string{}
+	for _, section := range m.sections {
+		hiddenByLabel[section.Label] = section.hidden
+		if section.selected >= 0 && section.selected < len(section.Issues) {
+			selectedByLabel[section.Label] = section.Issues[section.selected].ID
+		}
+	}
+	detailID := m.detailIssue.ID
+
 	m.sections = make([]digestSection, 0, len(store.Statuses))
 	m.loadErr = nil
-	for _, status := range store.Statuses {
+	for i, status := range store.Statuses {
+		label := statusLabel(status)
 		issues, err := m.store.ListIssues(store.ListOptions{
 			ProjectID: m.project.ID,
 			Status:    status,
@@ -352,11 +367,36 @@ func (m *model) reloadDigest() {
 			m.loadErr = err
 			return
 		}
-		m.sections = append(m.sections, digestSection{
-			Label:  statusLabel(status),
+		section := digestSection{
+			Label:  label,
 			Issues: issues,
 			hidden: status == "done",
-		})
+		}
+		if hidden, ok := hiddenByLabel[label]; ok {
+			section.hidden = hidden
+		}
+		if selectedID := selectedByLabel[label]; selectedID != "" {
+			for j := range issues {
+				if issues[j].ID == selectedID {
+					section.selected = j
+					break
+				}
+			}
+		}
+		if label == focusedLabel {
+			m.focusIndex = i
+		}
+		m.sections = append(m.sections, section)
+	}
+	if m.focusIndex < 0 || m.focusIndex >= len(m.sections) {
+		m.focusIndex = 0
+	}
+	if detailID != "" {
+		if refreshed, ok := m.issueInSections(detailID); ok {
+			m.detailIssue = refreshed
+			m.linkTitles = m.loadLinkTitles(refreshed)
+			m.focusIssue(detailID)
+		}
 	}
 }
 
@@ -735,6 +775,17 @@ func (m *model) focusIssue(id string) {
 			}
 		}
 	}
+}
+
+func (m model) issueInSections(id string) (store.Issue, bool) {
+	for _, section := range m.sections {
+		for _, issue := range section.Issues {
+			if issue.ID == id {
+				return issue, true
+			}
+		}
+	}
+	return store.Issue{}, false
 }
 
 func (m model) loadLinkTitles(issue store.Issue) map[string]string {

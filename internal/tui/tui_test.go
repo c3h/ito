@@ -570,6 +570,49 @@ func TestRefreshShortcutAndCommandReloadDigest(t *testing.T) {
 	}
 }
 
+func TestRefreshPreservesSelectedIssueWhenItStillExists(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("refresh-selection-app", "RFS", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Backlog issue", "backlog", "medium", nil, ""); err != nil {
+		t.Fatalf("create backlog issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "First todo issue", "todo", "high", nil, ""); err != nil {
+		t.Fatalf("create first todo issue: %v", err)
+	}
+	selected, err := st.CreateIssue(project, "Keep this selected", "todo", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create selected issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, " ▸ · "+selected.ID+" Keep this selected") {
+		t.Fatalf("expected TODO issue to be selected before refresh, got:\n%s", view)
+	}
+
+	if _, err := st.CreateIssue(project, "External write", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create external issue: %v", err)
+	}
+	current, _ = current.Update(keyMsg(t, "r"))
+	view := current.View()
+
+	if !strings.Contains(view, "TODO  (3)") || !strings.Contains(view, "RFS-4 External write") {
+		t.Fatalf("expected refresh to reload externally-written Issues, got:\n%s", view)
+	}
+	if !strings.Contains(view, " ▌▾ TODO  (3)") || !strings.Contains(view, " ▸ · "+selected.ID+" Keep this selected") {
+		t.Fatalf("expected refresh to preserve focus and selection, got:\n%s", view)
+	}
+}
+
 func TestStatusKeyMovesSelectedIssueThroughStoreAndReloadsDigest(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
