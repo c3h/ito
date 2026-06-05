@@ -190,6 +190,146 @@ func TestDigestHidesAndRevealsFocusedSection(t *testing.T) {
 	}
 }
 
+func TestDigestSlashOpensInlineFilterAndEscRestoresShortcuts(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("filter-app", "FLT", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Keep the surface visible", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	filtering := current.View()
+	if !strings.Contains(filtering, "TODO  (1)") || !strings.Contains(filtering, "FLT-1 Keep the surface visible") {
+		t.Fatalf("expected / to keep the Digest surface visible, got:\n%s", filtering)
+	}
+	if !strings.Contains(filtering, " / ▏") || !strings.Contains(filtering, "1 of 1 issues · esc to clear") {
+		t.Fatalf("expected / to replace shortcuts with inline filter input, got:\n%s", filtering)
+	}
+	if strings.Contains(filtering, "tab focus") {
+		t.Fatalf("expected filter input to replace the shortcut bar, got:\n%s", filtering)
+	}
+
+	current, _ = current.Update(keyMsg(t, "esc"))
+	restored := current.View()
+	if !strings.Contains(restored, "tab focus   ↑↓ select") {
+		t.Fatalf("expected Esc to restore the shortcut bar, got:\n%s", restored)
+	}
+	if strings.Contains(restored, "esc to clear") {
+		t.Fatalf("expected Esc to leave the filter input, got:\n%s", restored)
+	}
+}
+
+func TestDigestInlineFilterNarrowsLiveByIDTitleAndLabels(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("filter-match-app", "FMT", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Render digest rows", "todo", "medium", []string{"feature"}, ""); err != nil {
+		t.Fatalf("create digest issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Fix search matching", "todo", "high", []string{"bug"}, ""); err != nil {
+		t.Fatalf("create search issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Write docs", "in_progress", "low", []string{"docs"}, ""); err != nil {
+		t.Fatalf("create docs issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	for _, r := range "bug" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	labelMatch := current.View()
+	if !strings.Contains(labelMatch, " / bug▏") || !strings.Contains(labelMatch, "1 of 3 issues · esc to clear") {
+		t.Fatalf("expected typed query to appear in filter input, got:\n%s", labelMatch)
+	}
+	if !strings.Contains(labelMatch, "▲ FMT-2 Fix search matching") || strings.Contains(labelMatch, "FMT-1 Render digest rows") || strings.Contains(labelMatch, "FMT-3 Write docs") {
+		t.Fatalf("expected query to narrow by Label, got:\n%s", labelMatch)
+	}
+
+	current, _ = current.Update(keyMsg(t, "esc"))
+	current, _ = current.Update(keyMsg(t, "/"))
+	for _, r := range "FMT-3" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	idMatch := current.View()
+	if !strings.Contains(idMatch, "· FMT-3 Write docs") || strings.Contains(idMatch, "FMT-1 Render digest rows") || strings.Contains(idMatch, "FMT-2 Fix search matching") {
+		t.Fatalf("expected query to narrow by ID, got:\n%s", idMatch)
+	}
+
+	current, _ = current.Update(keyMsg(t, "esc"))
+	current, _ = current.Update(keyMsg(t, "/"))
+	for _, r := range "digest" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	titleMatch := current.View()
+	if !strings.Contains(titleMatch, "◆ FMT-1 Render digest rows") || strings.Contains(titleMatch, "FMT-2 Fix search matching") || strings.Contains(titleMatch, "FMT-3 Write docs") {
+		t.Fatalf("expected query to narrow by Title, got:\n%s", titleMatch)
+	}
+
+	current, _ = current.Update(keyMsg(t, "s"))
+	unchanged, err := st.FindIssue(project, "FMT-1")
+	if err != nil {
+		t.Fatalf("find issue after typing s: %v", err)
+	}
+	if unchanged.Status != "todo" {
+		t.Fatalf("expected typing in the filter to be read-only, got status %q", unchanged.Status)
+	}
+}
+
+func TestDigestInlineFilterRevealsMatchesInHiddenSections(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("filter-hidden-app", "FHD", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Open issue", "todo", "medium", []string{"feature"}, ""); err != nil {
+		t.Fatalf("create open issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Completed docs", "done", "low", []string{"docs"}, ""); err != nil {
+		t.Fatalf("create done issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	for _, r := range "docs" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	view := current.View()
+	if !strings.Contains(view, "▾ DONE  (1)") || !strings.Contains(view, "· FHD-2 Completed docs") {
+		t.Fatalf("expected filter to reveal matching Issues in hidden DONE, got:\n%s", view)
+	}
+	if strings.Contains(view, "▸ DONE (1) · h to show") {
+		t.Fatalf("expected matching hidden section to be expanded while filtering, got:\n%s", view)
+	}
+	if strings.Contains(view, "FHD-1 Open issue") {
+		t.Fatalf("expected filter to keep non-matching Issues hidden, got:\n%s", view)
+	}
+	if strings.Contains(view, "TODO") || strings.Contains(view, "no Issues") {
+		t.Fatalf("expected filter to omit sections with no matches, got:\n%s", view)
+	}
+}
+
 func TestStatusKeyMovesSelectedIssueThroughStoreAndReloadsDigest(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -531,8 +671,14 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}}
 	case "l":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}}
+	case "/":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
 	default:
 		t.Fatalf("unsupported key %q", key)
 		return tea.KeyMsg{Type: tea.KeyNull}
 	}
+}
+
+func runeMsg(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
 }

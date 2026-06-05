@@ -45,6 +45,8 @@ type model struct {
 	detailIssue store.Issue
 	linkTitles  map[string]string
 	labelCursor int
+	filterOpen  bool
+	filterQuery string
 	loadErr     error
 	height      int
 }
@@ -88,6 +90,23 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.filterOpen {
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			case tea.KeyEsc:
+				m.filterOpen = false
+				m.filterQuery = ""
+			case tea.KeyBackspace:
+				if m.filterQuery != "" {
+					runes := []rune(m.filterQuery)
+					m.filterQuery = string(runes[:len(runes)-1])
+				}
+			case tea.KeyRunes:
+				m.filterQuery += string(msg.Runes)
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -97,6 +116,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = viewIssue
 			case viewIssue:
 				m.mode = viewDigest
+			}
+		case "/":
+			if m.mode == viewDigest {
+				m.filterOpen = true
 			}
 		case "enter":
 			switch m.mode {
@@ -165,13 +188,18 @@ func (m model) View() string {
 		return m.issueDetailView()
 	}
 
+	sections := m.digestSections()
 	lines := []string{
-		header(m.project.Name, m.issueCount()),
+		header(m.project.Name, issueCount(sections)),
 		strings.Repeat("─", digestWidth),
 		"",
 	}
-	windows := m.digestWindows()
-	for i, section := range m.sections {
+	windows := m.digestWindows(sections)
+	filtering := strings.TrimSpace(m.filterQuery) != ""
+	for i, section := range sections {
+		if filtering && len(section.Issues) == 0 {
+			continue // while filtering, only sections with matches are shown
+		}
 		focused := i == m.focusIndex
 		marker := " "
 		if focused {
@@ -202,8 +230,16 @@ func (m model) View() string {
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, " tab focus   ↑↓ select   ⏎ open   s status   h hide   / filter   : cmd   q quit")
+	lines = append(lines, m.digestBottomBar(issueCount(sections), issueCount(m.sections)))
 	return strings.Join(lines, "\n")
+}
+
+func (m model) digestBottomBar(matched, total int) string {
+	if m.filterOpen {
+		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
+		return " / " + m.filterQuery + "▏   " + hint
+	}
+	return " tab focus   ↑↓ select   ⏎ open   s status   h hide   / filter   : cmd   q quit"
 }
 
 func (m *model) reloadDigest() {
@@ -233,10 +269,10 @@ type issueWindow struct {
 	showBelow bool
 }
 
-func (m model) digestWindows() []issueWindow {
-	windows := make([]issueWindow, len(m.sections))
-	capacities := m.digestSectionCapacities()
-	for i, section := range m.sections {
+func (m model) digestWindows(sections []digestSection) []issueWindow {
+	windows := make([]issueWindow, len(sections))
+	capacities := m.digestSectionCapacities(sections)
+	for i, section := range sections {
 		if section.hidden {
 			continue
 		}
@@ -245,10 +281,10 @@ func (m model) digestWindows() []issueWindow {
 	return windows
 }
 
-func (m model) digestSectionCapacities() []int {
-	capacities := make([]int, len(m.sections))
+func (m model) digestSectionCapacities(sections []digestSection) []int {
+	capacities := make([]int, len(sections))
 	showAll := func() []int {
-		for i, section := range m.sections {
+		for i, section := range sections {
 			if section.hidden {
 				continue
 			}
@@ -264,7 +300,7 @@ func (m model) digestSectionCapacities() []int {
 	nonEmptySections := 0
 	hiddenSections := 0
 	totalIssues := 0
-	for _, section := range m.sections {
+	for _, section := range sections {
 		if section.hidden {
 			hiddenSections++
 			continue
@@ -282,7 +318,7 @@ func (m model) digestSectionCapacities() []int {
 
 	// Each visible section spends sectionChromeLines on its heading and footer;
 	// collapsed and empty sections each render as a single line instead.
-	visibleSections := len(m.sections) - hiddenSections
+	visibleSections := len(sections) - hiddenSections
 	fixedLines := digestChromeLines + visibleSections*sectionChromeLines + hiddenSections + emptySections
 	available := m.height - fixedLines
 	if available >= totalIssues {
@@ -292,7 +328,7 @@ func (m model) digestSectionCapacities() []int {
 		available = nonEmptySections
 	}
 
-	for i, section := range m.sections {
+	for i, section := range sections {
 		if section.hidden {
 			continue
 		}
@@ -303,7 +339,7 @@ func (m model) digestSectionCapacities() []int {
 	remaining := available - nonEmptySections
 	for remaining > 0 {
 		grew := false
-		for i, section := range m.sections {
+		for i, section := range sections {
 			if remaining == 0 {
 				break
 			}
@@ -358,12 +394,56 @@ func issueRange(total, selected, capacity int) issueWindow {
 	return issueWindow{start: start, end: start + capacity}
 }
 
-func (m model) issueCount() int {
+func issueCount(sections []digestSection) int {
 	total := 0
-	for _, section := range m.sections {
+	for _, section := range sections {
 		total += len(section.Issues)
 	}
 	return total
+}
+
+func (m model) digestSections() []digestSection {
+	query := strings.TrimSpace(strings.ToLower(m.filterQuery))
+	if query == "" {
+		return m.sections
+	}
+
+	sections := make([]digestSection, 0, len(m.sections))
+	for _, section := range m.sections {
+		selectedID := ""
+		if section.selected < len(section.Issues) {
+			selectedID = section.Issues[section.selected].ID
+		}
+		filtered := section
+		filtered.Issues = nil
+		filtered.selected = 0
+		for _, issue := range section.Issues {
+			if !issueMatchesFilter(issue, query) {
+				continue
+			}
+			if issue.ID == selectedID {
+				filtered.selected = len(filtered.Issues)
+			}
+			filtered.Issues = append(filtered.Issues, issue)
+		}
+		if len(filtered.Issues) > 0 {
+			filtered.hidden = false
+		}
+		sections = append(sections, filtered)
+	}
+	return sections
+}
+
+func issueMatchesFilter(issue store.Issue, query string) bool {
+	if strings.Contains(strings.ToLower(issue.ID), query) || strings.Contains(strings.ToLower(issue.Title), query) {
+		return true
+	}
+	for _, label := range issue.Labels {
+		if strings.Contains(strings.ToLower(label), query) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *model) moveFocus(delta int) {
