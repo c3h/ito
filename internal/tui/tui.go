@@ -10,6 +10,13 @@ import (
 
 const digestWidth = 88
 
+// Digest rows View() draws besides Issues: digestChromeLines (header, divider,
+// blank, shortcut bar) and sectionChromeLines per section (heading + blank).
+const (
+	digestChromeLines  = 4
+	sectionChromeLines = 2
+)
+
 // detailBodyWidth keeps the Issue body at a readable prose measure, narrower
 // than the full digestWidth frame (see docs/prototypes/NOTES.md).
 const detailBodyWidth = 80
@@ -34,6 +41,7 @@ type model struct {
 	detailIssue store.Issue
 	linkTitles  map[string]string
 	loadErr     error
+	height      int
 }
 
 type digestSection struct {
@@ -106,6 +114,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSelection(1)
 			}
 		}
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
 	}
 	return m, nil
 }
@@ -123,6 +133,7 @@ func (m model) View() string {
 		strings.Repeat("─", digestWidth),
 		"",
 	}
+	windows := m.digestWindows()
 	for i, section := range m.sections {
 		focused := i == m.focusIndex
 		marker := " "
@@ -133,12 +144,20 @@ func (m model) View() string {
 		if len(section.Issues) == 0 {
 			lines = append(lines, "    no Issues")
 		}
-		for j, issue := range section.Issues {
+		window := windows[i]
+		if window.showAbove {
+			lines = append(lines, fmt.Sprintf("   ↑ %d more", window.start))
+		}
+		for j, issue := range section.Issues[window.start:window.end] {
+			issueIndex := window.start + j
 			prefix := "   "
-			if focused && j == section.selected {
+			if focused && issueIndex == section.selected {
 				prefix = " ▸ "
 			}
 			lines = append(lines, prefix+renderIssueRow(issue))
+		}
+		if window.showBelow {
+			lines = append(lines, fmt.Sprintf("   ↓ %d more", len(section.Issues)-window.end))
 		}
 		lines = append(lines, "")
 	}
@@ -163,6 +182,121 @@ func (m *model) reloadDigest() {
 			Issues: issues,
 		})
 	}
+}
+
+type issueWindow struct {
+	start     int
+	end       int
+	showAbove bool
+	showBelow bool
+}
+
+func (m model) digestWindows() []issueWindow {
+	windows := make([]issueWindow, len(m.sections))
+	capacities := m.digestSectionCapacities()
+	for i, section := range m.sections {
+		windows[i] = visibleIssueWindow(len(section.Issues), section.selected, capacities[i])
+	}
+	return windows
+}
+
+func (m model) digestSectionCapacities() []int {
+	capacities := make([]int, len(m.sections))
+	showAll := func() []int {
+		for i, section := range m.sections {
+			capacities[i] = len(section.Issues)
+		}
+		return capacities
+	}
+	if m.height <= 0 {
+		return showAll()
+	}
+
+	emptySections := 0
+	nonEmptySections := 0
+	totalIssues := 0
+	for _, section := range m.sections {
+		if len(section.Issues) == 0 {
+			emptySections++
+			continue
+		}
+		nonEmptySections++
+		totalIssues += len(section.Issues)
+	}
+	if nonEmptySections == 0 {
+		return capacities
+	}
+
+	fixedLines := digestChromeLines + len(m.sections)*sectionChromeLines + emptySections
+	available := m.height - fixedLines
+	if available >= totalIssues {
+		return showAll()
+	}
+	if available < nonEmptySections {
+		available = nonEmptySections
+	}
+
+	for i, section := range m.sections {
+		if len(section.Issues) > 0 {
+			capacities[i] = 1
+		}
+	}
+	remaining := available - nonEmptySections
+	for remaining > 0 {
+		grew := false
+		for i, section := range m.sections {
+			if remaining == 0 {
+				break
+			}
+			if capacities[i] == 0 || capacities[i] >= len(section.Issues) {
+				continue
+			}
+			capacities[i]++
+			remaining--
+			grew = true
+		}
+		if !grew {
+			break
+		}
+	}
+	return capacities
+}
+
+func visibleIssueWindow(total, selected, lineBudget int) issueWindow {
+	if total <= 0 || lineBudget <= 0 {
+		return issueWindow{}
+	}
+	if lineBudget >= total {
+		return issueWindow{end: total}
+	}
+	selected = min(max(selected, 0), total-1)
+
+	issueCapacity := min(lineBudget, total)
+	for {
+		window := issueRange(total, selected, issueCapacity)
+		indicatorLines := 0
+		if window.start > 0 {
+			indicatorLines++
+		}
+		if window.end < total {
+			indicatorLines++
+		}
+		nextIssueCapacity := lineBudget - indicatorLines
+		if nextIssueCapacity < 1 {
+			nextIssueCapacity = 1
+		}
+		if nextIssueCapacity == issueCapacity {
+			window.showAbove = window.start > 0 && issueCapacity+indicatorLines <= lineBudget
+			window.showBelow = window.end < total && issueCapacity+indicatorLines <= lineBudget
+			return window
+		}
+		issueCapacity = nextIssueCapacity
+	}
+}
+
+func issueRange(total, selected, capacity int) issueWindow {
+	start := min(max(selected-capacity/2, 0), total-capacity)
+	return issueWindow{start: start, end: start + capacity}
 }
 
 func (m model) issueCount() int {

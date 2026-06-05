@@ -138,6 +138,83 @@ func TestDigestNavigationMovesFocusAndSelection(t *testing.T) {
 	}
 }
 
+func TestDigestViewportUsesTerminalHeightWithoutFixedItemCap(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("viewport-app", "VPT", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	for i := 1; i <= 8; i++ {
+		if _, err := st.CreateIssue(project, "Todo viewport issue "+string(rune('0'+i)), "todo", "medium", nil, ""); err != nil {
+			t.Fatalf("create issue %d: %v", i, err)
+		}
+	}
+
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 16})
+	small := current.View()
+	current, _ = current.Update(tea.WindowSizeMsg{Width: 88, Height: 30})
+	tall := current.View()
+
+	if strings.Contains(small, "VPT-8 Todo viewport issue 8") {
+		t.Fatalf("expected small Digest viewport to omit the last TODO issue, got:\n%s", small)
+	}
+	if !strings.Contains(tall, "VPT-8 Todo viewport issue 8") {
+		t.Fatalf("expected taller Digest viewport to show more TODO issues, got:\n%s", tall)
+	}
+}
+
+func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("overflow-app", "OVR", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	for i := 1; i <= 8; i++ {
+		if _, err := st.CreateIssue(project, "Scrollable issue "+string(rune('0'+i)), "todo", "medium", nil, ""); err != nil {
+			t.Fatalf("create issue %d: %v", i, err)
+		}
+	}
+
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 23})
+	current, _ = current.Update(keyMsg(t, "tab"))
+	for i := 0; i < 4; i++ {
+		current, _ = current.Update(keyMsg(t, "down"))
+	}
+	view := current.View()
+
+	// The window centers on the selection, so the picked Issue keeps a neighbour
+	// above and below it inside the viewport, with the overflow split either side.
+	for _, want := range []string{
+		"↑ 3 more",
+		"OVR-4 Scrollable issue 4",
+		" ▸ ◆ OVR-5 Scrollable issue 5",
+		"OVR-6 Scrollable issue 6",
+		"↓ 2 more",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected scrolled Digest viewport to contain %q, got:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "OVR-1 Scrollable issue 1") {
+		t.Fatalf("expected scrolled Digest viewport to omit Issues above the window, got:\n%s", view)
+	}
+	if lines := strings.Count(view, "\n") + 1; lines > 23 {
+		t.Fatalf("expected Digest viewport to fit the terminal height, got %d lines:\n%s", lines, view)
+	}
+}
+
 func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
