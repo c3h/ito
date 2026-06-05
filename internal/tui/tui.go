@@ -24,15 +24,10 @@ type digestSection struct {
 	selected int
 }
 
-var statusFlow = []struct {
-	status string
-	label  string
-}{
-	{"backlog", "BACKLOG"},
-	{"todo", "TODO"},
-	{"in_progress", "IN PROGRESS"},
-	{"in_review", "IN REVIEW"},
-	{"done", "DONE"},
+// statusLabel renders a store status as its Digest section heading
+// (in_progress → "IN PROGRESS"), keeping the flow order owned by store.Statuses.
+func statusLabel(status string) string {
+	return strings.ToUpper(strings.ReplaceAll(status, "_", " "))
 }
 
 func Run(st *store.Store, project store.Project) error {
@@ -109,19 +104,19 @@ func (m model) View() string {
 }
 
 func (m *model) reloadDigest() {
-	m.sections = make([]digestSection, 0, len(statusFlow))
+	m.sections = make([]digestSection, 0, len(store.Statuses))
 	m.loadErr = nil
-	for _, entry := range statusFlow {
+	for _, status := range store.Statuses {
 		issues, err := m.store.ListIssues(store.ListOptions{
 			ProjectID: m.project.ID,
-			Status:    entry.status,
+			Status:    status,
 		})
 		if err != nil {
 			m.loadErr = err
 			return
 		}
 		m.sections = append(m.sections, digestSection{
-			Label:  entry.label,
+			Label:  statusLabel(status),
 			Issues: issues,
 		})
 	}

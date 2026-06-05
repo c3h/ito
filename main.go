@@ -13,14 +13,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode"
 
 	itostore "github.com/gimigliano/ito/internal/store"
 	"github.com/gimigliano/ito/internal/tui"
 	"github.com/mattn/go-isatty"
-	"golang.org/x/text/runes"
-	"golang.org/x/text/transform"
-	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,15 +32,13 @@ var (
 	prefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
 	issueIDPattern     = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,7})-([1-9][0-9]*)$`)
 	searchTermPattern  = regexp.MustCompile(`[\pL\pN]+`)
-	validStatuses      = map[string]struct{}{"backlog": {}, "todo": {}, "in_progress": {}, "in_review": {}, "done": {}}
-	validPriorities    = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "urgent": {}}
-	validLabels        = map[string]struct{}{"feature": {}, "bug": {}, "docs": {}, "tests": {}, "refactor": {}, "chore": {}, "research": {}, "infra": {}}
-	// asciiFold decomposes (NFD) and strips combining marks, transliterating
-	// Latin accents to ASCII (café → cafe). Scripts with no decomposition to
-	// ASCII (Cyrillic, CJK) pass through intact and are discarded downstream.
-	asciiFold  = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
-	isTerminal = isatty.IsTerminal
-	runTUI     = tui.Run
+	// The validation sets are derived from the store's canonical vocabularies so
+	// the domain values live in exactly one place (internal/store).
+	validStatuses   = valueSet(itostore.Statuses)
+	validPriorities = valueSet(itostore.Priorities)
+	validLabels     = valueSet(itostore.Labels)
+	isTerminal      = isatty.IsTerminal
+	runTUI          = tui.Run
 )
 
 const (
@@ -100,14 +94,6 @@ func (s listStyle) priority(value string) string {
 
 func (s listStyle) project(value string) string {
 	return s.apply(ansiMagenta+ansiBright, value)
-}
-
-func transliterateASCII(input string) string {
-	folded, _, err := transform.String(asciiFold, input)
-	if err != nil {
-		return input
-	}
-	return folded
 }
 
 type stringSliceFlag []string
@@ -1393,6 +1379,15 @@ func isValidValue(value string, valid map[string]struct{}) bool {
 	return ok
 }
 
+// valueSet turns an ordered vocabulary slice into a membership set for validation.
+func valueSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		set[v] = struct{}{}
+	}
+	return set
+}
+
 // splitFlagsAndPositionals separates flag tokens from the positional arguments,
 // allowing flags to appear in any position relative to the positionals
 // (the stdlib flag.Parse stops at the first non-flag token). valueFlags names
@@ -1486,7 +1481,7 @@ func canonicalPath(path string) (string, error) {
 func normalizeProjectName(input string) string {
 	var b strings.Builder
 	lastDash := false
-	for _, r := range strings.ToLower(transliterateASCII(input)) {
+	for _, r := range strings.ToLower(itostore.TransliterateASCII(input)) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 			lastDash = false

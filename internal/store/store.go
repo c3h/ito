@@ -24,13 +24,19 @@ var (
 	prefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
 	issueIDPattern     = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,7})-([1-9][0-9]*)$`)
 	searchTermPattern  = regexp.MustCompile(`[\pL\pN]+`)
-	validStatuses      = map[string]struct{}{"backlog": {}, "todo": {}, "in_progress": {}, "in_review": {}, "done": {}}
-	validPriorities    = map[string]struct{}{"low": {}, "medium": {}, "high": {}, "urgent": {}}
-	validLabels        = map[string]struct{}{"feature": {}, "bug": {}, "docs": {}, "tests": {}, "refactor": {}, "chore": {}, "research": {}, "infra": {}}
 	// asciiFold decomposes (NFD) and strips combining marks, transliterating
 	// Latin accents to ASCII (café → cafe). Scripts with no decomposition to
 	// ASCII (Cyrillic, CJK) pass through intact and are discarded downstream.
 	asciiFold = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+)
+
+// The canonical domain vocabularies, in flow/precedence order. The store owns
+// them; the CLI derives its validation sets and the TUI derives its surfaces
+// from these slices so the vocabulary lives in exactly one place.
+var (
+	Statuses   = []string{"backlog", "todo", "in_progress", "in_review", "done"}
+	Priorities = []string{"urgent", "high", "medium", "low"}
+	Labels     = []string{"feature", "bug", "docs", "tests", "refactor", "chore", "research", "infra"}
 )
 
 var (
@@ -164,7 +170,10 @@ func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
-func transliterateASCII(input string) string {
+// TransliterateASCII decomposes Latin accents to their ASCII base (café → cafe)
+// via asciiFold, leaving non-decomposable scripts intact. It is exported so the
+// CLI shares the exact same folding the store uses for search.
+func TransliterateASCII(input string) string {
 	folded, _, err := transform.String(asciiFold, input)
 	if err != nil {
 		return input
@@ -437,7 +446,7 @@ func canonicalPath(path string) (string, error) {
 func normalizeProjectName(input string) string {
 	var b strings.Builder
 	lastDash := false
-	for _, r := range strings.ToLower(transliterateASCII(input)) {
+	for _, r := range strings.ToLower(TransliterateASCII(input)) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 			lastDash = false
@@ -476,7 +485,7 @@ func nextGeneratedPrefixTx(tx *sql.Tx, input string) (string, error) {
 			}
 			candidate = stem + suffix
 		}
-		exists, err := valueExistsTx(tx, `SELECT 1 FROM projects WHERE prefix = ?`, candidate)
+		exists, err := valueExists(tx, `SELECT 1 FROM projects WHERE prefix = ?`, candidate)
 		if err != nil {
 			return "", err
 		}
@@ -489,7 +498,7 @@ func nextGeneratedPrefixTx(tx *sql.Tx, input string) (string, error) {
 
 func generatedPrefixBase(input string) string {
 	var b strings.Builder
-	for _, r := range strings.ToUpper(transliterateASCII(input)) {
+	for _, r := range strings.ToUpper(TransliterateASCII(input)) {
 		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			b.WriteRune(r)
 		}
@@ -806,7 +815,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 		return false, err
 	}
 
-	currentLabels, err := stringColumnTx(tx, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, p.ID, id)
+	currentLabels, err := stringColumn(tx, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, p.ID, id)
 	if err != nil {
 		return false, err
 	}
@@ -1209,29 +1218,15 @@ ORDER BY 1`, rowIssue.ID, rowIssue.ProjectID, rowIssue.ID, rowIssue.ID)
 	return issues, nil
 }
 
-func stringColumn(db *sql.DB, query string, args ...any) ([]string, error) {
-	rows, err := db.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	values := []string{}
-	for rows.Next() {
-		var value string
-		if err := rows.Scan(&value); err != nil {
-			return nil, err
-		}
-		values = append(values, value)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return values, nil
+// rowQuerier is the read surface shared by *sql.DB and *sql.Tx, so helpers can
+// run against either a connection or an open transaction without duplication.
+type rowQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
 }
 
-func stringColumnTx(tx *sql.Tx, query string, args ...any) ([]string, error) {
-	rows, err := tx.Query(query, args...)
+func stringColumn(q rowQuerier, query string, args ...any) ([]string, error) {
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1375,21 +1370,9 @@ func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, err
 	return true, nil
 }
 
-func valueExists(db *sql.DB, query string, arg string) (bool, error) {
+func valueExists(q rowQuerier, query string, arg string) (bool, error) {
 	var value int
-	err := db.QueryRow(query, arg).Scan(&value)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-func valueExistsTx(tx *sql.Tx, query string, arg string) (bool, error) {
-	var value int
-	err := tx.QueryRow(query, arg).Scan(&value)
+	err := q.QueryRow(query, arg).Scan(&value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
