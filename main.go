@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/mattn/go-isatty"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -43,6 +44,61 @@ var (
 	// ASCII (Cyrillic, CJK) pass through intact and are discarded downstream.
 	asciiFold = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
 )
+
+const (
+	ansiReset   = "\x1b[0m"
+	ansiBright  = "\x1b[1m"
+	ansiDim     = "\x1b[2m"
+	ansiCyan    = "\x1b[36m"
+	ansiBlue    = "\x1b[34m"
+	ansiRed     = "\x1b[31m"
+	ansiOrange  = "\x1b[38;5;208m"
+	ansiMagenta = "\x1b[35m"
+)
+
+type listStyle struct {
+	enabled bool
+}
+
+func newListStyle() listStyle {
+	return listStyle{
+		enabled: os.Getenv("NO_COLOR") == "" && isatty.IsTerminal(os.Stdout.Fd()),
+	}
+}
+
+func (s listStyle) apply(code string, value string) string {
+	if !s.enabled {
+		return value
+	}
+	return code + value + ansiReset
+}
+
+func (s listStyle) issueID(value string) string {
+	return s.apply(ansiCyan+ansiBright, value)
+}
+
+func (s listStyle) status(value string) string {
+	return s.apply(ansiCyan, value)
+}
+
+func (s listStyle) priority(value string) string {
+	switch value {
+	case "urgent":
+		return s.apply(ansiRed+ansiBright, value)
+	case "high":
+		return s.apply(ansiOrange+ansiBright, value)
+	case "medium":
+		return s.apply(ansiBlue, value)
+	case "low":
+		return s.apply(ansiDim, value)
+	default:
+		return value
+	}
+}
+
+func (s listStyle) project(value string) string {
+	return s.apply(ansiMagenta+ansiBright, value)
+}
 
 func transliterateASCII(input string) string {
 	folded, _, err := transform.String(asciiFold, input)
@@ -282,7 +338,7 @@ func runCLI(args []string) int {
 	case "prune":
 		return runPrune(args[1:])
 	default:
-		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0], "run 'ito --help' to see available commands.")
+		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0]+".", "Run 'ito --help' to see available commands.")
 	}
 }
 
@@ -1354,6 +1410,7 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 		fmt.Println("no Issues found. adjust the filters or create one with 'ito new --title <title>'.")
 		return 0
 	}
+	style := newListStyle()
 	currentProject := ""
 	for _, i := range issues {
 		if allProjects && i.Project != currentProject {
@@ -1361,13 +1418,13 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 				fmt.Println()
 			}
 			currentProject = i.Project
-			fmt.Printf("%s:\n", currentProject)
+			fmt.Printf("%s:\n", style.project(currentProject))
 		}
 		prefix := ""
 		if allProjects {
 			prefix = "  "
 		}
-		fmt.Printf("%s%s [%s %s] %s\n", prefix, i.ID, i.Status, i.Priority, i.Title)
+		fmt.Printf("%s%s [%s %s] %s\n", prefix, style.issueID(i.ID), style.status(i.Status), style.priority(i.Priority), i.Title)
 	}
 	return 0
 }

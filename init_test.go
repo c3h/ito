@@ -411,6 +411,42 @@ func TestListDefaultsToCurrentProjectAndHidesDone(t *testing.T) {
 	}
 }
 
+func TestListStyleColorsHumanFieldsWhenEnabled(t *testing.T) {
+	style := listStyle{enabled: true}
+
+	if got := style.issueID("ITO-1"); got != "\x1b[36m\x1b[1mITO-1\x1b[0m" {
+		t.Fatalf("unexpected ID style: %q", got)
+	}
+	if got := style.status("backlog"); got != "\x1b[36mbacklog\x1b[0m" {
+		t.Fatalf("unexpected Status style: %q", got)
+	}
+	if got := style.priority("urgent"); got != "\x1b[31m\x1b[1murgent\x1b[0m" {
+		t.Fatalf("unexpected urgent Priority style: %q", got)
+	}
+	if got := style.priority("high"); got != "\x1b[38;5;208m\x1b[1mhigh\x1b[0m" {
+		t.Fatalf("unexpected high Priority style: %q", got)
+	}
+	if got := style.priority("medium"); got != "\x1b[34mmedium\x1b[0m" {
+		t.Fatalf("unexpected medium Priority style: %q", got)
+	}
+	if got := style.priority("low"); got != "\x1b[2mlow\x1b[0m" {
+		t.Fatalf("unexpected low Priority style: %q", got)
+	}
+	if got := style.project("ito"); got != "\x1b[35m\x1b[1mito\x1b[0m" {
+		t.Fatalf("unexpected Project style: %q", got)
+	}
+}
+
+func TestListStyleLeavesHumanFieldsPlainWhenDisabled(t *testing.T) {
+	style := listStyle{enabled: false}
+
+	for _, value := range []string{"ITO-1", "backlog", "urgent", "high", "medium", "low", "ito"} {
+		if got := style.apply(ansiRed, value); got != value {
+			t.Fatalf("disabled style changed %q to %q", value, got)
+		}
+	}
+}
+
 func TestListFiltersByStatusPriorityAndLabels(t *testing.T) {
 	repo := t.TempDir()
 	run(t, repo, "git", "init", "-q")
@@ -2928,6 +2964,9 @@ func TestUnknownCommandHonorsJSON(t *testing.T) {
 	if !strings.Contains(human.stderr, "unknown command: frobnicate") {
 		t.Fatalf("expected human unknown-command message, got %q", human.stderr)
 	}
+	if !strings.Contains(human.stderr, "Run 'ito --help' to see available commands.") {
+		t.Fatalf("expected human unknown-command help hint, got %q", human.stderr)
+	}
 	if strings.HasPrefix(strings.TrimSpace(human.stderr), "{") {
 		t.Fatalf("human mode must not emit a JSON envelope: %s", human.stderr)
 	}
@@ -2938,7 +2977,7 @@ func TestUnknownCommandHonorsJSON(t *testing.T) {
 		t.Fatalf("expected exit 2, got %d\nstderr: %s", jsonResult.exitCode, jsonResult.stderr)
 	}
 	envelope := decodeErrorEnvelope(t, jsonResult.stderr)
-	if envelope.Code != 2 || !strings.Contains(envelope.Error, "unknown command: frobnicate") || envelope.Hint == "" {
+	if envelope.Code != 2 || !strings.Contains(envelope.Error, "unknown command: frobnicate") || envelope.Hint != "Run 'ito --help' to see available commands." {
 		t.Fatalf("expected unknown-command envelope, got %#v", envelope)
 	}
 }
