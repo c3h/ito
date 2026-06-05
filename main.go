@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	itostore "github.com/gimigliano/ito/internal/store"
+	"github.com/gimigliano/ito/internal/tui"
 	"github.com/mattn/go-isatty"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
@@ -41,7 +42,9 @@ var (
 	// asciiFold decomposes (NFD) and strips combining marks, transliterating
 	// Latin accents to ASCII (café → cafe). Scripts with no decomposition to
 	// ASCII (Cyrillic, CJK) pass through intact and are discarded downstream.
-	asciiFold = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+	asciiFold  = transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)), norm.NFC)
+	isTerminal = isatty.IsTerminal
+	runTUI     = tui.Run
 )
 
 const (
@@ -262,8 +265,19 @@ func main() {
 
 func runCLI(args []string) int {
 	if len(args) == 0 {
-		printRootHelp(os.Stderr)
-		return exitBadUsage
+		if !isTerminal(os.Stdin.Fd()) || !isTerminal(os.Stdout.Fd()) {
+			printRootHelp(os.Stdout)
+			return 0
+		}
+		db, st, openFail := openMigratedStore()
+		if openFail != nil {
+			return fail(false, openFail.code, openFail.message, openFail.hint)
+		}
+		defer db.Close()
+		if err := runTUI(st); err != nil {
+			return fail(false, exitGeneric, fmt.Sprintf("could not run the TUI: %v", err), "try again from an interactive terminal.")
+		}
+		return 0
 	}
 	if isHelpArg(args[0]) {
 		printRootHelp(os.Stdout)

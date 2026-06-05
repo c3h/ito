@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	itostore "github.com/gimigliano/ito/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -93,6 +94,56 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBareITOWithoutTTYPrintsRootHelpAndExitsZero(t *testing.T) {
+	result := runITO(t, t.TempDir(), t.TempDir())
+	if result.exitCode != 0 {
+		t.Fatalf("expected bare ito without a TTY to exit 0, got %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result.stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", result.stderr)
+	}
+	if !strings.Contains(result.stdout, "usage: ito <command> [flags]") {
+		t.Fatalf("expected root help on stdout, got %q", result.stdout)
+	}
+}
+
+func TestBareITOWithTTYLaunchesTUIWithStore(t *testing.T) {
+	oldIsTerminal := isTerminal
+	oldRunTUI := runTUI
+	t.Cleanup(func() {
+		isTerminal = oldIsTerminal
+		runTUI = oldRunTUI
+	})
+
+	isTerminal = func(uintptr) bool {
+		return true
+	}
+	var gotStore *itostore.Store
+	runTUI = func(st *itostore.Store) error {
+		gotStore = st
+		return nil
+	}
+
+	t.Setenv("ITO_HOME", t.TempDir())
+	exitCode := runCLI(nil)
+	if exitCode != 0 {
+		t.Fatalf("expected bare ito on a TTY to exit 0, got %d", exitCode)
+	}
+	if gotStore == nil {
+		t.Fatal("expected TUI launcher to receive a store")
+	}
+}
+
+func TestTUISubcommandDoesNotExist(t *testing.T) {
+	result := runITO(t, t.TempDir(), t.TempDir(), "tui")
+	if result.exitCode != exitBadUsage {
+		t.Fatalf("expected ito tui to be an unknown command with exit %d, got %d\nstdout: %s\nstderr: %s", exitBadUsage, result.exitCode, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "unknown command: tui.") {
+		t.Fatalf("expected unknown command error, got %q", result.stderr)
 	}
 }
 
