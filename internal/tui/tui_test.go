@@ -138,6 +138,107 @@ func TestDigestNavigationMovesFocusAndSelection(t *testing.T) {
 	}
 }
 
+func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("detail-app", "DET", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	blocker, err := st.CreateIssue(project, "Extract store read path", "done", "high", []string{"refactor"}, "done blocker")
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+	related, err := st.CreateIssue(project, "Render the Board later", "backlog", "medium", []string{"feature"}, "related body")
+	if err != nil {
+		t.Fatalf("create related issue: %v", err)
+	}
+	target, err := st.CreateIssue(project, "Read-only detail view with a title long enough to truncate in the header", "todo", "urgent", []string{"feature", "docs"}, "## Context\nShow the full markdown body.\n\n## Acceptance\n- read-only")
+	if err != nil {
+		t.Fatalf("create target issue: %v", err)
+	}
+	if _, err := st.Edit(project, target.ID, store.EditIssueOptions{
+		LinkOps: []store.LinkEditOp{
+			{Kind: "blocked_by", Action: "add", Target: blocker.ID},
+			{Kind: "relates_to", Action: "add", Target: related.ID},
+		},
+	}); err != nil {
+		t.Fatalf("link target issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	detail := current.View()
+
+	for _, want := range []string{
+		"ito · " + target.ID + " · Read-only detail view",
+		"todo   ·   urgent   ·   docs  feature",
+		"blocked by   " + blocker.ID + "   Extract store read path",
+		"relates to   " + related.ID + "   Render the Board later",
+		"created      ",
+		"updated      ",
+		"## Context",
+		"Show the full markdown body.",
+		"## Acceptance",
+		"esc back   ↑↓ prev/next",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("expected Issue detail to contain %q, got:\n%s", want, detail)
+		}
+	}
+	if strings.Contains(detail, "s status") || strings.Contains(detail, "p priority") || strings.Contains(detail, "l labels") {
+		t.Fatalf("Issue detail should be read-only in ITO-7, got edit shortcuts:\n%s", detail)
+	}
+
+	current, _ = current.Update(keyMsg(t, "esc"))
+	digest := current.View()
+	if !strings.Contains(digest, "TODO  (1)") || !strings.Contains(digest, " ▸ ● "+target.ID) {
+		t.Fatalf("expected Esc to return to the Digest selection, got:\n%s", digest)
+	}
+}
+
+func TestIssueDetailUpDownMovesBetweenIssues(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("detail-nav-app", "DNV", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	first, err := st.CreateIssue(project, "Backlog first", "backlog", "medium", nil, "first body")
+	if err != nil {
+		t.Fatalf("create first issue: %v", err)
+	}
+	second, err := st.CreateIssue(project, "Todo second", "todo", "high", nil, "second body")
+	if err != nil {
+		t.Fatalf("create second issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "enter"))
+	if view := current.View(); !strings.Contains(view, "ito · "+first.ID+" · Backlog first") {
+		t.Fatalf("expected first Issue detail, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "ito · "+second.ID+" · Todo second") || !strings.Contains(view, "second body") {
+		t.Fatalf("expected Down to show next Issue detail, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "up"))
+	if view := current.View(); !strings.Contains(view, "ito · "+first.ID+" · Backlog first") || !strings.Contains(view, "first body") {
+		t.Fatalf("expected Up to show previous Issue detail, got:\n%s", view)
+	}
+}
+
 func keyMsg(t *testing.T, key string) tea.KeyMsg {
 	t.Helper()
 	switch key {
@@ -149,6 +250,12 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyTab}
 	case "down":
 		return tea.KeyMsg{Type: tea.KeyDown}
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
 	default:
 		t.Fatalf("unsupported key %q", key)
 		return tea.KeyMsg{Type: tea.KeyNull}
