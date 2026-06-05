@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,7 +31,10 @@ type viewMode string
 const (
 	viewDigest viewMode = "digest"
 	viewIssue  viewMode = "issue"
+	viewLabels viewMode = "labels"
 )
+
+var priorityCycle = []string{"low", "medium", "high", "urgent"}
 
 type model struct {
 	store       *store.Store
@@ -40,6 +44,7 @@ type model struct {
 	mode        viewMode
 	detailIssue store.Issue
 	linkTitles  map[string]string
+	labelCursor int
 	loadErr     error
 	height      int
 }
@@ -87,12 +92,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "esc":
-			if m.mode == viewIssue {
+			switch m.mode {
+			case viewLabels:
+				m.mode = viewIssue
+			case viewIssue:
 				m.mode = viewDigest
 			}
 		case "enter":
-			if m.mode == viewDigest {
+			switch m.mode {
+			case viewDigest:
 				m.openSelectedIssue()
+			case viewLabels:
+				m.toggleFocusedLabel()
 			}
 		case "tab":
 			if m.mode == viewDigest {
@@ -102,20 +113,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == viewDigest {
 				m.toggleFocusedSection()
 			}
+		case "s":
+			if m.mode != viewLabels {
+				m.moveSelectedIssueStatus()
+			}
+		case "p":
+			if m.mode == viewIssue {
+				m.cycleDetailIssuePriority()
+			}
+		case "l":
+			if m.mode == viewIssue {
+				m.openLabelPicker()
+			}
 		case "shift+tab":
 			if m.mode == viewDigest {
 				m.moveFocus(-1)
 			}
 		case "up":
-			if m.mode == viewIssue {
+			switch m.mode {
+			case viewIssue:
 				m.moveDetailIssue(-1)
-			} else {
+			case viewLabels:
+				m.moveLabelCursor(-1)
+			default:
 				m.moveSelection(-1)
 			}
 		case "down":
-			if m.mode == viewIssue {
+			switch m.mode {
+			case viewIssue:
 				m.moveDetailIssue(1)
-			} else {
+			case viewLabels:
+				m.moveLabelCursor(1)
+			default:
 				m.moveSelection(1)
 			}
 		}
@@ -128,6 +157,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	if m.loadErr != nil {
 		return fmt.Sprintf("ito · [1] digest · [2] board\n\ncould not load Issues: %v\n\nq quit", m.loadErr)
+	}
+	if m.mode == viewLabels {
+		return m.labelPickerView()
 	}
 	if m.mode == viewIssue {
 		return m.issueDetailView()
@@ -359,6 +391,90 @@ func (m *model) toggleFocusedSection() {
 	m.sections[m.focusIndex].hidden = !m.sections[m.focusIndex].hidden
 }
 
+func (m *model) moveSelectedIssueStatus() {
+	issue, ok := m.currentIssue()
+	if !ok {
+		return
+	}
+	moved, err := m.store.Move(m.project, issue.ID, nextValue(store.Statuses, issue.Status))
+	if err != nil {
+		m.loadErr = err
+		return
+	}
+	m.reloadAfterEdit(moved.Issue)
+}
+
+func (m *model) cycleDetailIssuePriority() {
+	issue, ok := m.currentIssue()
+	if !ok {
+		return
+	}
+	edited, err := m.store.Edit(m.project, issue.ID, store.EditIssueOptions{
+		PrioritySet: true,
+		Priority:    nextValue(priorityCycle, issue.Priority),
+	})
+	if err != nil {
+		m.loadErr = err
+		return
+	}
+	m.reloadAfterEdit(edited.Issue)
+}
+
+func (m *model) openLabelPicker() {
+	if len(store.Labels) == 0 {
+		return
+	}
+	if _, ok := m.currentIssue(); !ok {
+		return
+	}
+	m.labelCursor = 0
+	m.mode = viewLabels
+}
+
+func (m *model) moveLabelCursor(delta int) {
+	if len(store.Labels) == 0 {
+		return
+	}
+	m.labelCursor = min(max(m.labelCursor+delta, 0), len(store.Labels)-1)
+}
+
+func (m *model) toggleFocusedLabel() {
+	if m.labelCursor < 0 || m.labelCursor >= len(store.Labels) {
+		return
+	}
+	issue, ok := m.currentIssue()
+	if !ok {
+		return
+	}
+	label := store.Labels[m.labelCursor]
+	action := "add"
+	if slices.Contains(issue.Labels, label) {
+		action = "remove"
+	}
+	edited, err := m.store.Edit(m.project, issue.ID, store.EditIssueOptions{
+		LabelOps: []store.LabelEditOp{{Kind: action, Label: label}},
+	})
+	if err != nil {
+		m.loadErr = err
+		return
+	}
+	m.reloadAfterEdit(edited.Issue)
+}
+
+// reloadAfterEdit refreshes the Digest from the store and keeps the edited
+// Issue focused, re-rendering whichever detail surface is open so the change
+// shows immediately.
+func (m *model) reloadAfterEdit(edited store.Issue) {
+	m.reloadDigest()
+	m.focusIssue(edited.ID)
+	switch m.mode {
+	case viewIssue:
+		m.showIssue(edited)
+	case viewLabels:
+		m.detailIssue = edited
+	}
+}
+
 func (m *model) openSelectedIssue() {
 	issue, ok := m.selectedIssue()
 	if !ok {
@@ -386,6 +502,13 @@ func (m model) selectedIssue() (store.Issue, bool) {
 		return store.Issue{}, false
 	}
 	return section.Issues[section.selected], true
+}
+
+func (m model) currentIssue() (store.Issue, bool) {
+	if m.mode == viewIssue && m.detailIssue.ID != "" {
+		return m.detailIssue, true
+	}
+	return m.selectedIssue()
 }
 
 func (m *model) moveDetailIssue(delta int) {
@@ -474,7 +597,34 @@ func (m model) issueDetailView() string {
 			lines = append(lines, " "+wrapped)
 		}
 	}
-	lines = append(lines, "", " esc back   ↑↓ prev/next   r refresh   : cmd   q quit")
+	lines = append(lines, "", " esc back   ↑↓ prev/next   s status   p priority   l labels   r refresh   : cmd   q quit")
+	return strings.Join(lines, "\n")
+}
+
+func (m model) labelPickerView() string {
+	issue := m.detailIssue
+	lines := []string{
+		issueHeader(m.project.Name, issue),
+		strings.Repeat("─", digestWidth),
+		"",
+	}
+	for i, label := range store.Labels {
+		mark := "[ ]"
+		if slices.Contains(issue.Labels, label) {
+			mark = "[x]"
+		}
+		prefix := "   "
+		if i == m.labelCursor {
+			prefix = " ▸ "
+		}
+		lines = append(lines, prefix+mark+" "+label)
+	}
+	lines = append(lines,
+		"",
+		strings.Repeat("─", digestWidth),
+		"",
+		" ↑↓ move   ⏎ toggle   esc done   q quit",
+	)
 	return strings.Join(lines, "\n")
 }
 
@@ -526,6 +676,18 @@ func priorityMark(priority string) string {
 	default:
 		return "·"
 	}
+}
+
+func nextValue(values []string, current string) string {
+	for i, value := range values {
+		if value == current {
+			return values[(i+1)%len(values)]
+		}
+	}
+	if len(values) == 0 {
+		return current
+	}
+	return values[0]
 }
 
 func truncate(value string, max int) string {

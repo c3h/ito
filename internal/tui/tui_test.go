@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -189,6 +190,147 @@ func TestDigestHidesAndRevealsFocusedSection(t *testing.T) {
 	}
 }
 
+func TestStatusKeyMovesSelectedIssueThroughStoreAndReloadsDigest(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("status-edit-app", "SED", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	issue, err := st.CreateIssue(project, "Move from the TUI", "backlog", "medium", []string{"feature"}, "")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "s"))
+	moved, err := st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find moved issue: %v", err)
+	}
+	if moved.Status != "todo" {
+		t.Fatalf("expected s to move Issue to todo through the store, got %q", moved.Status)
+	}
+
+	view := current.View()
+	if !strings.Contains(view, "BACKLOG  (0)") || !strings.Contains(view, "TODO  (1)") {
+		t.Fatalf("expected Digest to reload counts after status edit, got:\n%s", view)
+	}
+	if !strings.Contains(view, " ▸ ◆ "+issue.ID+" Move from the TUI") {
+		t.Fatalf("expected moved Issue to stay selected after reload, got:\n%s", view)
+	}
+}
+
+func TestIssueDetailPriorityKeyCyclesPriorityThroughStore(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("priority-edit-app", "PED", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	issue, err := st.CreateIssue(project, "Cycle priority from detail", "todo", "low", []string{"feature"}, "")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	current, _ = current.Update(keyMsg(t, "p"))
+	edited, err := st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find edited issue: %v", err)
+	}
+	if edited.Priority != "medium" {
+		t.Fatalf("expected p to cycle low priority to medium through the store, got %q", edited.Priority)
+	}
+
+	view := current.View()
+	if !strings.Contains(view, "todo   ·   medium   ·   feature") {
+		t.Fatalf("expected Issue detail to reload edited priority, got:\n%s", view)
+	}
+	if !strings.Contains(view, "p priority") {
+		t.Fatalf("expected Issue detail shortcuts to expose priority edit, got:\n%s", view)
+	}
+}
+
+func TestIssueDetailLabelPickerTogglesChosenLabelsThroughStore(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("label-edit-app", "LED", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	issue, err := st.CreateIssue(project, "Toggle labels from detail", "todo", "medium", nil, "")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+
+	// l opens a picker over the fixed vocabulary, not a blind toggle of one label.
+	current, _ = current.Update(keyMsg(t, "l"))
+	picker := current.View()
+	for _, want := range []string{"[ ] " + store.Labels[0], "[ ] " + store.Labels[1], "⏎ toggle"} {
+		if !strings.Contains(picker, want) {
+			t.Fatalf("expected label picker to list the vocabulary, got:\n%s", picker)
+		}
+	}
+
+	// enter toggles the focused (first) label on through the store.
+	current, _ = current.Update(keyMsg(t, "enter"))
+	edited, err := st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find edited issue: %v", err)
+	}
+	if !slices.Equal(edited.Labels, []string{store.Labels[0]}) {
+		t.Fatalf("expected enter to add the focused Label through the store, got %#v", edited.Labels)
+	}
+	if !strings.Contains(current.View(), "[x] "+store.Labels[0]) {
+		t.Fatalf("expected picker to reflect the added label, got:\n%s", current.View())
+	}
+
+	// down picks a different label from the vocabulary; enter adds that one too.
+	current, _ = current.Update(keyMsg(t, "down"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	edited, err = st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find edited issue after second toggle: %v", err)
+	}
+	if !slices.Contains(edited.Labels, store.Labels[1]) || !slices.Contains(edited.Labels, store.Labels[0]) {
+		t.Fatalf("expected the chosen non-first Label to be added alongside the first, got %#v", edited.Labels)
+	}
+
+	// enter again on the focused label removes it.
+	current, _ = current.Update(keyMsg(t, "enter"))
+	edited, err = st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find edited issue after toggle off: %v", err)
+	}
+	if slices.Contains(edited.Labels, store.Labels[1]) {
+		t.Fatalf("expected enter to remove the focused Label, got %#v", edited.Labels)
+	}
+
+	// esc leaves the picker back to the read-only detail.
+	if current, _ = current.Update(keyMsg(t, "esc")); !strings.Contains(current.View(), "esc back   ↑↓ prev/next") {
+		t.Fatalf("expected esc to return to the Issue detail, got:\n%s", current.View())
+	}
+}
+
 func TestDigestViewportUsesTerminalHeightWithoutFixedItemCap(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -313,14 +455,11 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 		"## Context",
 		"Show the full markdown body.",
 		"## Acceptance",
-		"esc back   ↑↓ prev/next",
+		"esc back   ↑↓ prev/next   s status   p priority   l labels",
 	} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("expected Issue detail to contain %q, got:\n%s", want, detail)
 		}
-	}
-	if strings.Contains(detail, "s status") || strings.Contains(detail, "p priority") || strings.Contains(detail, "l labels") {
-		t.Fatalf("Issue detail should be read-only in ITO-7, got edit shortcuts:\n%s", detail)
 	}
 
 	current, _ = current.Update(keyMsg(t, "esc"))
@@ -386,6 +525,12 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	case "h":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}}
+	case "s":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	case "p":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}}
+	case "l":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}}
 	default:
 		t.Fatalf("unsupported key %q", key)
 		return tea.KeyMsg{Type: tea.KeyNull}
