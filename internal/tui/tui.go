@@ -11,6 +11,11 @@ import (
 
 const digestWidth = 88
 
+const (
+	boardColumnGap      = 3
+	boardMinColumnWidth = 24
+)
+
 // Digest rows View() draws besides Issues: digestChromeLines (header, divider,
 // blank, shortcut bar) and sectionChromeLines per section (heading + blank).
 const (
@@ -30,6 +35,7 @@ type viewMode string
 
 const (
 	viewDigest   viewMode = "digest"
+	viewBoard    viewMode = "board"
 	viewIssue    viewMode = "issue"
 	viewLabels   viewMode = "labels"
 	viewProjects viewMode = "projects"
@@ -57,6 +63,7 @@ type model struct {
 	sections      []digestSection
 	focusIndex    int
 	mode          viewMode
+	returnMode    viewMode
 	detailIssue   store.Issue
 	linkTitles    map[string]string
 	labelCursor   int
@@ -67,6 +74,7 @@ type model struct {
 	commandOpen   bool
 	commandQuery  string
 	loadErr       error
+	width         int
 	height        int
 }
 
@@ -133,10 +141,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case viewLabels:
 				m.mode = viewIssue
 			case viewIssue:
+				m.mode = m.detailReturnMode()
+			}
+		case "1":
+			if m.mode == viewDigest || m.mode == viewBoard {
 				m.mode = viewDigest
 			}
+		case "2":
+			if m.mode == viewDigest || m.mode == viewBoard {
+				m.mode = viewBoard
+			}
 		case "/":
-			if m.mode == viewDigest {
+			if m.mode == viewDigest || m.mode == viewBoard {
 				m.filterOpen = true
 			}
 		case ":":
@@ -145,13 +161,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			switch m.mode {
-			case viewDigest:
+			case viewDigest, viewBoard:
 				m.openSelectedIssue()
 			case viewLabels:
 				m.toggleFocusedLabel()
 			}
 		case "tab":
-			if m.mode == viewDigest {
+			if m.mode == viewDigest || m.mode == viewBoard {
 				m.moveFocus(1)
 			}
 		case "h":
@@ -175,7 +191,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openLabelPicker()
 			}
 		case "shift+tab":
-			if m.mode == viewDigest {
+			if m.mode == viewDigest || m.mode == viewBoard {
 				m.moveFocus(-1)
 			}
 		case "up":
@@ -198,6 +214,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.WindowSizeMsg:
+		m.width = msg.Width
 		m.height = msg.Height
 	}
 	return m, nil
@@ -237,10 +254,13 @@ func (m model) View() string {
 	if m.mode == viewIssue {
 		return m.issueDetailView()
 	}
+	if m.mode == viewBoard {
+		return m.boardView()
+	}
 
 	sections := m.digestSections()
 	lines := []string{
-		header(m.project.Name, issueCount(sections)),
+		header(m.project.Name, issueCount(sections), digestWidth),
 		strings.Repeat("─", digestWidth),
 		"",
 	}
@@ -284,6 +304,148 @@ func (m model) View() string {
 	return strings.Join(lines, "\n")
 }
 
+func (m model) boardView() string {
+	sections := m.boardSections()
+	width := m.boardWidth()
+	visible := m.visibleBoardSections(sections, width)
+	lines := []string{
+		header(m.project.Name, issueCount(sections), width),
+		strings.Repeat("─", width),
+		"",
+	}
+
+	columns := make([][]string, 0, len(visible.sections))
+	for i, section := range visible.sections {
+		sectionIndex := visible.start + i
+		columns = append(columns, m.boardColumn(section, sectionIndex, visible.columnWidth))
+	}
+	maxRows := 0
+	for _, column := range columns {
+		maxRows = max(maxRows, len(column))
+	}
+	for i := range columns {
+		for len(columns[i]) < maxRows {
+			columns[i] = append(columns[i], strings.Repeat(" ", visible.columnWidth))
+		}
+	}
+	for row := 0; row < maxRows; row++ {
+		lead := "  "
+		if row == 0 && visible.hasLeft {
+			lead = "‹ "
+		}
+		parts := make([]string, 0, len(columns))
+		for _, column := range columns {
+			parts = append(parts, column[row])
+		}
+		line := lead + strings.Join(parts, strings.Repeat(" ", boardColumnGap))
+		if row == 0 && visible.hasRight {
+			line += " ›"
+		}
+		lines = append(lines, line)
+	}
+
+	lines = append(lines, m.boardBottomBar(issueCount(sections), issueCount(m.sections)))
+	return strings.Join(lines, "\n")
+}
+
+type visibleBoardSections struct {
+	sections    []digestSection
+	start       int
+	columnWidth int
+	hasLeft     bool
+	hasRight    bool
+}
+
+func (m model) visibleBoardSections(sections []digestSection, width int) visibleBoardSections {
+	count := len(sections)
+	if count == 0 {
+		return visibleBoardSections{}
+	}
+	visibleCount := min(count, max(1, (width+boardColumnGap)/(boardMinColumnWidth+boardColumnGap)))
+	focusIndex := m.boardWindowFocusIndex(sections)
+	start := min(max(focusIndex-visibleCount/2, 0), count-visibleCount)
+	trackWidth := width - 4 // left/right affordance columns
+	columnWidth := (trackWidth - boardColumnGap*(visibleCount-1)) / visibleCount
+	if columnWidth < 1 {
+		columnWidth = 1
+	}
+	return visibleBoardSections{
+		sections:    sections[start : start+visibleCount],
+		start:       start,
+		columnWidth: columnWidth,
+		hasLeft:     start > 0,
+		hasRight:    start+visibleCount < count,
+	}
+}
+
+func (m model) boardWindowFocusIndex(sections []digestSection) int {
+	if len(sections) == 0 {
+		return 0
+	}
+	if strings.TrimSpace(m.filterQuery) == "" {
+		return min(max(m.focusIndex, 0), len(sections)-1)
+	}
+	if m.focusIndex >= 0 && m.focusIndex < len(sections) && len(sections[m.focusIndex].Issues) > 0 {
+		return m.focusIndex
+	}
+	for i, section := range sections {
+		if len(section.Issues) > 0 {
+			return i
+		}
+	}
+	return min(max(m.focusIndex, 0), len(sections)-1)
+}
+
+func (m model) boardColumn(section digestSection, sectionIndex int, width int) []string {
+	focused := sectionIndex == m.focusIndex
+	marker := " "
+	if focused {
+		marker = "▌"
+	}
+	lines := []string{truncate(marker+section.Label+"  ("+fmt.Sprint(len(section.Issues))+")", width)}
+	window := visibleIssueWindow(len(section.Issues), section.selected, m.boardIssueLineBudget())
+	if window.showAbove {
+		lines = append(lines, truncate(fmt.Sprintf("    ↑ %d more", window.start), width))
+	}
+	for j, issue := range section.Issues[window.start:window.end] {
+		issueIndex := window.start + j
+		selected := focused && issueIndex == section.selected
+		lines = append(lines, renderBoardIssue(issue, selected, width))
+	}
+	if window.showBelow {
+		lines = append(lines, truncate(fmt.Sprintf("    ↓ %d more", len(section.Issues)-window.end), width))
+	}
+	for i := range lines {
+		lines[i] = padRight(truncate(lines[i], width), width)
+	}
+	return lines
+}
+
+func (m model) boardIssueLineBudget() int {
+	if m.height <= 0 {
+		return 1 << 20
+	}
+	return max(1, m.height-5)
+}
+
+func (m model) boardWidth() int {
+	if m.width > 0 {
+		return max(m.width, 32)
+	}
+	return digestWidth
+}
+
+func (m model) boardBottomBar(matched, total int) string {
+	if m.filterOpen {
+		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
+		return " / " + m.filterQuery + "▏   " + hint
+	}
+	if m.commandOpen {
+		return m.commandBottomBar()
+	}
+	return " tab focus   ↑↓ select   ⏎ open   s status   / filter   : cmd   q quit"
+}
+
 func (m model) digestBottomBar(matched, total int) string {
 	if m.filterOpen {
 		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
@@ -296,7 +458,7 @@ func (m model) digestBottomBar(matched, total int) string {
 }
 
 func (m model) commandBottomBar() string {
-	lines := []string{divider("─ actions ", digestWidth)}
+	lines := []string{divider("─ actions ", m.surfaceWidth())}
 	for _, action := range m.filteredCommandActions() {
 		lines = append(lines, " "+renderCommandAction(action))
 	}
@@ -646,6 +808,14 @@ func (m model) digestSections() []digestSection {
 	return sections
 }
 
+func (m model) boardSections() []digestSection {
+	sections := m.digestSections()
+	for i := range sections {
+		sections[i].hidden = false
+	}
+	return sections
+}
+
 func issueMatchesFilter(issue store.Issue, query string) bool {
 	if strings.Contains(strings.ToLower(issue.ID), query) || strings.Contains(strings.ToLower(issue.Title), query) {
 		return true
@@ -670,7 +840,7 @@ func (m *model) moveSelection(delta int) {
 		return
 	}
 	section := &m.sections[m.focusIndex]
-	if section.hidden || len(section.Issues) == 0 {
+	if (section.hidden && m.mode != viewBoard) || len(section.Issues) == 0 {
 		return
 	}
 	section.selected = min(max(section.selected+delta, 0), len(section.Issues)-1)
@@ -719,6 +889,9 @@ func (m *model) openLabelPicker() {
 	issue, ok := m.currentIssue()
 	if !ok {
 		return
+	}
+	if m.mode == viewDigest || m.mode == viewBoard {
+		m.returnMode = m.mode
 	}
 	m.detailIssue = issue
 	m.linkTitles = m.loadLinkTitles(issue)
@@ -783,10 +956,20 @@ func (m *model) openSelectedIssue() {
 // Digest sections, so opening and prev/next navigation never re-read the store
 // for data the sections already hold.
 func (m *model) showIssue(issue store.Issue) {
+	if m.mode == viewDigest || m.mode == viewBoard {
+		m.returnMode = m.mode
+	}
 	m.detailIssue = issue
 	m.linkTitles = m.loadLinkTitles(issue)
 	m.focusIssue(issue.ID)
 	m.mode = viewIssue
+}
+
+func (m model) detailReturnMode() viewMode {
+	if m.returnMode == viewBoard {
+		return viewBoard
+	}
+	return viewDigest
 }
 
 func (m model) selectedIssue() (store.Issue, bool) {
@@ -794,7 +977,7 @@ func (m model) selectedIssue() (store.Issue, bool) {
 		return store.Issue{}, false
 	}
 	section := m.sections[m.focusIndex]
-	if section.hidden || len(section.Issues) == 0 || section.selected < 0 || section.selected >= len(section.Issues) {
+	if (section.hidden && m.mode != viewBoard) || len(section.Issues) == 0 || section.selected < 0 || section.selected >= len(section.Issues) {
 		return store.Issue{}, false
 	}
 	return section.Issues[section.selected], true
@@ -838,7 +1021,7 @@ func (m model) allIssues() []store.Issue {
 
 func (m *model) focusIssue(id string) {
 	for i := range m.sections {
-		if m.sections[i].hidden {
+		if m.sections[i].hidden && m.mode != viewBoard {
 			continue
 		}
 		for j := range m.sections[i].Issues {
@@ -971,10 +1154,17 @@ func (m model) projectPickerView() string {
 	return strings.Join(lines, "\n")
 }
 
-func header(projectName string, issueCount int) string {
+func header(projectName string, issueCount int, width int) string {
 	left := "ito · [1] digest · [2] board"
 	right := fmt.Sprintf("%d issues   %s", issueCount, projectName)
-	return padBetween(left, right, digestWidth)
+	return padBetween(left, right, width)
+}
+
+func (m model) surfaceWidth() int {
+	if m.mode == viewBoard {
+		return m.boardWidth()
+	}
+	return digestWidth
 }
 
 func issueHeader(projectName string, issue store.Issue) string {
@@ -989,7 +1179,7 @@ func issueHeader(projectName string, issue store.Issue) string {
 // padBetween left-aligns left and right-aligns right across width, keeping at
 // least one space between them when the two would otherwise meet or overflow.
 func padBetween(left, right string, width int) string {
-	gap := width - len(left) - len(right)
+	gap := width - runeLen(left) - runeLen(right)
 	if gap < 1 {
 		gap = 1
 	}
@@ -1006,6 +1196,23 @@ func renderIssueRow(issue store.Issue) string {
 		parts = append(parts, strings.Join(issue.Labels, " "))
 	}
 	return strings.Join(parts, "   ")
+}
+
+func renderBoardIssue(issue store.Issue, selected bool, width int) string {
+	pointer := " "
+	if selected {
+		pointer = "▸"
+	}
+	prefix := fmt.Sprintf("%s %s %s ", pointer, priorityMark(issue.Priority), issue.ID)
+	labels := ""
+	if len(issue.Labels) > 0 {
+		labels = "   " + strings.Join(issue.Labels, " ")
+	}
+	titleWidth := width - runeLen(prefix) - runeLen(labels)
+	if titleWidth < 1 {
+		return truncate(prefix+issue.Title+labels, width)
+	}
+	return prefix + truncate(issue.Title, titleWidth) + labels
 }
 
 func priorityMark(priority string) string {
@@ -1034,21 +1241,26 @@ func nextValue(values []string, current string) string {
 }
 
 func truncate(value string, max int) string {
-	if len(value) <= max {
+	runes := []rune(value)
+	if len(runes) <= max {
 		return value
 	}
-	ellipsis := "…"
-	if max <= len(ellipsis) {
+	if max <= 1 {
 		return "…"
 	}
-	return value[:max-len(ellipsis)] + ellipsis
+	return string(runes[:max-1]) + "…"
 }
 
 func padRight(value string, width int) string {
-	if len(value) >= width {
+	length := runeLen(value)
+	if length >= width {
 		return value
 	}
-	return value + strings.Repeat(" ", width-len(value))
+	return value + strings.Repeat(" ", width-length)
+}
+
+func runeLen(value string) int {
+	return len([]rune(value))
 }
 
 func wrapLine(value string, width int) []string {
