@@ -67,6 +67,11 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 			contains: []string{"usage: ito new", "--title", "--status", "--priority", "--label", "--body"},
 		},
 		{
+			name:     "list help",
+			args:     []string{"list", "--help"},
+			contains: []string{"usage: ito list", "--ready", "one git worktree per ready Issue"},
+		},
+		{
 			name:     "edit help",
 			args:     []string{"edit", "--help"},
 			contains: []string{"usage: ito edit", "--title", "--priority", "--add-label", "--block", "--relate"},
@@ -491,6 +496,108 @@ func TestListFiltersByStatusPriorityAndLabels(t *testing.T) {
 	}
 }
 
+func TestListReadyReturnsOpenIssuesWithOnlyDoneBlockers(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "ready-app", "--prefix", "RDY"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	fixtures := [][]string{
+		{"new", "--json", "--title", "No blockers", "--status", "backlog"},
+		{"new", "--json", "--title", "Done blocker", "--status", "todo"},
+		{"new", "--json", "--title", "Review blocker", "--status", "todo"},
+		{"new", "--json", "--title", "Done dependency", "--status", "done"},
+		{"new", "--json", "--title", "Review dependency", "--status", "in_review"},
+		{"new", "--json", "--title", "In progress is not ready", "--status", "in_progress"},
+	}
+	for _, args := range fixtures {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "RDY-2", "--block", "RDY-4"); result.exitCode != 0 {
+		t.Fatalf("ito edit done blocker failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "RDY-3", "--block", "RDY-5"); result.exitCode != 0 {
+		t.Fatalf("ito edit review blocker failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, repo, itoHome, "list", "--ready", "--json")
+	if result.exitCode != 0 {
+		t.Fatalf("ito list --ready failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, result.stdout)); !stringSlicesEqual(got, []string{"RDY-1", "RDY-2"}) {
+		t.Fatalf("expected ready frontier IDs [RDY-1 RDY-2], got %v\nstdout: %s", got, result.stdout)
+	}
+}
+
+func TestListReadyComposesWithFiltersAndAllProjects(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "first")
+	secondRepo := filepath.Join(parent, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "ready-alpha", "--prefix", "RDA"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "ready-beta", "--prefix", "RDB"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	fixtures := []struct {
+		repo string
+		args []string
+	}{
+		{firstRepo, []string{"new", "--json", "--title", "Alpha ready high feature", "--status", "todo", "--priority", "high", "--label", "feature"}},
+		{firstRepo, []string{"new", "--json", "--title", "Alpha ready low feature", "--status", "todo", "--priority", "low", "--label", "feature"}},
+		{firstRepo, []string{"new", "--json", "--title", "Alpha in progress", "--status", "in_progress", "--priority", "high", "--label", "feature"}},
+		{secondRepo, []string{"new", "--json", "--title", "Beta ready high feature", "--status", "backlog", "--priority", "high", "--label", "feature"}},
+		{secondRepo, []string{"new", "--json", "--title", "Beta ready high bug", "--status", "todo", "--priority", "high", "--label", "bug"}},
+	}
+	for _, fixture := range fixtures {
+		if result := runITO(t, fixture.repo, itoHome, fixture.args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", fixture.args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+
+	filtered := runITO(t, firstRepo, itoHome, "list", "--ready", "--json", "--label", "feature", "--priority", "high")
+	if filtered.exitCode != 0 {
+		t.Fatalf("ito list --ready with filters failed with exit %d\nstdout: %s\nstderr: %s", filtered.exitCode, filtered.stdout, filtered.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, filtered.stdout)); !stringSlicesEqual(got, []string{"RDA-1"}) {
+		t.Fatalf("expected filtered ready IDs [RDA-1], got %v\nstdout: %s", got, filtered.stdout)
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(filtered.stdout), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("expected one filtered issue, got %s", filtered.stdout)
+	}
+	if _, ok := raw[0]["body"]; ok {
+		t.Fatalf("list --ready JSON must omit body, got %s", filtered.stdout)
+	}
+
+	contradictory := runITO(t, firstRepo, itoHome, "list", "--ready", "--json", "--status", "in_progress")
+	if contradictory.exitCode != 0 || strings.TrimSpace(contradictory.stdout) != "[]" {
+		t.Fatalf("expected contradictory ready status to yield [], got exit=%d stdout=%q stderr=%q", contradictory.exitCode, contradictory.stdout, contradictory.stderr)
+	}
+
+	all := runITO(t, t.TempDir(), itoHome, "list", "--ready", "--json", "--all-projects", "--label", "feature", "--priority", "high")
+	if all.exitCode != 0 {
+		t.Fatalf("ito list --ready --all-projects failed with exit %d\nstdout: %s\nstderr: %s", all.exitCode, all.stdout, all.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, all.stdout)); !stringSlicesEqual(got, []string{"RDA-1", "RDB-1"}) {
+		t.Fatalf("expected all-projects ready IDs [RDA-1 RDB-1], got %v\nstdout: %s", got, all.stdout)
+	}
+}
+
 func TestListProjectScopeFromAnyCwdAndAllProjects(t *testing.T) {
 	parent := t.TempDir()
 	firstRepo := filepath.Join(parent, "first")
@@ -641,11 +748,19 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'LNK-
 		t.Fatalf("ito list failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
 	issues := decodeIssueList(t, result.stdout)
-	if !stringSlicesEqual(issues[0].Labels, []string{"feature"}) || !stringSlicesEqual(issues[0].BlockedBy, []string{"LNK-2"}) || !stringSlicesEqual(issues[0].RelatesTo, []string{"LNK-3"}) {
-		t.Fatalf("expected stable labels and links on first issue, got %#v", issues[0])
+	linked, found := findIssueJSON(issues, "LNK-1")
+	if !found {
+		t.Fatalf("expected linked Issue LNK-1 in list, got %#v", issues)
 	}
-	if issues[1].BlockedBy == nil || issues[1].RelatesTo == nil {
-		t.Fatalf("expected empty link arrays, got %#v", issues[1])
+	if !stringSlicesEqual(linked.Labels, []string{"feature"}) || !stringSlicesEqual(linked.BlockedBy, []string{"LNK-2"}) || !stringSlicesEqual(linked.RelatesTo, []string{"LNK-3"}) {
+		t.Fatalf("expected stable labels and links on linked issue, got %#v", linked)
+	}
+	blocker, found := findIssueJSON(issues, "LNK-2")
+	if !found {
+		t.Fatalf("expected blocker Issue LNK-2 in list, got %#v", issues)
+	}
+	if blocker.BlockedBy == nil || blocker.RelatesTo == nil {
+		t.Fatalf("expected empty link arrays, got %#v", blocker)
 	}
 }
 
@@ -2809,6 +2924,15 @@ func issueIDs(issues []issueJSON) []string {
 		ids = append(ids, issue.ID)
 	}
 	return ids
+}
+
+func findIssueJSON(issues []issueJSON, id string) (issueJSON, bool) {
+	for _, issue := range issues {
+		if issue.ID == id {
+			return issue, true
+		}
+	}
+	return issueJSON{}, false
 }
 
 func openTestDB(t *testing.T, itoHome string) *sql.DB {

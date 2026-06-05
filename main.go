@@ -224,6 +224,7 @@ type listOptions struct {
 	Priority    string
 	Labels      []string
 	Search      string
+	Ready       bool
 }
 
 type issueDeletionRow struct {
@@ -961,6 +962,7 @@ func runList(args []string) int {
 	var status string
 	var priority string
 	var search string
+	var ready bool
 	var labels stringSliceFlag
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
@@ -968,6 +970,7 @@ func runList(args []string) int {
 	fs.StringVar(&status, "status", "", "")
 	fs.StringVar(&priority, "priority", "", "")
 	fs.StringVar(&search, "search", "", "")
+	fs.BoolVar(&ready, "ready", false, "")
 	fs.Var(&labels, "label", "")
 	if err := fs.Parse(args); err != nil {
 		return fail(wantsJSON(args, commandValueFlags("list")), exitBadUsage, err.Error(), "run 'ito list --help' to see the accepted flags.")
@@ -1002,6 +1005,7 @@ func runList(args []string) int {
 		Priority:    priority,
 		Labels:      append([]string{}, labels...),
 		Search:      search,
+		Ready:       ready,
 	}
 	if !allProjects {
 		rootPath, inGit, err := resolveCurrentRoot()
@@ -1246,11 +1250,13 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "list":
-		fmt.Println(`usage: ito list [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--project <name>|--all-projects] [--json]
+		fmt.Println(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--project <name>|--all-projects] [--json]
 
 Lists Issues in the current Project. Issues in done are hidden by default, except with --status done.
+Use --ready to list the backlog/todo frontier whose blockers are all done; an agent can fan out one git worktree per ready Issue.
 
 Flags:
+  --ready                  Filter to backlog/todo Issues whose blockers are done.
   --status <status>        Filter by backlog, todo, in_progress, in_review or done.
   --priority <priority>    Filter by low, medium, high or urgent.
   --label <label>          Filter by Label. Repeatable.
@@ -2313,6 +2319,17 @@ WHERE issue_labels.project_id = issues.project_id
   AND issue_labels.label = ?
 )`)
 		args = append(args, label)
+	}
+	if options.Ready {
+		where = append(where, `issues.status IN ('backlog', 'todo')`)
+		where = append(where, `NOT EXISTS (
+SELECT 1 FROM issue_links
+JOIN issues AS blocker ON blocker.project_id = issue_links.project_id AND blocker.id = issue_links.target_id
+WHERE issue_links.project_id = issues.project_id
+  AND issue_links.source_id = issues.id
+  AND issue_links.kind = 'blocked_by'
+  AND blocker.status != 'done'
+)`)
 	}
 
 	query := `
