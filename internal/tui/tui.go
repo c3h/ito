@@ -36,19 +36,35 @@ const (
 
 var priorityCycle = []string{"low", "medium", "high", "urgent"}
 
+var commandActions = []commandAction{
+	{Shortcut: "s", Name: "status"},
+	{Shortcut: "p", Name: "priority"},
+	{Shortcut: "l", Name: "labels"},
+	{Name: "switch project"},
+	{Shortcut: "r", Name: "refresh"},
+	{Shortcut: "q", Name: "quit"},
+}
+
+type commandAction struct {
+	Shortcut string
+	Name     string
+}
+
 type model struct {
-	store       *store.Store
-	project     store.Project
-	sections    []digestSection
-	focusIndex  int
-	mode        viewMode
-	detailIssue store.Issue
-	linkTitles  map[string]string
-	labelCursor int
-	filterOpen  bool
-	filterQuery string
-	loadErr     error
-	height      int
+	store        *store.Store
+	project      store.Project
+	sections     []digestSection
+	focusIndex   int
+	mode         viewMode
+	detailIssue  store.Issue
+	linkTitles   map[string]string
+	labelCursor  int
+	filterOpen   bool
+	filterQuery  string
+	commandOpen  bool
+	commandQuery string
+	loadErr      error
+	height       int
 }
 
 type digestSection struct {
@@ -91,21 +107,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if m.filterOpen {
-			switch msg.Type {
-			case tea.KeyCtrlC:
-				return m, tea.Quit
-			case tea.KeyEsc:
-				m.filterOpen = false
-				m.filterQuery = ""
-			case tea.KeyBackspace:
-				if m.filterQuery != "" {
-					runes := []rune(m.filterQuery)
-					m.filterQuery = string(runes[:len(runes)-1])
-				}
-			case tea.KeyRunes:
-				m.filterQuery += string(msg.Runes)
+			return m, editInlineInput(&m.filterOpen, &m.filterQuery, msg)
+		}
+		if m.commandOpen {
+			if msg.Type == tea.KeyEnter {
+				return m.runSelectedCommandAction()
 			}
-			return m, nil
+			return m, editInlineInput(&m.commandOpen, &m.commandQuery, msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -120,6 +128,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "/":
 			if m.mode == viewDigest {
 				m.filterOpen = true
+			}
+		case ":":
+			if m.mode != viewLabels {
+				m.commandOpen = true
 			}
 		case "enter":
 			switch m.mode {
@@ -139,6 +151,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "s":
 			if m.mode != viewLabels {
 				m.moveSelectedIssueStatus()
+			}
+		case "r":
+			if m.mode != viewLabels {
+				m.reloadDigest()
 			}
 		case "p":
 			if m.mode == viewIssue {
@@ -175,6 +191,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	}
 	return m, nil
+}
+
+// editInlineInput applies a key to an open inline input — the / filter or the :
+// command bar. Ctrl-C quits, Esc closes and clears, Backspace and runes edit
+// the query in place; any other key is ignored.
+func editInlineInput(open *bool, query *string, msg tea.KeyMsg) tea.Cmd {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return tea.Quit
+	case tea.KeyEsc:
+		*open = false
+		*query = ""
+	case tea.KeyBackspace:
+		if *query != "" {
+			runes := []rune(*query)
+			*query = string(runes[:len(runes)-1])
+		}
+	case tea.KeyRunes:
+		*query += string(msg.Runes)
+	}
+	return nil
 }
 
 func (m model) View() string {
@@ -239,7 +276,68 @@ func (m model) digestBottomBar(matched, total int) string {
 		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
 		return " / " + m.filterQuery + "▏   " + hint
 	}
+	if m.commandOpen {
+		return m.commandBottomBar()
+	}
 	return " tab focus   ↑↓ select   ⏎ open   s status   h hide   / filter   : cmd   q quit"
+}
+
+func (m model) commandBottomBar() string {
+	lines := []string{divider("─ actions ", digestWidth)}
+	for _, action := range m.filteredCommandActions() {
+		lines = append(lines, " "+renderCommandAction(action))
+	}
+	lines = append(lines, " : "+m.commandQuery+"▏   esc cancel")
+	return strings.Join(lines, "\n")
+}
+
+func divider(head string, width int) string {
+	return head + strings.Repeat("─", width-len(head))
+}
+
+func (m model) filteredCommandActions() []commandAction {
+	query := strings.TrimSpace(strings.ToLower(m.commandQuery))
+	if query == "" {
+		return commandActions
+	}
+	var filtered []commandAction
+	for _, action := range commandActions {
+		if strings.Contains(strings.ToLower(action.Name), query) || strings.Contains(strings.ToLower(action.Shortcut), query) {
+			filtered = append(filtered, action)
+		}
+	}
+	return filtered
+}
+
+func renderCommandAction(action commandAction) string {
+	if action.Shortcut == "" {
+		return "   " + action.Name
+	}
+	return action.Shortcut + "  " + action.Name
+}
+
+func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
+	actions := m.filteredCommandActions()
+	if len(actions) == 0 {
+		return m, nil
+	}
+	m.commandOpen = false
+	m.commandQuery = ""
+	// The : command line never opens in viewLabels, so these actions always run
+	// against the Digest or the Issue detail.
+	switch actions[0].Name {
+	case "status":
+		m.moveSelectedIssueStatus()
+	case "priority":
+		m.cycleDetailIssuePriority()
+	case "labels":
+		m.openLabelPicker()
+	case "refresh":
+		m.reloadDigest()
+	case "quit":
+		return m, tea.Quit
+	}
+	return m, nil
 }
 
 func (m *model) reloadDigest() {
@@ -504,9 +602,13 @@ func (m *model) openLabelPicker() {
 	if len(store.Labels) == 0 {
 		return
 	}
-	if _, ok := m.currentIssue(); !ok {
+	issue, ok := m.currentIssue()
+	if !ok {
 		return
 	}
+	m.detailIssue = issue
+	m.linkTitles = m.loadLinkTitles(issue)
+	m.focusIssue(issue.ID)
 	m.labelCursor = 0
 	m.mode = viewLabels
 }
@@ -677,7 +779,12 @@ func (m model) issueDetailView() string {
 			lines = append(lines, " "+wrapped)
 		}
 	}
-	lines = append(lines, "", " esc back   ↑↓ prev/next   s status   p priority   l labels   r refresh   : cmd   q quit")
+	lines = append(lines, "")
+	if m.commandOpen {
+		lines = append(lines, m.commandBottomBar())
+	} else {
+		lines = append(lines, " esc back   ↑↓ prev/next   s status   p priority   l labels   r refresh   : cmd   q quit")
+	}
 	return strings.Join(lines, "\n")
 }
 

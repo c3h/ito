@@ -330,6 +330,246 @@ func TestDigestInlineFilterRevealsMatchesInHiddenSections(t *testing.T) {
 	}
 }
 
+func TestCommandLineOpensInlineAndEscRestoresShortcuts(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("command-app", "CMD", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Keep Digest under command line", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, ":"))
+	commanding := current.View()
+	if !strings.Contains(commanding, "TODO  (1)") || !strings.Contains(commanding, "CMD-1 Keep Digest under command line") {
+		t.Fatalf("expected : to keep the Digest surface visible, got:\n%s", commanding)
+	}
+	if !strings.Contains(commanding, " : ▏") || !strings.Contains(commanding, "esc cancel") {
+		t.Fatalf("expected : to replace shortcuts with inline command input, got:\n%s", commanding)
+	}
+	if strings.Contains(commanding, "tab focus") {
+		t.Fatalf("expected command input to replace the shortcut bar, got:\n%s", commanding)
+	}
+
+	current, _ = current.Update(keyMsg(t, "esc"))
+	restored := current.View()
+	if !strings.Contains(restored, "tab focus   ↑↓ select") {
+		t.Fatalf("expected Esc to restore the shortcut bar, got:\n%s", restored)
+	}
+	if strings.Contains(restored, "esc cancel") {
+		t.Fatalf("expected Esc to leave the command input, got:\n%s", restored)
+	}
+}
+
+func TestCommandLineFiltersClosedV2ActionSet(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("command-actions-app", "CMA", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Command target", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, ":"))
+	actions := current.View()
+	for _, want := range []string{
+		"─ actions ",
+		"s  status",
+		"p  priority",
+		"l  labels",
+		"switch project",
+		"r  refresh",
+		"q  quit",
+	} {
+		if !strings.Contains(actions, want) {
+			t.Fatalf("expected command action list to contain %q, got:\n%s", want, actions)
+		}
+	}
+	for _, forbidden := range []string{"create", "title", "body", "links"} {
+		if strings.Contains(strings.ToLower(actions), forbidden) {
+			t.Fatalf("expected command action list to exclude v3 action %q, got:\n%s", forbidden, actions)
+		}
+	}
+
+	for _, r := range "lab" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	filtered := current.View()
+	if !strings.Contains(filtered, " : lab▏") || !strings.Contains(filtered, "l  labels") {
+		t.Fatalf("expected command query to filter to Labels, got:\n%s", filtered)
+	}
+	if strings.Contains(filtered, "s  status") || strings.Contains(filtered, "p  priority") || strings.Contains(filtered, "q  quit") {
+		t.Fatalf("expected command filter to hide non-matching actions, got:\n%s", filtered)
+	}
+}
+
+func TestCommandLineSelectionRunsActions(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("command-run-app", "CMR", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	issue, err := st.CreateIssue(project, "Run selected command", "backlog", "medium", nil, "")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, ":"))
+	for _, r := range "quit" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	_, cmd := current.Update(keyMsg(t, "enter"))
+	if cmd == nil {
+		t.Fatalf("expected selected quit command to return a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected selected quit command to return tea.QuitMsg, got %T", cmd())
+	}
+
+	current, _ = newModel(st, project).Update(keyMsg(t, ":"))
+	for _, r := range "status" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	moved, err := st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find moved issue: %v", err)
+	}
+	if moved.Status != "todo" {
+		t.Fatalf("expected selected status command to move Issue to todo through the store, got %q", moved.Status)
+	}
+	if strings.Contains(current.View(), "esc cancel") {
+		t.Fatalf("expected selected status command to close the command line, got:\n%s", current.View())
+	}
+
+	current, _ = newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, ":"))
+	for _, r := range "priority" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	prioritized, err := st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find prioritized issue: %v", err)
+	}
+	if prioritized.Priority != "high" {
+		t.Fatalf("expected selected priority command to cycle Issue priority, got %q", prioritized.Priority)
+	}
+
+	current, _ = newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, ":"))
+	for _, r := range "labels" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	if view := current.View(); !strings.Contains(view, "[ ] "+store.Labels[0]) || !strings.Contains(view, "⏎ toggle") {
+		t.Fatalf("expected selected labels command to open the label picker for the selected Issue, got:\n%s", view)
+	}
+}
+
+func TestIssueDetailCommandLineRunsLongTailActionsInline(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("detail-command-app", "DCA", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	issue, err := st.CreateIssue(project, "Priority from command", "todo", "low", nil, "body")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	current, _ = current.Update(keyMsg(t, ":"))
+	commanding := current.View()
+	if !strings.Contains(commanding, "ito · "+issue.ID+" · Priority from command") {
+		t.Fatalf("expected : to keep the Issue detail visible, got:\n%s", commanding)
+	}
+	if !strings.Contains(commanding, " : ▏") || !strings.Contains(commanding, "p  priority") || strings.Contains(commanding, "esc back") {
+		t.Fatalf("expected : to replace Issue detail shortcuts with command input, got:\n%s", commanding)
+	}
+
+	for _, r := range "priority" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	edited, err := st.FindIssue(project, issue.ID)
+	if err != nil {
+		t.Fatalf("find edited issue: %v", err)
+	}
+	if edited.Priority != "medium" {
+		t.Fatalf("expected priority command to cycle low priority to medium, got %q", edited.Priority)
+	}
+	if !strings.Contains(current.View(), "todo   ·   medium") || strings.Contains(current.View(), "esc cancel") {
+		t.Fatalf("expected priority command to close and refresh Issue detail, got:\n%s", current.View())
+	}
+}
+
+func TestRefreshShortcutAndCommandReloadDigest(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("refresh-app", "RFR", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	current := newModel(st, project)
+	if _, err := st.CreateIssue(project, "External write", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create external issue: %v", err)
+	}
+
+	if view := current.View(); strings.Contains(view, "External write") {
+		t.Fatalf("expected model snapshot to stay stale before refresh, got:\n%s", view)
+	}
+
+	refreshedByKey, _ := current.Update(keyMsg(t, "r"))
+	if view := refreshedByKey.View(); !strings.Contains(view, "RFR-1 External write") {
+		t.Fatalf("expected r shortcut to reload Digest, got:\n%s", view)
+	}
+
+	if _, err := st.CreateIssue(project, "Second external write", "todo", "high", nil, ""); err != nil {
+		t.Fatalf("create second external issue: %v", err)
+	}
+	refreshedByCommand, _ := refreshedByKey.Update(keyMsg(t, ":"))
+	for _, r := range "refresh" {
+		refreshedByCommand, _ = refreshedByCommand.Update(runeMsg(r))
+	}
+	refreshedByCommand, _ = refreshedByCommand.Update(keyMsg(t, "enter"))
+	if view := refreshedByCommand.View(); !strings.Contains(view, "RFR-2 Second external write") || strings.Contains(view, "esc cancel") {
+		t.Fatalf("expected refresh command to reload Digest and close command line, got:\n%s", view)
+	}
+}
+
 func TestStatusKeyMovesSelectedIssueThroughStoreAndReloadsDigest(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -671,8 +911,12 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}}
 	case "l":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}}
+	case "r":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}}
 	case "/":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
+	case ":":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}}
 	default:
 		t.Fatalf("unsupported key %q", key)
 		return tea.KeyMsg{Type: tea.KeyNull}
