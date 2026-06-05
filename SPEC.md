@@ -1,6 +1,6 @@
 # `ito` — Spec / PRD
 
-> **Status:** design frozen (pre-implementation) · **Date:** 2026-05-24
+> **Status:** v1 implemented · v2 (TUI) in design · **Date:** 2026-06-04
 > **Name:** **ito** — 糸 (*the thread that links the issues*) · 意図 (*intention/purpose*). "The thread of intentions." Binary: `ito`.
 
 A **local, solo, "full local"** issue tracker, Linear-style, for the terminal — with the twist of being **AI-driven through the command line**.
@@ -51,7 +51,7 @@ The AI is **external**. The tool does **not** expose MCP and does **not** embed 
 ### 2.4 Source of truth & write model
 - **SQLite is the source of truth.** Each issue is a **row**; the markdown body lives in a **TEXT column** (markdown preserved, not lost).
 - **Single writer:** the **CLI is the only writer**. Every create/edit goes through a command (`new`, `move`, `edit`, …). No Obsidian, no direct file editing.
-- Concurrent writes are serialized by SQLite itself. There is no async queue, daemon or job table: each command waits for the write lock, writes in a transaction and returns the real result. In v1 there is no fixed lock timeout; cancellation is done by the calling process (Ctrl-C/kill/external timeout).
+- Concurrent writes are serialized by SQLite itself. There is no async queue, daemon or job table: each command waits for the write lock, writes in a transaction and returns the real result. The store opens with a 5s `busy_timeout`, so a command blocked on the write lock waits up to that long before erroring; beyond it (or sooner) cancellation is done by the calling process (Ctrl-C/kill/external timeout).
 - **Why:** ready-made, tested **ACID** guarantees; single writer **eliminates the desync class of bug** that double writing created; a schema with migrations gives clean evolution (no frontmatter polluted over time).
 - **Accepted trade-off (ADR-0001):** you lose Obsidian and file editing by the agent. **Markdown export** stays as a future feature (snapshot).
 
@@ -264,10 +264,16 @@ Philosophy: **the actionable sentence is the product; the exit code is the bonus
 Core (SQLite schema + migrations, project resolution via git, ID minting) + `init / rename / new / edit / list / show / move / rm / prune` + `--json`. → *The agent can already work.*
 
 **v2 — TUI**
-A navigable board (Bubble Tea) **on top of the same core**: keyboard navigation, open an issue, edit inline. (It's the visual motivator of the project.)
+A navigable board (Bubble Tea) **on top of the same core** — primarily an accompaniment surface (you watch what the agent plants). See [`docs/adr/0002`](./docs/adr/0002-tui-calls-core-in-process.md) for how it reaches the core (in-process, not by shelling out).
+- **Launch:** bare `ito` opens the board when both stdin and stdout are a TTY; otherwise it prints the root help and exits `0` (so an agent driving via bash never stalls). There is no `tui` subcommand; explicit subcommands always follow the CLI path.
+- **View:** a board with five columns by Status, `done` hidden by default (toggle to reveal). Scoped to the cwd-resolved Project, with an in-TUI switcher across Projects; when the cwd has no Project, it opens a picker of existing Projects (or the `ito init` hint when the store is empty). "Column" is UI vocabulary only — never a synonym for Status in the domain (see `CONTEXT.md`).
+- **Read:** the board cards plus a read-only detail view (fields + body + links). This is the cheap, high-value half — it reuses the core's read path entirely.
+- **Edit (minimal, card-level):** Status (move), Priority (cycle), Labels (toggle). Nothing else.
+- **Refresh:** manual, via a key (`r`). The TUI's own edits reload immediately; `r` pulls in what the agent wrote from another process. No polling, no file-watching.
 
-**v3 — traceability + export + (maybe) hierarchy**
+**v3 — traceability + export + (maybe) hierarchy + richer TUI editing**
 - Traceability views over the links: `blocked_by` graph.
+- TUI editing deferred from v2: title, body, links, create (`new`) and delete (`rm`/`prune`). Links land naturally alongside the traceability views.
 - **Hierarchy (`parent`/epic)** — if missed — arrives here via migration.
 - `ito export` to markdown (snapshot).
 
