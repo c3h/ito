@@ -48,6 +48,7 @@ type digestSection struct {
 	Label    string
 	Issues   []store.Issue
 	selected int
+	hidden   bool
 }
 
 // statusLabel renders a store status as its Digest section heading
@@ -97,6 +98,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.mode == viewDigest {
 				m.moveFocus(1)
 			}
+		case "h":
+			if m.mode == viewDigest {
+				m.toggleFocusedSection()
+			}
 		case "shift+tab":
 			if m.mode == viewDigest {
 				m.moveFocus(-1)
@@ -140,6 +145,10 @@ func (m model) View() string {
 		if focused {
 			marker = "▌"
 		}
+		if section.hidden {
+			lines = append(lines, fmt.Sprintf(" %s▸ %s (%d) · h to show", marker, section.Label, len(section.Issues)))
+			continue
+		}
 		lines = append(lines, fmt.Sprintf(" %s▾ %s  (%d)", marker, section.Label, len(section.Issues)))
 		if len(section.Issues) == 0 {
 			lines = append(lines, "    no Issues")
@@ -180,6 +189,7 @@ func (m *model) reloadDigest() {
 		m.sections = append(m.sections, digestSection{
 			Label:  statusLabel(status),
 			Issues: issues,
+			hidden: status == "done",
 		})
 	}
 }
@@ -195,6 +205,9 @@ func (m model) digestWindows() []issueWindow {
 	windows := make([]issueWindow, len(m.sections))
 	capacities := m.digestSectionCapacities()
 	for i, section := range m.sections {
+		if section.hidden {
+			continue
+		}
 		windows[i] = visibleIssueWindow(len(section.Issues), section.selected, capacities[i])
 	}
 	return windows
@@ -204,6 +217,9 @@ func (m model) digestSectionCapacities() []int {
 	capacities := make([]int, len(m.sections))
 	showAll := func() []int {
 		for i, section := range m.sections {
+			if section.hidden {
+				continue
+			}
 			capacities[i] = len(section.Issues)
 		}
 		return capacities
@@ -214,8 +230,13 @@ func (m model) digestSectionCapacities() []int {
 
 	emptySections := 0
 	nonEmptySections := 0
+	hiddenSections := 0
 	totalIssues := 0
 	for _, section := range m.sections {
+		if section.hidden {
+			hiddenSections++
+			continue
+		}
 		if len(section.Issues) == 0 {
 			emptySections++
 			continue
@@ -227,7 +248,10 @@ func (m model) digestSectionCapacities() []int {
 		return capacities
 	}
 
-	fixedLines := digestChromeLines + len(m.sections)*sectionChromeLines + emptySections
+	// Each visible section spends sectionChromeLines on its heading and footer;
+	// collapsed and empty sections each render as a single line instead.
+	visibleSections := len(m.sections) - hiddenSections
+	fixedLines := digestChromeLines + visibleSections*sectionChromeLines + hiddenSections + emptySections
 	available := m.height - fixedLines
 	if available >= totalIssues {
 		return showAll()
@@ -237,6 +261,9 @@ func (m model) digestSectionCapacities() []int {
 	}
 
 	for i, section := range m.sections {
+		if section.hidden {
+			continue
+		}
 		if len(section.Issues) > 0 {
 			capacities[i] = 1
 		}
@@ -248,7 +275,7 @@ func (m model) digestSectionCapacities() []int {
 			if remaining == 0 {
 				break
 			}
-			if capacities[i] == 0 || capacities[i] >= len(section.Issues) {
+			if section.hidden || capacities[i] == 0 || capacities[i] >= len(section.Issues) {
 				continue
 			}
 			capacities[i]++
@@ -319,10 +346,17 @@ func (m *model) moveSelection(delta int) {
 		return
 	}
 	section := &m.sections[m.focusIndex]
-	if len(section.Issues) == 0 {
+	if section.hidden || len(section.Issues) == 0 {
 		return
 	}
 	section.selected = min(max(section.selected+delta, 0), len(section.Issues)-1)
+}
+
+func (m *model) toggleFocusedSection() {
+	if len(m.sections) == 0 || m.focusIndex < 0 || m.focusIndex >= len(m.sections) {
+		return
+	}
+	m.sections[m.focusIndex].hidden = !m.sections[m.focusIndex].hidden
 }
 
 func (m *model) openSelectedIssue() {
@@ -348,7 +382,7 @@ func (m model) selectedIssue() (store.Issue, bool) {
 		return store.Issue{}, false
 	}
 	section := m.sections[m.focusIndex]
-	if len(section.Issues) == 0 || section.selected < 0 || section.selected >= len(section.Issues) {
+	if section.hidden || len(section.Issues) == 0 || section.selected < 0 || section.selected >= len(section.Issues) {
 		return store.Issue{}, false
 	}
 	return section.Issues[section.selected], true
@@ -375,6 +409,9 @@ func (m *model) moveDetailIssue(delta int) {
 func (m model) allIssues() []store.Issue {
 	var issues []store.Issue
 	for _, section := range m.sections {
+		if section.hidden {
+			continue
+		}
 		issues = append(issues, section.Issues...)
 	}
 	return issues
@@ -382,6 +419,9 @@ func (m model) allIssues() []store.Issue {
 
 func (m *model) focusIssue(id string) {
 	for i := range m.sections {
+		if m.sections[i].hidden {
+			continue
+		}
 		for j := range m.sections[i].Issues {
 			if m.sections[i].Issues[j].ID == id {
 				m.focusIndex = i

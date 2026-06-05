@@ -58,17 +58,19 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 		"TODO  (1)",
 		"IN PROGRESS  (1)",
 		"IN REVIEW  (1)",
-		"DONE  (1)",
+		"▸ DONE (1) · h to show",
 		"◆ DIG-1 Backlog research",
 		"▲ DIG-2 Unblock the TUI",
 		"● DIG-3 Blocked Digest row",
 		"feature tests",
 		"⊘ DIG-2",
-		"· DIG-5 Done still appears",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected Digest to contain %q, got %q", want, view)
 		}
+	}
+	if strings.Contains(view, "DIG-5 Done still appears") {
+		t.Fatalf("Digest should start with done collapsed, got:\n%s", view)
 	}
 	if strings.Contains(view, "Other project issue") {
 		t.Fatalf("Digest included an Issue from another Project:\n%s", view)
@@ -138,6 +140,55 @@ func TestDigestNavigationMovesFocusAndSelection(t *testing.T) {
 	}
 }
 
+func TestDigestHidesAndRevealsFocusedSection(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("hide-app", "HID", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Backlog can hide", "backlog", "medium", nil, ""); err != nil {
+		t.Fatalf("create backlog issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Done can reveal", "done", "low", nil, ""); err != nil {
+		t.Fatalf("create done issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "h"))
+	hiddenBacklog := current.View()
+	if !strings.Contains(hiddenBacklog, "▌▸ BACKLOG (1) · h to show") {
+		t.Fatalf("expected h to collapse the focused BACKLOG section, got:\n%s", hiddenBacklog)
+	}
+	if strings.Contains(hiddenBacklog, "HID-1 Backlog can hide") {
+		t.Fatalf("expected collapsed BACKLOG to hide its Issue row, got:\n%s", hiddenBacklog)
+	}
+
+	current, _ = current.Update(keyMsg(t, "h"))
+	revealedBacklog := current.View()
+	if !strings.Contains(revealedBacklog, "▌▾ BACKLOG  (1)") || !strings.Contains(revealedBacklog, "HID-1 Backlog can hide") {
+		t.Fatalf("expected h to reveal the focused BACKLOG section, got:\n%s", revealedBacklog)
+	}
+
+	for i := 0; i < 4; i++ {
+		current, _ = current.Update(keyMsg(t, "tab"))
+	}
+	focusedDone := current.View()
+	if !strings.Contains(focusedDone, "▌▸ DONE (1) · h to show") {
+		t.Fatalf("expected collapsed DONE section to be focusable, got:\n%s", focusedDone)
+	}
+
+	current, _ = current.Update(keyMsg(t, "h"))
+	revealedDone := current.View()
+	if !strings.Contains(revealedDone, "▌▾ DONE  (1)") || !strings.Contains(revealedDone, "HID-2 Done can reveal") {
+		t.Fatalf("expected h to reveal focused DONE section, got:\n%s", revealedDone)
+	}
+}
+
 func TestDigestViewportUsesTerminalHeightWithoutFixedItemCap(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -187,7 +238,7 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 23})
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 21})
 	current, _ = current.Update(keyMsg(t, "tab"))
 	for i := 0; i < 4; i++ {
 		current, _ = current.Update(keyMsg(t, "down"))
@@ -333,6 +384,8 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "esc":
 		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "h":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}}
 	default:
 		t.Fatalf("unsupported key %q", key)
 		return tea.KeyMsg{Type: tea.KeyNull}
