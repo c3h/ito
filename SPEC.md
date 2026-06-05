@@ -37,7 +37,7 @@ The AI is **external**. The tool does **not** expose MCP and does **not** embed 
 - Since the CLI is the **only writer** (see §2.4), "driving via bash" isn't just the recommended way — it's the **only** way to touch the issues. That reinforces the principle rather than contradicting it.
 
 ### 2.2 How the agent learns to drive the CLI
-- LLM-optimized `--help`.
+- LLM-optimized `--help` — including the root `--help`, which briefly orients to the non-obvious model (central store, git-root resolution, Prefix) so a first run explains itself. There is no separate `guide` command; `--help` is the guide.
 
 ### 2.3 Topology & storage
 - **Single central store:** a **SQLite** database in `~/.ito/` (overridable by env, e.g., `ITO_HOME`). **There is no `.ito/` inside the repo.**
@@ -71,7 +71,7 @@ The AI is **external**. The tool does **not** expose MCP and does **not** embed 
 
 ### 3.1 Relations (v1 = flat, no hierarchy)
 - **In v1, every issue is flat.** **No `parent`, no `type`, no epic.** (Scope decision: the author doesn't use epics; YAGNI. See §9.)
-- **Flat typed links** (non-hierarchical): `blocked_by`, `relates_to`. These stay. `blocked_by` is directional: the source issue is blocked by the target issue. `relates_to` is symmetric: the CLI normalizes the pair so it doesn't duplicate `A relates_to B` and `B relates_to A`. Links are always intra-Project in v1; links crossing Projects fail write validation. Broken links are **blocked by FK on write**. `blocked_by` does not prevent Status transitions; it is information for reading and traceability, not a workflow rule.
+- **Flat typed links** (non-hierarchical): `blocked_by`, `relates_to`. These stay. `blocked_by` is directional: the source issue is blocked by the target issue. `relates_to` is symmetric: the CLI normalizes the pair so it doesn't duplicate `A relates_to B` and `B relates_to A`. Links are always intra-Project in v1; links crossing Projects fail write validation. Broken links are **blocked by FK on write**. `blocked_by` does not prevent Status transitions; it is information for reading and traceability, not a workflow rule. It does feed a derived **ready frontier** (`ito list --ready`, §6): the Issues that can be started now — `backlog`/`todo` with every `blocked_by` target `done` (no-blocker Issues included). A useful property: any two Issues in the frontier are mutually independent (if A blocked B, B would not be ready until A is `done`, by which point A has left the frontier), so the frontier is exactly the set safe to fan out across git worktrees *logically* — physical file overlap is the agent's call, not ito's. This stays a read-time view, not a transition rule (`move` still accepts any target), and ito never creates or manages the worktrees (it informs the frontier; git + the AI act on it — the "not an orchestrator" non-goal holds).
 - **Traceability (v1)** = following the links. The `parent`/epic tree is left for a future evolution.
 - **Evolution is cheap (the SQLite dividend):** adding hierarchy later is a non-destructive migration (`ALTER TABLE issues ADD COLUMN parent …`); old issues become `parent = NULL`. That's why the **v1 core already embeds a migration mechanism** (`schema_version` + ordered migrations) — it's what makes that evolution a versioned, clean step. It **does not become an ADR** because it's trivial to revert (the opposite of "hard to revert").
 
@@ -207,12 +207,12 @@ CREATE TABLE issue_labels (
 | `ito rename <name>` | Renames the Project (the `id`, the `prefix`, the `root_path` and the issues stay intact). |
 | `ito new`           | Mints an ID + creates the issue. Requires a non-empty `--title`; accepts `--status` (default `backlog`), `--priority` (default `low`), a repeatable `--label` for initial Labels, `--body "text"` or `--body -` to read stdin. Without `--body`, the body is empty. Prints the ID. |
 | `ito edit <ID>`     | Edits an issue's fields/body (`--title`, `--priority`, `--body "text"` or `--body -`; the body always replaces the whole text) and applies repeatable incremental operations (`--add-label`, `--remove-label`, `--block`, `--unblock`, `--relate`, `--unrelate`). Requires at least one change; without changes it fails with exit `2`. Redundant operations are idempotent (exit `0`) and only stamp `updated` when the final state changes. |
-| `ito list`          | Lists issues of the current project (hides `done` by default; use `--status done` to see completed ones). Separate axes: **scope** `--all-projects`; **status** `--status <s>` (filters). Plus `--label`, `--priority`, `--search`, `--json`. Default ordering: Status in the flow (`backlog`, `todo`, `in_progress`, `in_review`, `done` when filtered), Priority (`urgent`, `high`, `medium`, `low`), then `updated` desc. With `--search`, it orders by textual ranking and uses the normal ordering as a tie-breaker. With `--all-projects`, human output groups by Project; JSON returns a flat array ordered by `project`, then the normal ordering. |
+| `ito list`          | Lists issues of the current project (hides `done` by default; use `--status done` to see completed ones). Separate axes: **scope** `--all-projects`; **status** `--status <s>` (filters). Plus `--label`, `--priority`, `--search`, `--ready`, `--json`. `--ready` narrows to the **ready frontier** (§3.1): `backlog`/`todo` Issues whose `blocked_by` are all `done` — the set safe to fan out across worktrees. Default ordering: Status in the flow (`backlog`, `todo`, `in_progress`, `in_review`, `done` when filtered), Priority (`urgent`, `high`, `medium`, `low`), then `updated` desc. With `--search`, it orders by textual ranking and uses the normal ordering as a tie-breaker. With `--all-projects`, human output groups by Project; JSON returns a flat array ordered by `project`, then the normal ordering. |
 | `ito show <ID>`     | Shows an issue (fields + body + links). `--json`. |
 | `ito move <ID> <status>` | Status transition (validates only the target, §3.2); stamps `updated` only when the Status changes. |
 | `ito rm <ID>` / `ito prune` | Destructively deletes an issue / deletes in bulk with a required filter and `--yes` (e.g.: `--status done --yes`). |
 
-Principles: every v1 command has `--json`; no command blocks waiting for interactive input. Commands with a full ID resolve the Project by the Prefix of the ID; commands without a full ID resolve by the cwd, unless `--project` or `--all-projects`. v1 full-text search uses SQLite FTS5 over `title` + `body`, not over ID or metadata. `--search <text>` treats the input as a simple search: the CLI splits it into terms and searches by prefix (`login oauth` → `login* oauth*`), without exposing the advanced FTS5 syntax. `list` filters combine with AND. Repeated `--label` flags are also AND: `--label feature --label infra` returns Issues that have both Labels.
+Principles: every v1 command has `--json`; no command blocks waiting for interactive input. Commands with a full ID resolve the Project by the Prefix of the ID; commands without a full ID resolve by the cwd, unless `--project` or `--all-projects`. v1 full-text search uses SQLite FTS5 over `title` + `body`, not over ID or metadata. `--search <text>` treats the input as a simple search: the CLI splits it into terms and searches by prefix (`login oauth` → `login* oauth*`), without exposing the advanced FTS5 syntax. `list` filters combine with AND. Repeated `--label` flags are also AND: `--label feature --label infra` returns Issues that have both Labels. `--ready` is a computed filter (it evaluates each Issue's blockers, counting a blocker as satisfied only when `done`); it AND-combines with the rest, so a contradictory combination like `--ready --status in_progress` returns an empty set, not an error.
 
 ### 6.1 Result contract (agent-native)
 The agent has no special protocol with the CLI: it runs in the shell and receives **stdout**, **stderr** and an **exit code**. Hence the contract:
@@ -279,7 +279,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 > "Column", "row" and "section" are UI rendering vocabulary, never a synonym for **Status** in the domain (see `CONTEXT.md`); the surfaces render **Issues**, not "cards".
 
 **v3 — traceability + export + (maybe) hierarchy + richer TUI editing**
-- Traceability views over the links: `blocked_by` graph.
+- Traceability views over the links: `blocked_by` graph, and the **visual ready frontier** (ready vs. blocked) in the TUI. The CLI primitive that feeds it — `ito list --ready` (§3.1/§6) — is a standalone query over existing data and ships ahead of the visual, independent of the v2 TUI work.
 - TUI editing deferred from v2: title, body, links, create (`new`) and delete (`rm`/`prune`). Links land naturally alongside the traceability views.
 - TUI state deferred from v2: persisting which Digest sections are hidden, and hiding columns on the Board.
 - **Hierarchy (`parent`/epic)** — if missed — arrives here via migration.
@@ -316,7 +316,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 |---|----------|--------|
 | 0 | Name | `ito` (糸 thread / 意図 intention). |
 | 1 | Where the AI lives | External, drives the CLI via bash. No MCP, no embedded LLM. |
-| 2 | Agent guide | LLM-optimized `--help`. |
+| 2 | Agent guide | LLM-optimized `--help` (also orients to the non-obvious model; no separate `guide` command). |
 | 3 | Topology | **Central SQLite in `~/.ito/`**; durable identity (`id`+unique `name`), `root_path` = mutable pointer resolved via the git root (worktrees share it). *(ADR-0001 — reverts per-project `.ito/`.)* |
 | 4 | Source of truth | **SQLite, single writer.** Body in a TEXT column. *(ADR-0001 — reverts markdown/frontmatter.)* |
 | 5 | Hierarchy | **v1 = flat issues, no `parent`/`type`/epic** (YAGNI). Only flat `blocked_by`/`relates_to` links. Hierarchy later via migration. |
