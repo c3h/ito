@@ -1,6 +1,6 @@
 # `ito` — Spec / PRD
 
-> **Status:** v1 implemented · v2 (TUI) in design · **Date:** 2026-06-04
+> **Status:** v1 implemented · v2 (TUI) design settled · **Date:** 2026-06-05
 > **Name:** **ito** — 糸 (*the thread that links the issues*) · 意図 (*intention/purpose*). "The thread of intentions." Binary: `ito`.
 
 A **local, solo, "full local"** issue tracker, Linear-style, for the terminal — with the twist of being **AI-driven through the command line**.
@@ -264,16 +264,24 @@ Philosophy: **the actionable sentence is the product; the exit code is the bonus
 Core (SQLite schema + migrations, project resolution via git, ID minting) + `init / rename / new / edit / list / show / move / rm / prune` + `--json`. → *The agent can already work.*
 
 **v2 — TUI**
-A navigable board (Bubble Tea) **on top of the same core** — primarily an accompaniment surface (you watch what the agent plants). See [`docs/adr/0002`](./docs/adr/0002-tui-calls-core-in-process.md) for how it reaches the core (in-process, not by shelling out).
-- **Launch:** bare `ito` opens the board when both stdin and stdout are a TTY; otherwise it prints the root help and exits `0` (so an agent driving via bash never stalls). There is no `tui` subcommand; explicit subcommands always follow the CLI path.
-- **View:** a board with five columns by Status, `done` hidden by default (toggle to reveal). Scoped to the cwd-resolved Project, with an in-TUI switcher across Projects; when the cwd has no Project, it opens a picker of existing Projects (or the `ito init` hint when the store is empty). "Column" is UI vocabulary only — never a synonym for Status in the domain (see `CONTEXT.md`).
-- **Read:** the board cards plus a read-only detail view (fields + body + links). This is the cheap, high-value half — it reuses the core's read path entirely.
-- **Edit (minimal, card-level):** Status (move), Priority (cycle), Labels (toggle). Nothing else.
+A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accompaniment surface (you watch what the agent plants). See [`docs/adr/0002`](./docs/adr/0002-tui-calls-core-in-process.md) for how it reaches the core (in-process, not by shelling out).
+- **Two surfaces over one state, plus an issue view.** **Digest** (the primary surface) renders the Issues as full-width rows grouped by Status; **Board** renders the same Issues as a five-Status kanban. They share everything but the layout — the read path, the selection/focus model, the edits, the filter — so the Board is a second renderer over the state the Digest already builds, not a second feature. *Why Digest is primary:* grouped rows read better at a glance and fit a tall terminal, which is exactly the "watch what the agent plants" purpose; a five-column kanban truncates titles and splits attention. The two are switched with the number keys `[1]` (digest) / `[2]` (board), shown as header tabs.
+- **Launch:** bare `ito` opens the **Digest** when both stdin and stdout are a TTY; otherwise it prints the root help and exits `0` (so an agent driving via bash never stalls). There is no `tui` subcommand; explicit subcommands always follow the CLI path.
+- **Scope & switching:** scoped to the cwd-resolved Project, with an in-TUI switcher across Projects (reached through the `:` command line); when the cwd has no Project, it opens a picker of existing Projects (or the `ito init` hint when the store is empty).
+- **Hide / reveal (`h`):** in the Digest, `h` hides or reveals the focused Status section; `done` starts hidden, so `h` generalises the old "`done` hidden by default". The **Board always shows all five Statuses** — revealing a hidden Board column would need a config/reveal surface we are not building now. *Deferred to v3:* persisting which sections are hidden, and hiding columns on the Board.
+- **Sizing:** the Digest and Board size the number of visible items to the terminal height (Bubble Tea's `tea.WindowSizeMsg`, recomputed on resize). The sliding window (`↑ N more` / `↓ N more`) is the overflow fallback when content doesn't fit, not a fixed cap.
+- **Read:** the rows/columns render Issues (one line each, `…`-truncated) plus a read-only detail view (fields + body + links). This is the cheap, high-value half — it reuses the core's read path entirely.
+- **Edit (minimal):** Status (move), Priority (cycle), Labels (toggle). Nothing else. Reached through the always-visible keys (`s`) and, for the rarer edits (`p`, `l`), the issue view and the `:` command line.
+- **Filter & command line (inline, no separate screen):** `/` narrows the current surface to matching Issues live as you type (read-only); `:` is a closed launcher over the **v2 action set only** — Status/Priority/Labels, switch Project, refresh, quit — never create or edit title/body/links (those are v3). Both turn the bottom shortcut bar into a text input; `esc` leaves the field.
 - **Refresh:** manual, via a key (`r`). The TUI's own edits reload immediately; `r` pulls in what the agent wrote from another process. No polling, no file-watching.
+- **Build order & escape hatch:** the **Digest ships first** (it is the default and pays for the shared core); the **Board follows within v2** as the second renderer. Its only genuinely new cost is the responsive horizontal layout (budgeting column widths to the terminal, sliding across columns when the five don't fit). If that layout proves costly, the **Board slips to v3** — the shared core is already built either way.
+
+> "Column", "row" and "section" are UI rendering vocabulary, never a synonym for **Status** in the domain (see `CONTEXT.md`); the surfaces render **Issues**, not "cards".
 
 **v3 — traceability + export + (maybe) hierarchy + richer TUI editing**
 - Traceability views over the links: `blocked_by` graph.
 - TUI editing deferred from v2: title, body, links, create (`new`) and delete (`rm`/`prune`). Links land naturally alongside the traceability views.
+- TUI state deferred from v2: persisting which Digest sections are hidden, and hiding columns on the Board.
 - **Hierarchy (`parent`/epic)** — if missed — arrives here via migration.
 - `ito export` to markdown (snapshot).
 
@@ -319,7 +327,7 @@ A navigable board (Bubble Tea) **on top of the same core** — primarily an acco
 | 10 | Footprint | The CLI **never writes in the repo** — only in `~/.ito/`. |
 | 11 | Lifecycle | `done` is just a status; deleting is manual (`rm`/`prune`). |
 | 12 | Stack | Go + Charm + pure-Go SQLite (no CGO). |
-| 13 | Human interface | A full TUI (Bubble Tea) — but v2, on top of the commands. |
+| 13 | Human interface | A full TUI (Bubble Tea), v2, on top of the commands. Two surfaces over one state: **Digest** (primary, grouped rows) + **Board** (kanban), plus a read-only issue view; `/` filter and a closed `:` command line. (Digest ships first; Board may slip to v3 if its responsive layout proves costly.) |
 | 14 | Build order | Vertical slices: usable commands (v1) → TUI (v2) → traceability+export (v3). |
 | 15 | Recency | `created`/`updated` = reliable timestamp columns (the mtime hack dropped along with double writing). |
 | 16 | Result contract | Success: exit 0 + raw data (`--json`). Failure: exit ≠ 0 + an actionable sentence on stderr (+ an error object in `--json`). Fixed taxonomy of exit codes. |
