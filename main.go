@@ -266,7 +266,10 @@ func runCLI(args []string) int {
 		}
 		p, code, message, hint := resolveProject(st, rootPath, inGit, "")
 		if code != 0 {
-			return fail(false, code, message, hint)
+			if code != exitNotRegistered {
+				return fail(false, code, message, hint)
+			}
+			p = project{}
 		}
 		if err := runTUI(st, p); err != nil {
 			return fail(false, exitGeneric, fmt.Sprintf("could not run the TUI: %v", err), "try again from an interactive terminal.")

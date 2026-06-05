@@ -487,6 +487,101 @@ func TestCommandLineSelectionRunsActions(t *testing.T) {
 	}
 }
 
+func TestSwitchProjectCommandOpensPickerAndRescopesDigest(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	alpha, err := st.CreateProject("alpha-app", "ALP", t.TempDir())
+	if err != nil {
+		t.Fatalf("create alpha project: %v", err)
+	}
+	beta, err := st.CreateProject("beta-app", "BET", t.TempDir())
+	if err != nil {
+		t.Fatalf("create beta project: %v", err)
+	}
+	if _, err := st.CreateIssue(alpha, "Alpha scoped issue", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create alpha issue: %v", err)
+	}
+	if _, err := st.CreateIssue(beta, "Beta scoped issue", "todo", "high", nil, ""); err != nil {
+		t.Fatalf("create beta issue: %v", err)
+	}
+
+	current, _ := newModel(st, alpha).Update(keyMsg(t, ":"))
+	for _, r := range "switch" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	picker := current.View()
+	if !strings.Contains(picker, "ito · switch project") || !strings.Contains(picker, "▸ alpha-app   ALP") || !strings.Contains(picker, "  beta-app    BET") {
+		t.Fatalf("expected switch project command to open a Project picker, got:\n%s", picker)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	view := current.View()
+	if !strings.Contains(view, "1 issues   beta-app") || !strings.Contains(view, "▲ BET-1 Beta scoped issue") {
+		t.Fatalf("expected selecting beta-app to reload the Digest in that Project, got:\n%s", view)
+	}
+	if strings.Contains(view, "Alpha scoped issue") || strings.Contains(view, "esc cancel") {
+		t.Fatalf("expected Project switch to close picker/command and leave alpha issues behind, got:\n%s", view)
+	}
+}
+
+func TestProjectPickerOpensWhenModelStartsWithoutProject(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	alpha, err := st.CreateProject("alpha-app", "ALP", t.TempDir())
+	if err != nil {
+		t.Fatalf("create alpha project: %v", err)
+	}
+	if _, err := st.CreateProject("beta-app", "BET", t.TempDir()); err != nil {
+		t.Fatalf("create beta project: %v", err)
+	}
+	if _, err := st.CreateIssue(alpha, "Alpha issue", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create alpha issue: %v", err)
+	}
+
+	current := newModel(st, store.Project{})
+	view := current.View()
+	if !strings.Contains(view, "ito · switch project") || !strings.Contains(view, "▸ alpha-app   ALP") || !strings.Contains(view, "  beta-app    BET") {
+		t.Fatalf("expected missing initial Project to open the Project picker, got:\n%s", view)
+	}
+
+	currentAfterSelect, _ := current.Update(keyMsg(t, "enter"))
+	selected := currentAfterSelect.View()
+	if !strings.Contains(selected, "1 issues   alpha-app") || !strings.Contains(selected, "◆ ALP-1 Alpha issue") {
+		t.Fatalf("expected selecting a Project from the startup picker to load its Digest, got:\n%s", selected)
+	}
+}
+
+func TestProjectPickerShowsInitHintWhenStoreIsEmpty(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	current := newModel(store.New(db), store.Project{})
+	view := current.View()
+	if !strings.Contains(view, "ito · switch project") || !strings.Contains(view, "run ito init to get started") {
+		t.Fatalf("expected empty store to show the init hint, got:\n%s", view)
+	}
+
+	currentAfterEsc, _ := current.Update(keyMsg(t, "esc"))
+	if view := currentAfterEsc.View(); !strings.Contains(view, "run ito init to get started") {
+		t.Fatalf("expected Esc without an initial Project to keep the init hint visible, got:\n%s", view)
+	}
+}
+
 func TestIssueDetailCommandLineRunsLongTailActionsInline(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {

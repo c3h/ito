@@ -29,9 +29,10 @@ const linkIDWidth = 8
 type viewMode string
 
 const (
-	viewDigest viewMode = "digest"
-	viewIssue  viewMode = "issue"
-	viewLabels viewMode = "labels"
+	viewDigest   viewMode = "digest"
+	viewIssue    viewMode = "issue"
+	viewLabels   viewMode = "labels"
+	viewProjects viewMode = "projects"
 )
 
 var priorityCycle = []string{"low", "medium", "high", "urgent"}
@@ -51,20 +52,22 @@ type commandAction struct {
 }
 
 type model struct {
-	store        *store.Store
-	project      store.Project
-	sections     []digestSection
-	focusIndex   int
-	mode         viewMode
-	detailIssue  store.Issue
-	linkTitles   map[string]string
-	labelCursor  int
-	filterOpen   bool
-	filterQuery  string
-	commandOpen  bool
-	commandQuery string
-	loadErr      error
-	height       int
+	store         *store.Store
+	project       store.Project
+	sections      []digestSection
+	focusIndex    int
+	mode          viewMode
+	detailIssue   store.Issue
+	linkTitles    map[string]string
+	labelCursor   int
+	projects      []store.Project
+	projectCursor int
+	filterOpen    bool
+	filterQuery   string
+	commandOpen   bool
+	commandQuery  string
+	loadErr       error
+	height        int
 }
 
 type digestSection struct {
@@ -95,7 +98,11 @@ func newModel(st *store.Store, project store.Project) model {
 		mode:       viewDigest,
 		linkTitles: map[string]string{},
 	}
-	m.reloadDigest()
+	if project.ID == 0 {
+		m.openProjectPicker()
+	} else {
+		m.reloadDigest()
+	}
 	return m
 }
 
@@ -114,6 +121,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.runSelectedCommandAction()
 			}
 			return m, editInlineInput(&m.commandOpen, &m.commandQuery, msg)
+		}
+		if m.mode == viewProjects {
+			return m.updateProjectPicker(msg)
 		}
 		switch msg.String() {
 		case "q", "ctrl+c":
@@ -220,6 +230,9 @@ func (m model) View() string {
 	}
 	if m.mode == viewLabels {
 		return m.labelPickerView()
+	}
+	if m.mode == viewProjects {
+		return m.projectPickerView()
 	}
 	if m.mode == viewIssue {
 		return m.issueDetailView()
@@ -332,12 +345,73 @@ func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
 		m.cycleDetailIssuePriority()
 	case "labels":
 		m.openLabelPicker()
+	case "switch project":
+		m.openProjectPicker()
 	case "refresh":
 		m.reloadDigest()
 	case "quit":
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func (m model) updateProjectPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		if m.project.ID != 0 {
+			m.mode = viewDigest
+		}
+	case "up":
+		m.moveProjectCursor(-1)
+	case "down":
+		m.moveProjectCursor(1)
+	case "enter":
+		m.switchToSelectedProject()
+	}
+	return m, nil
+}
+
+func (m *model) openProjectPicker() {
+	projects, err := m.store.ListProjects()
+	if err != nil {
+		m.loadErr = err
+		return
+	}
+	m.projects = projects
+	m.projectCursor = 0
+	for i, project := range projects {
+		if project.ID == m.project.ID {
+			m.projectCursor = i
+			break
+		}
+	}
+	m.mode = viewProjects
+}
+
+func (m *model) moveProjectCursor(delta int) {
+	if len(m.projects) == 0 {
+		return
+	}
+	m.projectCursor = min(max(m.projectCursor+delta, 0), len(m.projects)-1)
+}
+
+func (m *model) switchToSelectedProject() {
+	if len(m.projects) == 0 || m.projectCursor < 0 || m.projectCursor >= len(m.projects) {
+		return
+	}
+	m.project = m.projects[m.projectCursor]
+	m.sections = nil
+	m.focusIndex = 0
+	m.detailIssue = store.Issue{}
+	m.linkTitles = map[string]string{}
+	m.filterOpen = false
+	m.filterQuery = ""
+	m.commandOpen = false
+	m.commandQuery = ""
+	m.mode = viewDigest
+	m.reloadDigest()
 }
 
 func (m *model) reloadDigest() {
@@ -862,6 +936,37 @@ func (m model) labelPickerView() string {
 		strings.Repeat("─", digestWidth),
 		"",
 		" ↑↓ move   ⏎ toggle   esc done   q quit",
+	)
+	return strings.Join(lines, "\n")
+}
+
+func (m model) projectPickerView() string {
+	lines := []string{
+		padBetween("ito · switch project", m.project.Name, digestWidth),
+		strings.Repeat("─", digestWidth),
+		"",
+	}
+	if len(m.projects) == 0 {
+		lines = append(lines, " no Projects yet", "", " run ito init to get started", "", " q quit")
+		return strings.Join(lines, "\n")
+	}
+
+	nameWidth := 0
+	for _, project := range m.projects {
+		nameWidth = max(nameWidth, len(project.Name))
+	}
+	for i, project := range m.projects {
+		prefix := "   "
+		if i == m.projectCursor {
+			prefix = " ▸ "
+		}
+		lines = append(lines, prefix+padRight(project.Name, nameWidth)+"   "+project.Prefix)
+	}
+	lines = append(lines,
+		"",
+		strings.Repeat("─", digestWidth),
+		"",
+		" ↑↓ move   ⏎ switch   esc cancel   q quit",
 	)
 	return strings.Join(lines, "\n")
 }

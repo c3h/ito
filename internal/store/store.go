@@ -212,6 +212,10 @@ func (s *Store) FindProjectByPrefix(prefix string) (Project, bool, error) {
 	return findProjectByPrefix(s.db, prefix)
 }
 
+func (s *Store) ListProjects() ([]Project, error) {
+	return listProjects(s.db)
+}
+
 func (s *Store) FindDetachedProjectByName(name string, currentRoot string) (Project, bool, error) {
 	return findDetachedProjectByName(s.db, name, currentRoot)
 }
@@ -550,6 +554,27 @@ func findProjectByPrefix(db *sql.DB, prefix string) (Project, bool, error) {
 		return Project{}, false, err
 	}
 	return p, true, nil
+}
+
+func listProjects(db *sql.DB) ([]Project, error) {
+	rows, err := db.Query(`SELECT id, name, prefix, root_path FROM projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return projects, nil
 }
 
 func findClosestProjectAncestor(db *sql.DB, cwd string) (Project, bool, error) {

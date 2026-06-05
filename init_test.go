@@ -157,6 +157,38 @@ func TestBareITOWithTTYLaunchesTUIWithStoreAndResolvedProject(t *testing.T) {
 	}
 }
 
+func TestBareITOWithTTYLaunchesTUIWithoutProjectWhenCWDIsUnregistered(t *testing.T) {
+	oldIsTerminal := isTerminal
+	oldRunTUI := runTUI
+	t.Cleanup(func() {
+		isTerminal = oldIsTerminal
+		runTUI = oldRunTUI
+	})
+
+	isTerminal = func(uintptr) bool {
+		return true
+	}
+	var gotStore *itostore.Store
+	var gotProject itostore.Project
+	runTUI = func(st *itostore.Store, project itostore.Project) error {
+		gotStore = st
+		gotProject = project
+		return nil
+	}
+
+	t.Setenv("ITO_HOME", t.TempDir())
+	exitCode := runCLI(nil)
+	if exitCode != 0 {
+		t.Fatalf("expected bare ito on a TTY without a registered cwd Project to exit 0, got %d", exitCode)
+	}
+	if gotStore == nil {
+		t.Fatal("expected TUI launcher to receive a store")
+	}
+	if gotProject.ID != 0 {
+		t.Fatalf("expected TUI launcher to receive no initial Project, got %#v", gotProject)
+	}
+}
+
 func TestTUISubcommandDoesNotExist(t *testing.T) {
 	result := runITO(t, t.TempDir(), t.TempDir(), "tui")
 	if result.exitCode != exitBadUsage {
