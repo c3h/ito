@@ -274,7 +274,15 @@ func runCLI(args []string) int {
 			return fail(false, openFail.code, openFail.message, openFail.hint)
 		}
 		defer db.Close()
-		if err := runTUI(st); err != nil {
+		rootPath, inGit, err := resolveCurrentRoot()
+		if err != nil {
+			return fail(false, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
+		}
+		p, code, message, hint := resolveProject(st, rootPath, inGit, "")
+		if code != 0 {
+			return fail(false, code, message, hint)
+		}
+		if err := runTUI(st, p); err != nil {
 			return fail(false, exitGeneric, fmt.Sprintf("could not run the TUI: %v", err), "try again from an interactive terminal.")
 		}
 		return 0

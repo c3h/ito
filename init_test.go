@@ -110,7 +110,7 @@ func TestBareITOWithoutTTYPrintsRootHelpAndExitsZero(t *testing.T) {
 	}
 }
 
-func TestBareITOWithTTYLaunchesTUIWithStore(t *testing.T) {
+func TestBareITOWithTTYLaunchesTUIWithStoreAndResolvedProject(t *testing.T) {
 	oldIsTerminal := isTerminal
 	oldRunTUI := runTUI
 	t.Cleanup(func() {
@@ -122,18 +122,38 @@ func TestBareITOWithTTYLaunchesTUIWithStore(t *testing.T) {
 		return true
 	}
 	var gotStore *itostore.Store
-	runTUI = func(st *itostore.Store) error {
+	var gotProject itostore.Project
+	runTUI = func(st *itostore.Store, project itostore.Project) error {
 		gotStore = st
+		gotProject = project
 		return nil
 	}
 
-	t.Setenv("ITO_HOME", t.TempDir())
+	itoHome := t.TempDir()
+	t.Setenv("ITO_HOME", itoHome)
+	db, err := itostore.Open(itoHome)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	st := itostore.New(db)
+	rootPath, _, err := resolveCurrentRoot()
+	if err != nil {
+		t.Fatalf("resolve current root: %v", err)
+	}
+	if _, err := st.CreateProject("tty-app", "TTY", rootPath); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	db.Close()
+
 	exitCode := runCLI(nil)
 	if exitCode != 0 {
 		t.Fatalf("expected bare ito on a TTY to exit 0, got %d", exitCode)
 	}
 	if gotStore == nil {
 		t.Fatal("expected TUI launcher to receive a store")
+	}
+	if gotProject.Name != "tty-app" {
+		t.Fatalf("expected TUI launcher to receive resolved Project tty-app, got %#v", gotProject)
 	}
 }
 
