@@ -17,9 +17,10 @@ const (
 )
 
 // Digest rows View() draws besides Issues: digestChromeLines (header, divider,
-// blank, shortcut bar) and sectionChromeLines per section (heading + blank).
+// blank, bottom rule, shortcut bar) and sectionChromeLines per section
+// (heading + blank).
 const (
-	digestChromeLines  = 4
+	digestChromeLines  = 5
 	sectionChromeLines = 2
 )
 
@@ -260,8 +261,8 @@ func (m model) View() string {
 
 	sections := m.digestSections()
 	lines := []string{
-		header(m.project.Name, issueCount(sections), digestWidth),
-		strings.Repeat("─", digestWidth),
+		header(m.project.Name, issueCount(sections), digestWidth, viewDigest),
+		fullRule(digestWidth),
 		"",
 	}
 	windows := m.digestWindows(sections)
@@ -280,9 +281,6 @@ func (m model) View() string {
 			continue
 		}
 		lines = append(lines, fmt.Sprintf(" %s▾ %s  (%d)", marker, section.Label, len(section.Issues)))
-		if len(section.Issues) == 0 {
-			lines = append(lines, "    no Issues")
-		}
 		window := windows[i]
 		if window.showAbove {
 			lines = append(lines, fmt.Sprintf("   ↑ %d more", window.start))
@@ -300,7 +298,7 @@ func (m model) View() string {
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, m.digestBottomBar(issueCount(sections), issueCount(m.sections)))
+	lines = append(lines, fullRule(digestWidth), m.digestBottomBar(issueCount(sections), issueCount(m.sections)))
 	return strings.Join(lines, "\n")
 }
 
@@ -309,8 +307,8 @@ func (m model) boardView() string {
 	width := m.boardWidth()
 	visible := m.visibleBoardSections(sections, width)
 	lines := []string{
-		header(m.project.Name, issueCount(sections), width),
-		strings.Repeat("─", width),
+		header(m.project.Name, issueCount(sections), width, viewBoard),
+		fullRule(width),
 		"",
 	}
 
@@ -344,7 +342,7 @@ func (m model) boardView() string {
 		lines = append(lines, line)
 	}
 
-	lines = append(lines, m.boardBottomBar(issueCount(sections), issueCount(m.sections)))
+	lines = append(lines, "", fullRule(width), m.boardBottomBar(issueCount(sections), issueCount(m.sections)))
 	return strings.Join(lines, "\n")
 }
 
@@ -425,7 +423,7 @@ func (m model) boardIssueLineBudget() int {
 	if m.height <= 0 {
 		return 1 << 20
 	}
-	return max(1, m.height-5)
+	return max(1, m.height-6)
 }
 
 func (m model) boardWidth() int {
@@ -438,36 +436,67 @@ func (m model) boardWidth() int {
 func (m model) boardBottomBar(matched, total int) string {
 	if m.filterOpen {
 		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
-		return " / " + m.filterQuery + "▏   " + hint
+		return inputBar("/", m.filterQuery, hint)
 	}
 	if m.commandOpen {
 		return m.commandBottomBar()
 	}
-	return " tab focus   ↑↓ select   ⏎ open   s status   / filter   : cmd   q quit"
+	return statusBar(
+		[2]string{"tab", "focus"}, [2]string{"↑↓", "select"}, [2]string{"⏎", "open"},
+		[2]string{"s", "status"}, [2]string{"/", "filter"}, [2]string{":", "cmd"}, [2]string{"q", "quit"},
+	)
 }
 
 func (m model) digestBottomBar(matched, total int) string {
 	if m.filterOpen {
 		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
-		return " / " + m.filterQuery + "▏   " + hint
+		return inputBar("/", m.filterQuery, hint)
 	}
 	if m.commandOpen {
 		return m.commandBottomBar()
 	}
-	return " tab focus   ↑↓ select   ⏎ open   s status   h hide   / filter   : cmd   q quit"
+	return statusBar(
+		[2]string{"tab", "focus"}, [2]string{"↑↓", "select"}, [2]string{"⏎", "open"},
+		[2]string{"s", "status"}, [2]string{"h", "hide"}, [2]string{"/", "filter"},
+		[2]string{":", "cmd"}, [2]string{"q", "quit"},
+	)
 }
 
 func (m model) commandBottomBar() string {
-	lines := []string{divider("─ actions ", m.surfaceWidth())}
+	lines := []string{styleLine.Render(divider("─ actions ", m.surfaceWidth()))}
 	for _, action := range m.filteredCommandActions() {
 		lines = append(lines, " "+renderCommandAction(action))
 	}
-	lines = append(lines, " : "+m.commandQuery+"▏   esc cancel")
+	lines = append(lines, inputBar(":", m.commandQuery, "esc cancel"))
 	return strings.Join(lines, "\n")
 }
 
 func divider(head string, width int) string {
 	return head + strings.Repeat("─", width-len(head))
+}
+
+// fullRule is the full-width horizontal separator the surfaces draw under the
+// header (and around the detail view), in the dim separator colour — matching
+// the prototype, where every ─ renders in --line, not the default foreground.
+func fullRule(width int) string {
+	return styleLine.Render(strings.Repeat("─", width))
+}
+
+// statusBar renders the always-visible shortcut bar: each key in the accent
+// colour, its label dimmed, three spaces between pairs.
+func statusBar(pairs ...[2]string) string {
+	parts := make([]string, len(pairs))
+	for i, pair := range pairs {
+		parts[i] = styleKey.Render(pair[0]) + " " + styleDim.Render(pair[1])
+	}
+	return " " + strings.Join(parts, "   ")
+}
+
+// inputBar renders the inline / filter or : command field: the prefix as a key,
+// the typed query in ink, the caret in the accent colour, the hint dimmed.
+func inputBar(prefix, query, hint string) string {
+	return " " + styleKey.Render(prefix) + " " + styleText.Render(query) +
+		styleActive.Render("▏") + "   " + styleDim.Render(hint)
 }
 
 func (m model) filteredCommandActions() []commandAction {
@@ -486,9 +515,9 @@ func (m model) filteredCommandActions() []commandAction {
 
 func renderCommandAction(action commandAction) string {
 	if action.Shortcut == "" {
-		return "   " + action.Name
+		return "   " + styleText.Render(action.Name)
 	}
-	return action.Shortcut + "  " + action.Name
+	return styleKey.Render(action.Shortcut) + "  " + styleText.Render(action.Name)
 }
 
 func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
@@ -670,7 +699,6 @@ func (m model) digestSectionCapacities(sections []digestSection) []int {
 		return showAll()
 	}
 
-	emptySections := 0
 	nonEmptySections := 0
 	hiddenSections := 0
 	totalIssues := 0
@@ -680,7 +708,6 @@ func (m model) digestSectionCapacities(sections []digestSection) []int {
 			continue
 		}
 		if len(section.Issues) == 0 {
-			emptySections++
 			continue
 		}
 		nonEmptySections++
@@ -690,10 +717,10 @@ func (m model) digestSectionCapacities(sections []digestSection) []int {
 		return capacities
 	}
 
-	// Each visible section spends sectionChromeLines on its heading and footer;
-	// collapsed and empty sections each render as a single line instead.
+	// Each visible section spends sectionChromeLines on its heading and trailing
+	// blank — empty sections included; collapsed sections render as a single line.
 	visibleSections := len(sections) - hiddenSections
-	fixedLines := digestChromeLines + visibleSections*sectionChromeLines + hiddenSections + emptySections
+	fixedLines := digestChromeLines + visibleSections*sectionChromeLines + hiddenSections
 	available := m.height - fixedLines
 	if available >= totalIssues {
 		return showAll()
@@ -1063,7 +1090,7 @@ func (m model) issueDetailView() string {
 	issue := m.detailIssue
 	lines := []string{
 		issueHeader(m.project.Name, issue),
-		strings.Repeat("─", digestWidth),
+		fullRule(digestWidth),
 		"",
 		fmt.Sprintf(" %s   ·   %s   ·   %s", issue.Status, issue.Priority, strings.Join(issue.Labels, "  ")),
 		"",
@@ -1079,7 +1106,7 @@ func (m model) issueDetailView() string {
 		" created      "+issue.Created,
 		" updated      "+issue.Updated,
 		"",
-		strings.Repeat("─", digestWidth),
+		fullRule(digestWidth),
 		"",
 	)
 	for _, line := range strings.Split(issue.Body, "\n") {
@@ -1087,11 +1114,15 @@ func (m model) issueDetailView() string {
 			lines = append(lines, " "+wrapped)
 		}
 	}
-	lines = append(lines, "")
+	lines = append(lines, "", fullRule(digestWidth))
 	if m.commandOpen {
 		lines = append(lines, m.commandBottomBar())
 	} else {
-		lines = append(lines, " esc back   ↑↓ prev/next   s status   p priority   l labels   r refresh   : cmd   q quit")
+		lines = append(lines, statusBar(
+			[2]string{"esc", "back"}, [2]string{"↑↓", "prev/next"}, [2]string{"s", "status"},
+			[2]string{"p", "priority"}, [2]string{"l", "labels"}, [2]string{"r", "refresh"},
+			[2]string{":", "cmd"}, [2]string{"q", "quit"},
+		))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1100,7 +1131,7 @@ func (m model) labelPickerView() string {
 	issue := m.detailIssue
 	lines := []string{
 		issueHeader(m.project.Name, issue),
-		strings.Repeat("─", digestWidth),
+		fullRule(digestWidth),
 		"",
 	}
 	for i, label := range store.Labels {
@@ -1116,9 +1147,8 @@ func (m model) labelPickerView() string {
 	}
 	lines = append(lines,
 		"",
-		strings.Repeat("─", digestWidth),
-		"",
-		" ↑↓ move   ⏎ toggle   esc done   q quit",
+		fullRule(digestWidth),
+		statusBar([2]string{"↑↓", "move"}, [2]string{"⏎", "toggle"}, [2]string{"esc", "done"}, [2]string{"q", "quit"}),
 	)
 	return strings.Join(lines, "\n")
 }
@@ -1126,11 +1156,11 @@ func (m model) labelPickerView() string {
 func (m model) projectPickerView() string {
 	lines := []string{
 		padBetween("ito · switch project", m.project.Name, digestWidth),
-		strings.Repeat("─", digestWidth),
+		fullRule(digestWidth),
 		"",
 	}
 	if len(m.projects) == 0 {
-		lines = append(lines, " no Projects yet", "", " run ito init to get started", "", " q quit")
+		lines = append(lines, " no Projects yet", "", " run ito init to get started", "", statusBar([2]string{"q", "quit"}))
 		return strings.Join(lines, "\n")
 	}
 
@@ -1147,17 +1177,32 @@ func (m model) projectPickerView() string {
 	}
 	lines = append(lines,
 		"",
-		strings.Repeat("─", digestWidth),
-		"",
-		" ↑↓ move   ⏎ switch   esc cancel   q quit",
+		fullRule(digestWidth),
+		statusBar([2]string{"↑↓", "move"}, [2]string{"⏎", "switch"}, [2]string{"esc", "cancel"}, [2]string{"q", "quit"}),
 	)
 	return strings.Join(lines, "\n")
 }
 
-func header(projectName string, issueCount int, width int) string {
+func header(projectName string, issueCount, width int, active viewMode) string {
+	// Measure the plain text so the gap counts visible runes only, then style
+	// each segment — colouring adds no visible width. The numbers stay in the
+	// default ink; only the active view name takes the accent colour.
 	left := "ito · [1] digest · [2] board"
 	right := fmt.Sprintf("%d issues   %s", issueCount, projectName)
-	return padBetween(left, right, width)
+	gap := width - runeLen(left) - runeLen(right)
+	if gap < 1 {
+		gap = 1
+	}
+
+	digestStyle, boardStyle := styleText, styleText
+	if active == viewBoard {
+		boardStyle = styleActive
+	} else {
+		digestStyle = styleActive
+	}
+	styledLeft := styleText.Render("ito · [1] ") + digestStyle.Render("digest") +
+		styleText.Render(" · [2] ") + boardStyle.Render("board")
+	return styledLeft + strings.Repeat(" ", gap) + styleText.Render(right)
 }
 
 func (m model) surfaceWidth() int {

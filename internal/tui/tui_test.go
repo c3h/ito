@@ -1114,7 +1114,7 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 21})
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 19})
 	current, _ = current.Update(keyMsg(t, "tab"))
 	for i := 0; i < 4; i++ {
 		current, _ = current.Update(keyMsg(t, "down"))
