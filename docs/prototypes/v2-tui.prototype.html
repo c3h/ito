@@ -1,0 +1,440 @@
+<!doctype html>
+<!--
+  PROTOTYPE — throwaway. Delete me once the v2 TUI is built.
+
+  Question it answers: what should the v2 surface look like in the terminal?
+  (SPEC §7 board over the same core, in-process per ADR-0002.)
+
+  Two screens, switchable via the floating bar (or ← / →):
+    Digest — full-width rows grouped by status, with a live preview drawer
+    Issue  — the full read-only detail view (⏎ from the digest opens it)
+
+  Read-only; no mutations, no persistence — this is a picture, not the app.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ito · v2 TUI — ASCII prototype</title>
+<style>
+  :root{
+    --bg:#0e0f17; --term:#16161e;
+    --ink:#c0caf5; --dim:#565f89; --line:#2c3047;
+    --id:#7dcfff; --sel:#bb9af7; --cyan:#7dcfff;
+    --urg:#f7768e; --hi:#ff9e64; --med:#7aa2f7; --low:#6b7394;
+    --lbl-bg:#232741; --lbl-ink:#9aa5ce; --blk:#f7768e; --key:#bb9af7;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:radial-gradient(1200px 600px at 50% -10%, #1b1d2e 0%, var(--bg) 60%);
+    color:var(--ink);
+    font-family:"SF Mono",ui-monospace,"JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    min-height:100vh; padding:42px 20px 130px;
+  }
+  .wrap{max-width:1040px;margin:0 auto}
+  .intro{margin:0 auto 26px;max-width:920px}
+  .tag{display:inline-block;font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+    color:#0e0f17;background:var(--sel);padding:3px 9px;border-radius:5px;font-weight:700}
+  .intro h1{font-size:19px;margin:14px 0 6px;font-weight:600;color:#e8ecff}
+  .intro p{margin:6px 0;font-size:13px;line-height:1.6;color:#9aa5ce}
+  .intro code{color:var(--cyan)}
+
+  .term{
+    background:var(--term); border:1px solid var(--line);
+    border-radius:12px; overflow:hidden;
+    box-shadow:0 24px 60px -24px #000, 0 0 0 1px #000a inset;
+  }
+  .titlebar{
+    display:flex;align-items:center;gap:8px;
+    padding:11px 14px; background:#12121b; border-bottom:1px solid var(--line);
+    font-size:12px;color:var(--dim);
+  }
+  .dot{width:11px;height:11px;border-radius:50%}
+  .dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+  .titlebar .path{margin-left:8px}
+  .titlebar .prompt{color:var(--ink)}
+  .titlebar .prompt .arrow{color:#9ece6a}
+
+  .screen{
+    margin:0;padding:18px 18px 14px;
+    font-size:13px; line-height:1.4; white-space:pre; overflow-x:auto;
+    color:var(--ink); -webkit-font-smoothing:antialiased;
+  }
+  .screen .frame{color:var(--line)}
+  .statusbar{
+    margin:0;padding:9px 18px 13px; white-space:pre; overflow-x:auto;
+    font-size:12.5px; border-top:1px solid var(--line); background:#13141d; color:var(--dim);
+  }
+  .statusbar b{color:var(--key);font-weight:700}
+
+  .id{color:var(--id)}
+  .id.sel{color:var(--sel);text-shadow:0 0 14px #bb9af766}
+  .p-urgent{color:var(--urg);font-weight:600}
+  .p-high{color:var(--hi);font-weight:600}
+  .p-medium{color:var(--med)}
+  .p-low{color:var(--low)}
+  .m-urg{color:var(--urg)}.m-hi{color:var(--hi)}.m-med{color:var(--med)}
+  .blk{color:var(--blk)}.ac{color:var(--sel)}
+  .statusbar .in{color:var(--ink)}
+  .statusbar .cur{color:var(--sel)}
+  .statusbar .ghost{color:var(--dim)}
+  .st{color:var(--cyan)}
+  .lb{color:var(--lbl-ink);background:var(--lbl-bg);border-radius:3px;padding:0 2px}
+  .title{color:#e8ecff;font-weight:600}
+
+  .switcher{
+    position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+    display:flex;align-items:center;gap:4px;
+    background:#1f2030; border:1px solid #3a3e5c;
+    border-radius:999px; padding:6px 8px; z-index:50;
+    box-shadow:0 12px 40px -8px #000, 0 0 0 1px #000a; font-family:inherit;
+  }
+  .switcher button{
+    background:transparent;border:0;color:var(--ink);cursor:pointer;
+    font-family:inherit;font-size:18px;line-height:1;padding:6px 12px;border-radius:999px;
+  }
+  .switcher button:hover{background:#2c2e44}
+  .switcher .label{min-width:210px;text-align:center;font-size:13px;color:#e8ecff;padding:0 8px;user-select:none}
+  .switcher .label .k{color:var(--sel);font-weight:700}
+  .switcher .hint{font-size:11px;color:var(--dim);margin-left:6px;padding-right:6px}
+
+  .notes{max-width:920px;margin:30px auto 0;padding:16px 18px;
+    border:1px dashed var(--line);border-radius:10px;background:#13141d;font-size:13px;color:#9aa5ce}
+  .notes h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:0 0 8px}
+  .notes ul{margin:8px 0 0;padding-left:18px;line-height:1.7}
+  .notes em{color:var(--sel);font-style:normal}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="intro">
+    <span class="tag">prototype · throwaway</span>
+    <h1>ito — v2 TUI · Digest + issue view</h1>
+    <p>The v2 surface (<code>SPEC §7</code>, in-process over the core per <code>ADR-0002</code>): a <strong>Digest</strong> — full-width rows grouped by status — a <strong>Board</strong> — the same issues as one-line kanban cards, truncated with <code>…</code> — and the full <strong>issue view</strong> that <code>⏎</code> opens.</p>
+    <p>In the real TUI you'd switch view with the number keys (<strong>1</strong> digest, <strong>2</strong> board — the digit shows in the header tab), hide / reveal a Digest section with <strong>h</strong> (the Board always shows every column), and press <strong>/</strong> to filter or <strong>:</strong> for commands — both turn the bottom bar into an inline input (the view stays, <code>esc</code> leaves the field). Here, the bar below (or <strong>← / →</strong>) cycles all the screens, including the issue detail and mocks of the filter and command line. Read-only.</p>
+  </div>
+
+  <div class="term">
+    <div class="titlebar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="path">~/dev/ito</span>
+      <span class="prompt"><span class="arrow">❯</span> ito</span>
+    </div>
+    <pre class="screen" id="screen"></pre>
+    <pre class="statusbar" id="statusbar"></pre>
+  </div>
+
+  <div class="notes">
+    <h2>Verdict — fill in when settled</h2>
+    <ul>
+      <li><strong>Layout:</strong> Digest (rows by status + preview drawer) + minimal issue view.</li>
+      <li><strong>Still tweaking:</strong> ____</li>
+      <li>Then fold into <code>internal/tui</code> and delete this file.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="switcher">
+  <button id="prev" aria-label="previous">‹</button>
+  <span class="label"><span class="k" id="vkey">Digest</span><span id="vname"></span></span>
+  <button id="next" aria-label="next">›</button>
+  <span class="hint">← →</span>
+</div>
+
+<script>
+/* ----------------------------- data ----------------------------- */
+const ISSUES = [
+  { id:'ITO-11', status:'backlog',    priority:'medium', title:'Read-only detail view (fields + body + links)', labels:['feature'] },
+  { id:'ITO-16', status:'backlog',    priority:'low',    title:'In-TUI project switcher',                       labels:['feature'] },
+  { id:'ITO-14', status:'todo',       priority:'urgent', title:'Board renders five status columns',             labels:['feature'], blocked_by:['ITO-2'], relates_to:['ITO-9'] },
+  { id:'ITO-15', status:'todo',       priority:'high',   title:'Card-level edit: move / priority / labels',     labels:['feature'] },
+  { id:'ITO-2',  status:'in_progress',priority:'high',   title:'Extract internal/store package',                labels:['refactor'] },
+  { id:'ITO-3',  status:'in_progress',priority:'high',   title:'Replace exit-code return with typed errors',    labels:['refactor'], blocked_by:['ITO-2'] },
+  { id:'ITO-9',  status:'in_review',  priority:'medium', title:'Bare `ito` launches board on a TTY',            labels:['feature'], relates_to:['ITO-14'] },
+  { id:'ITO-5',  status:'in_review',  priority:'low',    title:'ADR-0002 TUI calls core in-process',            labels:['docs'] },
+  { id:'ITO-7',  status:'done',       priority:'medium', title:'FTS5 search over title + body',                 labels:['feature'] },
+  { id:'ITO-1',  status:'done',       priority:'low',    title:'SQLite schema + migrations',                    labels:['infra'] },
+  // extra volume to exercise the sliding window / "+N more"
+  { id:'ITO-17', status:'todo',       priority:'high',   title:'Render priority + labels on each card',         labels:['feature'] },
+  { id:'ITO-18', status:'todo',       priority:'medium', title:'Project switcher overlay (in-TUI)',             labels:['feature'] },
+  { id:'ITO-19', status:'todo',       priority:'low',    title:'Wire q / ctrl-c to quit cleanly',               labels:['chore'] },
+  { id:'ITO-20', status:'todo',       priority:'medium', title:'Manual refresh re-reads the store',             labels:['feature'] },
+  { id:'ITO-21', status:'todo',       priority:'low',    title:'Snapshot tests for the board layout',           labels:['tests'] },
+  { id:'ITO-22', status:'backlog',    priority:'low',    title:'Horizontal scroll vs all-columns study',        labels:['research'] },
+  { id:'ITO-23', status:'backlog',    priority:'medium', title:'Reveal done column with d',                     labels:['feature'] },
+  { id:'ITO-24', status:'backlog',    priority:'low',    title:'Document TUI keybindings',                       labels:['docs'] },
+  { id:'ITO-25', status:'backlog',    priority:'low',    title:'Theme tokens via Lip Gloss',                    labels:['chore'] },
+  { id:'ITO-26', status:'in_progress',priority:'medium', title:'Move resolveProject into the store',            labels:['refactor'] },
+];
+const SEL = ISSUES.find(i=>i.id==='ITO-14');
+SEL.created='2026-06-02 14:30 UTC';
+SEL.updated='2026-06-03 09:12 UTC';
+const PMARK = { urgent:'●', high:'▲', medium:'◆', low:'·' };
+const titleOf = id => (ISSUES.find(i=>i.id===id)||{}).title || '';
+let filterQuery = '';   // when set, the live view narrows to matching issues (the '/' inline filter)
+const matchIssue = (i,q) => (i.id+' '+i.title+' '+i.labels.join(' ')).toLowerCase().includes(q.toLowerCase());
+const byStatus = s => ISSUES.filter(i=>i.status===s && (!filterQuery || matchIssue(i,filterQuery)));
+const BODY = [
+  '## Context',
+  'The board is the v2 surface — five columns by status, done hidden by default.',
+  '',
+  '## Acceptance',
+  '- columns: backlog, todo, in_progress, in_review, done',
+  '- done collapsed until toggled with d',
+  '- cards show id, priority, title, labels',
+];
+
+/* --------------------------- helpers ---------------------------- */
+const W = 91;
+function pad(s, w){ s=String(s); return s.length>w ? s.slice(0,w-1)+'…' : s+' '.repeat(w-s.length); }
+function bar(l, r, w){ const mid=Math.max(1, w-l.length-r.length); return l+' '.repeat(mid)+r; }
+function rule(head, w){ return head.length>=w ? head.slice(0,w) : head+'─'.repeat(w-head.length); }
+function topTabs(active, right){   // view tabs; both numbers always bracketed, only the active one's colour changes
+  const tab = (n,k) => '['+k+'] '+n;
+  return bar(' ito · '+tab('digest','1')+' · '+tab('board','2'), right, W);
+}
+const PROJECT = 'ito';   // shown top-right in place of the full cwd — a real path would overflow
+// Issue header in the same shape as topTabs: app · id · title (…-truncated) … project
+function issueHeader(it){
+  const right = PROJECT+' ';
+  const crumb = ' ito · '+it.id+' · '+it.title;
+  const max = W - right.length - 2;        // keep a gap before the project name
+  const left = crumb.length>max ? crumb.slice(0,max-1)+'…' : crumb;
+  return bar(left, right, W);
+}
+function wrap(s, w){
+  const out=[]; let cur='';
+  for(const word of s.split(' ')){
+    if(((cur?cur+' ':'')+word).length<=w){ cur=(cur?cur+' ':'')+word; }
+    else { if(cur) out.push(cur);
+      let ww=word; while(ww.length>w){ out.push(ww.slice(0,w)); ww=ww.slice(w); } cur=ww; }
+  }
+  if(cur) out.push(cur);
+  return out.length?out:[''];
+}
+
+/* ----------------------- screen : Digest ------------------------ */
+function rowC(it, sel){
+  const left = (sel?' ▸ ':'   ')+PMARK[it.priority]+' '+pad(it.id,7)+' '+it.title;
+  const right = ((it.blocked_by&&it.blocked_by.length)?'⊘ '+it.blocked_by[0]+'   ':'')+it.labels.join(' ')+' ';
+  return ' '+bar(pad(left, W-2-right.length), right, W-2);
+}
+function moreLine(arrow, n){ return ' '+pad('     '+arrow+' '+n+' more', W-2); }
+function sectionC(status, label, focused, selIdx){
+  const items=byStatus(status);
+  const out=[ ' '+(focused?'▌':' ')+rule('▾ '+label+'  ('+items.length+')  ', W-2) ];
+  const w=windowSlice(items, focused?selIdx:0, 5);   // odd window, selection centered
+  if(w.above>0) out.push(moreLine('↑', w.above));
+  w.slice.forEach((it,i)=> out.push(rowC(it, focused && w.start+i===selIdx)));
+  if(w.below>0) out.push(moreLine('↓', w.below));
+  out.push('');
+  return out;
+}
+function renderDigest(){
+  const lines=[];
+  lines.push(topTabs('digest', ISSUES.length+' issues   '+PROJECT+' '));
+  lines.push('─'.repeat(W));
+  lines.push('');
+  DIGEST_ORDER.forEach(([s,lb],i)=>{
+    const n = byStatus(s).length;
+    if(filterQuery){ if(n===0) return; lines.push(...sectionC(s, lb, i===dSec, dSel)); return; }   // filtering reveals matches everywhere
+    if(hidden.has(s)){ lines.push(' '+(i===dSec?'▌':' ')+rule('▸ '+lb+'  ('+n+')  ·  h to show  ', W-2)); return; }
+    lines.push(...sectionC(s, lb, i===dSec, dSel));
+  });
+  return { body: lines.join('\n'), status: statusbar([
+    ['tab','focus'],['↑↓','select'],['⏎','open'],['s','status'],['h','hide'],['/','filter'],[':','cmd'],['q','quit'],
+  ]) };
+}
+
+/* ------------------------ screen : Board ------------------------ */
+// Sliding window over the status track: show 3 columns at a time, slide to keep
+// the focused column visible. done is collapsed out of the track (reveal with d).
+const STATUS_LABEL = { backlog:'BACKLOG', todo:'TODO', in_progress:'IN PROGRESS', in_review:'IN REVIEW', done:'DONE' };
+const FULL_TRACK = ['backlog','todo','in_progress','in_review','done'];
+const DIGEST_ORDER = [['backlog','BACKLOG'],['todo','TODO'],['in_progress','IN PROGRESS'],['in_review','IN REVIEW'],['done','DONE']];
+// h hides / reveals a section in the Digest only; done starts hidden. The Board
+// always shows every column — revealing a hidden board column would need a config
+// surface we're deferring (see SPEC). Hidden sections aren't persisted either.
+const hidden = new Set(['done']);
+let bCol = 0, bSel = 0;        // Board:  focused column + selected item
+let dSec = 0, dSel = 0;        // Digest: focused section + selected item
+
+// Keep at most `size` items visible, centered on the selection; the list scrolls.
+function windowSlice(items, sel, size){
+  if(items.length<=size) return { slice:items, start:0, above:0, below:0 };
+  const start = Math.max(0, Math.min(sel - Math.floor(size/2), items.length - size));
+  return { slice: items.slice(start, start+size), start, above:start, below: items.length-(start+size) };
+}
+function boardColumn(status, focused, selIdx, COL){
+  const items=byStatus(status);
+  const head=(focused?'▌':' ')+STATUS_LABEL[status]+'  ('+items.length+')';
+  const lines=[ pad(head,COL) ];
+  const w=windowSlice(items, focused?selIdx:0, 5);   // odd window, selection centered
+  if(w.above>0) lines.push(pad('     ↑ '+w.above+' more', COL));
+  w.slice.forEach((it,i)=>{
+    const mark=(focused && w.start+i===selIdx)?'▸':' ';
+    lines.push(pad(mark+' '+PMARK[it.priority]+' '+pad(it.id,6)+' '+it.title, COL));  // one line, …-truncated
+  });
+  if(w.below>0) lines.push(pad('     ↓ '+w.below+' more', COL));
+  return lines;
+}
+function renderBoard(){
+  const COL=27, VIS=3, track=FULL_TRACK;   // the board always shows every column
+  const start=Math.max(0, Math.min(bCol-1, Math.max(0, track.length-VIS)));
+  const hasLeft=start>0, hasRight=start+VIS<track.length;
+  const cols=track.slice(start,start+VIS).map((st,vi)=> boardColumn(st, start+vi===bCol, bSel, COL));
+  const h=Math.max(...cols.map(c=>c.length));
+  cols.forEach(c=>{ while(c.length<h) c.push(' '.repeat(COL)); });
+
+  const lines=[];
+  lines.push(topTabs('board', ISSUES.length+' issues   '+PROJECT+' '));
+  lines.push('─'.repeat(W));
+  lines.push('');
+  for(let i=0;i<h;i++){
+    const lead = (i===0 && hasLeft) ? '‹ ' : '  ';   // hidden-column affordance on the header row
+    let line = lead + cols.map(c=>c[i]).join('   ');
+    if(i===0 && hasRight) line += ' ›';
+    lines.push(line);
+  }
+  return { body: lines.join('\n'), status: statusbar([
+    ['tab','focus'],['↑↓','select'],['⏎','open'],['s','status'],['/','filter'],[':','cmd'],['q','quit'],
+  ]) };
+}
+
+/* ------------------------ screen : Issue ------------------------ */
+function renderIssue(){
+  const it=SEL, w=80;                       // prose measure, inside the full-width frame
+  const L=[];
+  const push = s => L.push(' '+s);
+  const sep = () => L.push('─'.repeat(W));   // full-width rule, like Digest / Board
+
+  L.push(issueHeader(it));                   // ito · ID · title   …   project
+  sep();
+  push('');
+  push(it.status+'   ·   '+it.priority+'   ·   '+it.labels.join('  '));  // meta line
+  push('');
+  (it.blocked_by||[]).forEach(id=> push('blocked by   '+pad(id,7)+' '+titleOf(id)));
+  (it.relates_to||[]).forEach(id=> push('relates to   '+pad(id,7)+' '+titleOf(id)));
+  push('');
+  push('created      '+it.created);
+  push('updated      '+it.updated);
+  push('');
+  sep();
+  push('');
+  BODY.forEach(l=> wrap(l, w).forEach(x=> push(x)) );
+  return { body: L.join('\n'), status: statusbar([
+    ['esc','back'],['↑↓','prev/next'],['s','status'],['p','priority'],['l','labels'],['r','refresh'],[':','cmd'],['q','quit'],
+  ]) };
+}
+
+/* --------------- inline command line : / and : --------------- */
+// Both '/' (filter) and ':' (command) do NOT open a separate screen. The view
+// stays put; the bottom shortcut bar turns into a text input, and you type into
+// it. '/' narrows the issues in the current view live; ':' filters the action
+// list. esc leaves the field and the shortcut bar comes back.
+function inputBar(prefix, query, hint){
+  return ' <b>'+esc(prefix)+'</b> <span class="in">'+esc(query)+'</span><span class="cur">▏</span>'
+       + '   <span class="ghost">'+esc(hint)+'</span>';
+}
+
+// '/' filter — the Digest view stays, its rows narrow to the query as you type.
+function renderFilter(){
+  filterQuery = 'project';                 // example: the user has typed "project"
+  const body = renderDigest().body;        // same view, fewer rows
+  const n = DIGEST_ORDER.reduce((a,[s])=> a+byStatus(s).length, 0);
+  filterQuery = '';                        // leave globals as we found them
+  return { body, status: inputBar('/', 'project', n+' of '+ISSUES.length+' issues · esc to clear') };
+}
+
+// ':' command — the view stays; matching actions pop up just above the input,
+// each showing its shortcut (keyless ones live only here). First match selected.
+function renderCommand(){
+  const lines = renderDigest().body.split('\n');
+  const q = 'pro';                         // example: the user has typed "pro"
+  const cmds = [['switch project…',''], ['open project page',''], ['change priority','p']];
+  lines.push('');
+  lines.push(' '+rule('matches  ', W-2));   // a divider to the edge, like a section header — not a boxed block
+  cmds.forEach((c, i) => {
+    const left = (i === 0 ? ' ▸ ' : '   ') + c[0];
+    const right = (c[1] || '·') + ' ';
+    lines.push(' ' + bar(pad(left, W-2-right.length), right, W-2));
+  });
+  return { body: lines.join('\n'), status: inputBar(':', q, 'type to filter actions · esc to cancel') };
+}
+
+/* --------------------- colorize + statusbar --------------------- */
+function esc(t){ return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function colorize(t){
+  t = esc(t);
+  t = t.replace(/(\[1\] )(digest)/, (m,b,w)=> b + (cur!==1 ? '<span class="ac">'+w+'</span>' : w));   // numbers stay fixed; the active view NAME changes colour
+  t = t.replace(/(\[2\] )(board)/,  (m,b,w)=> b + (cur===1 ? '<span class="ac">'+w+'</span>' : w));
+  t = t.replace(/\bITO-\d+\b/g, '<span class="id">$&</span>');
+  t = t.replace(/<span class="id">ITO-14<\/span>/g, '<span class="id sel">ITO-14</span>');
+  t = t.replace(/\b(urgent|high|medium|low)\b/g, '<span class="p-$1">$1</span>');
+  t = t.replace(/\b(backlog|todo|in[_ ]progress|in[_ ]review|done)\b/gi, '<span class="st">$&</span>');
+  t = t.replace(/\b(feature|bug|docs|tests|refactor|chore|research|infra)\b/g, '<span class="lb">$&</span>');
+  t = t.replace(/●/g,'<span class="m-urg">●</span>')
+       .replace(/▲/g,'<span class="m-hi">▲</span>')
+       .replace(/◆/g,'<span class="m-med">◆</span>')
+       .replace(/⊘/g,'<span class="blk">⊘</span>')
+       .replace(/[▸▾▹▌]/g,'<span class="ac">$&</span>')
+       .replace(/━+/g,'<span class="ac">$&</span>');   // focused-column underline
+  t = t.replace(/[╭╮╰╯│─┼├┤┬┴]/g, '<span class="frame">$&</span>');
+  return t;
+}
+function statusbar(pairs){
+  return ' '+pairs.map(([k,v])=>'<b>'+esc(k)+'</b> '+esc(v)).join('   ');
+}
+
+/* ----------------------------- wiring --------------------------- */
+const SCREENS = [
+  { key:'Digest', sub:' — rows',   render:renderDigest },
+  { key:'Board',  sub:' — kanban', render:renderBoard  },
+  { key:'Issue',  sub:' — ITO-14',  render:renderIssue  },
+  { key:'Filter', sub:' — / inline',render:renderFilter },
+  { key:'Command',sub:' — : inline',render:renderCommand},
+];
+let cur = 0;
+function paint(){
+  const v = SCREENS[cur];
+  const out = v.render();
+  document.getElementById('screen').innerHTML = colorize(out.body);
+  document.getElementById('statusbar').innerHTML = out.status;
+  document.getElementById('vkey').textContent = v.key;
+  document.getElementById('vname').textContent = v.sub;
+  const u = new URL(location); u.searchParams.set('screen', v.key.toLowerCase()); history.replaceState(null,'',u);
+}
+function show(i){ cur = (i + SCREENS.length) % SCREENS.length; paint(); }
+document.getElementById('prev').onclick = ()=>show(cur-1);
+document.getElementById('next').onclick = ()=>show(cur+1);
+const step = (e)=> e.key==='ArrowDown' ? 1 : -1;
+document.addEventListener('keydown', e=>{
+  const key = SCREENS[cur].key;
+  // Number keys pick a view (1 digest, 2 board) — the digit is shown in the header tab.
+  // Tab jumps between columns/sections; ↑↓ moves within the focused one; d toggles done.
+  // (In the real TUI the columns move with ← →; here ← → switch all screens.)
+  if(key==='Digest'||key==='Board'){
+    if(e.key==='1'){ show(0); return; }
+    if(e.key==='2'){ show(1); return; }
+  }
+  if(key==='Board'){
+    const track = FULL_TRACK;   // board shows every column; no hide here
+    if(e.key==='Tab'){ e.preventDefault(); bCol=(bCol+(e.shiftKey?-1:1)+track.length)%track.length; bSel=0; paint(); return; }
+    if(e.key==='ArrowUp'||e.key==='ArrowDown'){ e.preventDefault();
+      bSel=Math.max(0, Math.min(bSel+step(e), byStatus(track[bCol]).length-1)); paint(); return; }
+  }
+  if(key==='Digest'){
+    if(e.key==='Tab'){ e.preventDefault(); dSec=(dSec+(e.shiftKey?-1:1)+DIGEST_ORDER.length)%DIGEST_ORDER.length; dSel=0; paint(); return; }
+    if(e.key==='ArrowUp'||e.key==='ArrowDown'){ e.preventDefault();
+      dSel=Math.max(0, Math.min(dSel+step(e), byStatus(DIGEST_ORDER[dSec][0]).length-1)); paint(); return; }
+    if(e.key==='h'||e.key==='H'){ const s=DIGEST_ORDER[dSec][0]; hidden.has(s)?hidden.delete(s):hidden.add(s); paint(); return; }   // h hides / reveals the focused section
+  }
+  if(e.key==='ArrowLeft') show(cur-1);
+  if(e.key==='ArrowRight') show(cur+1);
+});
+const start = (new URL(location)).searchParams.get('screen');
+show(Math.max(0, SCREENS.findIndex(v=>v.key.toLowerCase()===start)));
+</script>
+</body>
+</html>
