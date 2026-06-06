@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -148,11 +149,11 @@ func TestBoardRendersAllStatusesAsColumns(t *testing.T) {
 		"IN PROGRESS  (1)",
 		"IN REVIEW  (1)",
 		"DONE  (1)",
-		"▸ ◆ BRD-1 Ba…   research",
-		"▲ BRD-2 Tod…   feature",
-		"● BRD-3 Ac…   refactor",
-		"· BRD-4 Review…   docs",
-		"· BRD-5 Done …   tests",
+		"▸ ◆ BRD-1 Backlog",
+		"▲ BRD-2 Todo feature",
+		"● BRD-3 Active",
+		"· BRD-4 Review docs",
+		"· BRD-5 Done still",
 	} {
 		if !strings.Contains(board, want) {
 			t.Fatalf("expected Board to contain %q, got:\n%s", want, board)
@@ -1257,6 +1258,14 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyDown}
 	case "up":
 		return tea.KeyMsg{Type: tea.KeyUp}
+	case "pgdown":
+		return tea.KeyMsg{Type: tea.KeyPgDown}
+	case "pgup":
+		return tea.KeyMsg{Type: tea.KeyPgUp}
+	case "j":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}
+	case "k":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}
 	case "enter":
 		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "esc":
@@ -1283,4 +1292,105 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 
 func runeMsg(r rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+func TestIssueDetailScrollsLongBodyWithinHeight(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("scroll-app", "SCR", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	var body strings.Builder
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&body, "L%02d unique body line\n", i)
+	}
+	if _, err := st.CreateIssue(project, "Long body issue", "todo", "high", nil, body.String()); err != nil {
+		t.Fatalf("create long issue: %v", err)
+	}
+	next, err := st.CreateIssue(project, "Following issue", "todo", "low", nil, "short body")
+	if err != nil {
+		t.Fatalf("create next issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 20})
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	top := current.View()
+
+	if lines := strings.Count(top, "\n") + 1; lines > 20 {
+		t.Fatalf("expected Issue detail to fit the terminal height, got %d lines:\n%s", lines, top)
+	}
+	if !strings.Contains(top, "L01 unique body line") {
+		t.Fatalf("expected the first body line at the top of the scroll, got:\n%s", top)
+	}
+	if strings.Contains(top, "↑ ") { // the down indicator and statusbar carry no "↑ "
+		t.Fatalf("expected no up overflow indicator at the top of the body, got:\n%s", top)
+	}
+	if !strings.Contains(top, "more") {
+		t.Fatalf("expected a down overflow indicator for the long body, got:\n%s", top)
+	}
+
+	current, _ = current.Update(keyMsg(t, "pgdown"))
+	scrolled := current.View()
+	if lines := strings.Count(scrolled, "\n") + 1; lines > 20 {
+		t.Fatalf("expected the scrolled Issue detail to fit the terminal height, got %d lines:\n%s", lines, scrolled)
+	}
+	if strings.Contains(scrolled, "L01 unique body line") {
+		t.Fatalf("expected the body to scroll past its first line, got:\n%s", scrolled)
+	}
+	if !strings.Contains(scrolled, "↑ ") {
+		t.Fatalf("expected an up overflow indicator after scrolling down, got:\n%s", scrolled)
+	}
+
+	current, _ = current.Update(keyMsg(t, "pgup"))
+	if back := current.View(); strings.Contains(back, "↑ ") || !strings.Contains(back, "L01 unique body line") {
+		t.Fatalf("expected pgup to return to the top of the body, got:\n%s", back)
+	}
+
+	// ↑↓ still navigate between Issues rather than scrolling the body, and opening
+	// the next Issue resets the scroll offset.
+	current, _ = current.Update(keyMsg(t, "down"))
+	if nav := current.View(); !strings.Contains(nav, "ito · "+next.ID+" · Following issue") {
+		t.Fatalf("expected down to move to the next Issue, got:\n%s", nav)
+	}
+}
+
+func TestIssueDetailWithoutLinksHasNoDoubleBlank(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("spacing-app", "SPC", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Unlinked issue", "todo", "high", []string{"feature"}, "single body line"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 24})
+	current, _ = current.Update(keyMsg(t, "tab")) // focus TODO
+	current, _ = current.Update(keyMsg(t, "enter"))
+	detail := current.View()
+	if !strings.Contains(detail, "ito · SPC-1 · Unlinked issue") {
+		t.Fatalf("expected the Issue detail to open, got:\n%s", detail)
+	}
+
+	// With no blocked-by / relates-to links, the meta and the dates sit a single
+	// blank apart — not two — so the top of the view doesn't read as empty.
+	if strings.Contains(detail, "\n\n\n") {
+		t.Fatalf("expected no double blank line in an unlinked Issue detail, got:\n%s", detail)
+	}
+	if !strings.Contains(detail, "created      ") || !strings.Contains(detail, "updated      ") {
+		t.Fatalf("expected the dates block to still render, got:\n%s", detail)
+	}
 }
