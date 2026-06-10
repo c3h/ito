@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -720,17 +721,28 @@ func (m *model) reloadDigest() {
 	}
 	detailID := m.detailIssue.ID
 
-	m.sections = make([]digestSection, 0, len(store.Statuses))
 	m.loadErr = nil
+	// One query for every status: a single snapshot, so a concurrent write can
+	// never show an Issue in two sections (or in none) within the same reload.
+	all, err := m.store.ListIssues(store.ListOptions{
+		ProjectID:   m.project.ID,
+		IncludeDone: true,
+	})
+	if err != nil {
+		m.loadErr = err
+		return
+	}
+	byStatus := make(map[string][]store.Issue, len(store.Statuses))
+	for _, issue := range all {
+		byStatus[issue.Status] = append(byStatus[issue.Status], issue)
+	}
+
+	m.sections = make([]digestSection, 0, len(store.Statuses))
 	for i, status := range store.Statuses {
 		label := statusLabel(status)
-		issues, err := m.store.ListIssues(store.ListOptions{
-			ProjectID: m.project.ID,
-			Status:    status,
-		})
-		if err != nil {
-			m.loadErr = err
-			return
+		issues := byStatus[status]
+		if issues == nil {
+			issues = []store.Issue{}
 		}
 		section := digestSection{
 			Label:  label,
@@ -1017,6 +1029,11 @@ func (m *model) openLabelPicker() {
 	if m.mode == viewDigest || m.mode == viewBoard {
 		m.returnMode = m.mode
 	}
+	if m.detailIssue.ID != issue.ID {
+		// Esc from the picker lands on this Issue's detail — don't inherit the
+		// previous Issue's scroll offset.
+		m.detailScroll = 0
+	}
 	m.detailIssue = issue
 	m.linkTitles = m.loadLinkTitles(issue)
 	m.focusIssue(issue.ID)
@@ -1108,8 +1125,12 @@ func (m model) selectedIssue() (store.Issue, bool) {
 	return section.Issues[section.selected], true
 }
 
+// currentIssue resolves the Issue an action applies to: the detail Issue while
+// the detail or the label picker is open (the picker always displays
+// m.detailIssue, so acting on the digest selection instead could mutate a
+// different Issue than the one on screen), otherwise the digest selection.
 func (m model) currentIssue() (store.Issue, bool) {
-	if m.mode == viewIssue && m.detailIssue.ID != "" {
+	if (m.mode == viewIssue || m.mode == viewLabels) && m.detailIssue.ID != "" {
 		return m.detailIssue, true
 	}
 	return m.selectedIssue()
@@ -1117,15 +1138,17 @@ func (m model) currentIssue() (store.Issue, bool) {
 
 func (m *model) moveDetailIssue(delta int) {
 	issues := m.allIssues()
-	if len(issues) == 0 {
-		return
-	}
-	idx := 0
+	idx := -1
 	for i, issue := range issues {
 		if issue.ID == m.detailIssue.ID {
 			idx = i
 			break
 		}
+	}
+	if idx == -1 {
+		// The open Issue is not in the navigable list (e.g. it just moved into a
+		// hidden section) — jumping from index 0 would land on an unrelated Issue.
+		return
 	}
 	next := min(max(idx+delta, 0), len(issues)-1)
 	if issues[next].ID != m.detailIssue.ID {
@@ -1133,10 +1156,14 @@ func (m *model) moveDetailIssue(delta int) {
 	}
 }
 
+// allIssues lists the Issues prev/next navigation walks: the sections as the
+// originating view shows them — the Board displays hidden sections, so a detail
+// opened from it navigates across them too.
 func (m model) allIssues() []store.Issue {
+	includeHidden := m.detailReturnMode() == viewBoard
 	var issues []store.Issue
 	for _, section := range m.sections {
-		if section.hidden {
+		if section.hidden && !includeHidden {
 			continue
 		}
 		issues = append(issues, section.Issues...)
@@ -1170,13 +1197,26 @@ func (m model) issueInSections(id string) (store.Issue, bool) {
 	return store.Issue{}, false
 }
 
-func (m model) loadLinkTitles(issue store.Issue) map[string]string {
+// loadLinkTitles resolves linked Issue titles from the already-loaded sections
+// (which hold every status), falling back to the store only for Issues created
+// since the last reload. A missing target renders blank; a real store error
+// surfaces through loadErr instead of being silently swallowed.
+func (m *model) loadLinkTitles(issue store.Issue) map[string]string {
 	titles := map[string]string{}
 	resolve := func(ids []string) {
 		for _, id := range ids {
-			if linked, err := m.store.FindIssue(m.project, id); err == nil {
+			if linked, ok := m.issueInSections(id); ok {
 				titles[id] = linked.Title
+				continue
 			}
+			linked, err := m.store.FindIssue(m.project, id)
+			if err != nil {
+				if !errors.Is(err, store.ErrNotFound) {
+					m.loadErr = err
+				}
+				continue
+			}
+			titles[id] = linked.Title
 		}
 	}
 	resolve(issue.BlockedBy)
@@ -1321,7 +1361,9 @@ func scrollWindow(total, scroll, budget int) (start, end int, above, below bool)
 	if scroll == 0 {
 		return 0, budget - 1, false, true // first window: one line spent on the ↓ indicator
 	}
-	return scroll, scroll + budget - 2, true, true // mid window: both indicators
+	// Mid window: both indicators. On a degenerate 1-line budget the indicators
+	// take it all — clamp so the slice never inverts (body[start:end], end < start).
+	return scroll, max(scroll, scroll+budget-2), true, true
 }
 
 func (m model) labelPickerView() string {
@@ -1599,7 +1641,7 @@ func wrapLine(value string, width int) []string {
 		if current != "" {
 			next = current + " " + word
 		}
-		if len(next) <= width {
+		if runeLen(next) <= width {
 			current = next
 			continue
 		}

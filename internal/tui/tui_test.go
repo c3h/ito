@@ -1481,3 +1481,109 @@ func TestIssueDetailWithoutLinksHasNoDoubleBlank(t *testing.T) {
 		t.Fatalf("expected the dates block to still render, got:\n%s", detail)
 	}
 }
+
+func TestLabelPickerEditsTheDisplayedIssueAfterStatusMove(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("picker-target-app", "PTA", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	target, err := st.CreateIssue(project, "Picker target", "in_review", "high", nil, "")
+	if err != nil {
+		t.Fatalf("create target issue: %v", err)
+	}
+	bystander, err := st.CreateIssue(project, "Innocent bystander", "in_review", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create bystander issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "tab")) // focus IN REVIEW
+	current, _ = current.Update(keyMsg(t, "enter"))
+	current, _ = current.Update(keyMsg(t, "s")) // target moves to done (hidden section)
+	current, _ = current.Update(keyMsg(t, "l"))
+	current, _ = current.Update(keyMsg(t, "enter")) // toggle the first label
+
+	editedTarget, err := st.FindIssue(project, target.ID)
+	if err != nil {
+		t.Fatalf("find target issue: %v", err)
+	}
+	if !slices.Equal(editedTarget.Labels, []string{store.Labels[0]}) {
+		t.Fatalf("expected the displayed Issue to gain the label, got %#v", editedTarget.Labels)
+	}
+	editedBystander, err := st.FindIssue(project, bystander.ID)
+	if err != nil {
+		t.Fatalf("find bystander issue: %v", err)
+	}
+	if len(editedBystander.Labels) != 0 {
+		t.Fatalf("expected the digest selection to stay untouched, got %#v", editedBystander.Labels)
+	}
+}
+
+func TestBoardDetailNavigatesWithinDoneIssues(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("board-done-app", "BDN", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	for _, issue := range []struct{ title, status, priority string }{
+		{"Backlog one", "backlog", "high"},
+		{"Backlog two", "backlog", "low"},
+		{"Done one", "done", "high"},
+		{"Done two", "done", "low"},
+	} {
+		if _, err := st.CreateIssue(project, issue.title, issue.status, issue.priority, nil, ""); err != nil {
+			t.Fatalf("create issue %q: %v", issue.title, err)
+		}
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	for i := 0; i < 4; i++ { // focus the DONE column
+		current, _ = current.Update(keyMsg(t, "tab"))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	if view := current.View(); !strings.Contains(view, "Done one") {
+		t.Fatalf("expected the first done Issue detail, got:\n%s", view)
+	}
+
+	// Down must walk the done column the Board displays, not jump to an
+	// unrelated Issue because the Digest hides the DONE section.
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "Done two") {
+		t.Fatalf("expected Down to show the next done Issue, got:\n%s", view)
+	}
+}
+
+func TestScrollWindowNeverInvertsOnTinyBudgets(t *testing.T) {
+	for budget := 1; budget <= 4; budget++ {
+		for total := 0; total <= 8; total++ {
+			for scroll := 0; scroll <= total+1; scroll++ {
+				start, end, _, _ := scrollWindow(total, scroll, budget)
+				if start > end || start < 0 || end > total {
+					t.Fatalf("scrollWindow(%d, %d, %d) returned inverted or out-of-range window [%d, %d)", total, scroll, budget, start, end)
+				}
+			}
+		}
+	}
+}
+
+func TestWrapLineCountsRunesNotBytes(t *testing.T) {
+	line := "café crème brûlée" // 17 runes, 22 bytes
+	lines := wrapLine(line, 17)
+	if len(lines) != 1 || lines[0] != line {
+		t.Fatalf("expected accented text to fit its rune width, got %#v", lines)
+	}
+}
