@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	itostore "github.com/gimigliano/ito/internal/store"
-	"github.com/gimigliano/ito/internal/tui"
+	itostore "github.com/c3h/ito/internal/store"
+	"github.com/c3h/ito/internal/tui"
 	"github.com/mattn/go-isatty"
 	_ "modernc.org/sqlite"
 )

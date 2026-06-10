@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/gimigliano/ito/internal/store"
+	"github.com/c3h/ito/internal/store"
 )
 
 func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {

@@ -1,4 +1,4 @@
-module github.com/gimigliano/ito
+module github.com/c3h/ito
 
 go 1.26
 

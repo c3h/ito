@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	itostore "github.com/gimigliano/ito/internal/store"
+	itostore "github.com/c3h/ito/internal/store"
 	_ "modernc.org/sqlite"
 )
 

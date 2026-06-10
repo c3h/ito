@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/gimigliano/ito/internal/store"
+	"github.com/c3h/ito/internal/store"
 )
 
 // Surface frame width: capped at a readable measure so it never sprawls on a

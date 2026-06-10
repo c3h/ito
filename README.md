@@ -11,7 +11,7 @@ Projects are born from the conversation with an AI, on the local machine — but
 ## Install
 
 ```sh
-go install github.com/gimigliano/ito@latest
+go install github.com/c3h/ito@latest
 ```
 
 A single static binary: pure-Go SQLite (no CGO), instant cold start.
