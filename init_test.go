@@ -1774,6 +1774,50 @@ func TestEditLinksValidationFailures(t *testing.T) {
 	}
 }
 
+func TestEditMissingLinkTargetReportsTheTargetID(t *testing.T) {
+	dir := t.TempDir()
+	itoHome := t.TempDir()
+
+	if result := runITO(t, dir, itoHome, "init", "--json", "--name", "target-links", "--prefix", "TGT"); result.exitCode != 0 {
+		t.Fatalf("init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, dir, itoHome, "new", "--json", "--title", "Source"); result.exitCode != 0 {
+		t.Fatalf("new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, dir, itoHome, "edit", "TGT-1", "--block", "TGT-999")
+	if result.exitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.stderr, `Issue "TGT-999" not found.`) {
+		t.Fatalf("expected the error to name the missing link target, got %q", result.stderr)
+	}
+	if strings.Contains(result.stderr, `"TGT-1"`) {
+		t.Fatalf("expected the error not to blame the existing source Issue, got %q", result.stderr)
+	}
+}
+
+func TestNewWithRepeatedLabelDeduplicates(t *testing.T) {
+	dir := t.TempDir()
+	itoHome := t.TempDir()
+
+	if result := runITO(t, dir, itoHome, "init", "--json", "--name", "dup-label-app", "--prefix", "DUP"); result.exitCode != 0 {
+		t.Fatalf("init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	result := runITO(t, dir, itoHome, "new", "--json", "--title", "Repeated label", "--label", "bug", "--label", "bug")
+	if result.exitCode != 0 {
+		t.Fatalf("expected the redundant label to be tolerated, got exit %d\nstderr: %s", result.exitCode, result.stderr)
+	}
+	var created issueJSON
+	if err := json.Unmarshal([]byte(result.stdout), &created); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if len(created.Labels) != 1 || created.Labels[0] != "bug" {
+		t.Fatalf("expected deduplicated labels [bug], got %#v", created.Labels)
+	}
+}
+
 func TestEditRejectsNoChangeInvalidInputsAndProjectMismatch(t *testing.T) {
 	parent := t.TempDir()
 	firstRepo := filepath.Join(parent, "first")
@@ -2348,6 +2392,40 @@ func TestInitOutsideGitUsesClosestRegisteredAncestor(t *testing.T) {
 	}
 	if project.RootPath != canonicalRoot {
 		t.Fatalf("expected ancestor root_path %q, got %q", canonicalRoot, project.RootPath)
+	}
+}
+
+func TestInitOutsideGitWithExplicitFlagsCreatesNestedProject(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "nested", "child")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonicalChild, err := filepath.EvalSymlinks(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	itoHome := t.TempDir()
+
+	if result := runITO(t, root, itoHome, "init", "--json", "--name", "covering-project"); result.exitCode != 0 {
+		t.Fatalf("root init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	// Explicit --name/--prefix asks for a new Project at the cwd; the covering
+	// ancestor must not swallow the flags into a silent no-op.
+	result := runITO(t, child, itoHome, "init", "--json", "--name", "child-project", "--prefix", "CHL")
+	if result.exitCode != 0 {
+		t.Fatalf("child init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	var project projectJSON
+	if err := json.Unmarshal([]byte(result.stdout), &project); err != nil {
+		t.Fatalf("stdout is not a project JSON object: %v\nstdout: %s", err, result.stdout)
+	}
+	if project.Name != "child-project" || project.Prefix != "CHL" {
+		t.Fatalf("expected the explicit child project, got %#v", project)
+	}
+	if project.RootPath != canonicalChild {
+		t.Fatalf("expected child root_path %q, got %q", canonicalChild, project.RootPath)
 	}
 }
 

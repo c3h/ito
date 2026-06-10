@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -37,6 +38,29 @@ var (
 	isTerminal      = isatty.IsTerminal
 	runTUI          = tui.Run
 )
+
+// The prose enumerations for hints and help derive from the same slices, so a
+// vocabulary change never leaves stale text behind. Priorities are spelled
+// ascending (low first) in prose, while the slice orders by precedence.
+var (
+	statusList   = humanList(itostore.Statuses)
+	priorityList = humanList(ascendingPriorities())
+	labelList    = humanList(itostore.Labels)
+)
+
+// humanList joins a vocabulary for prose: "a, b, c or d".
+func humanList(values []string) string {
+	if len(values) <= 1 {
+		return strings.Join(values, "")
+	}
+	return strings.Join(values[:len(values)-1], ", ") + " or " + values[len(values)-1]
+}
+
+func ascendingPriorities() []string {
+	values := slices.Clone(itostore.Priorities)
+	slices.Reverse(values)
+	return values
+}
 
 const (
 	ansiReset   = "\x1b[0m"
@@ -257,11 +281,7 @@ func runCLI(args []string) int {
 			return fail(false, openFail.code, openFail.message, openFail.hint)
 		}
 		defer db.Close()
-		rootPath, inGit, err := resolveCurrentRoot()
-		if err != nil {
-			return fail(false, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
-		}
-		p, code, message, hint := resolveProject(st, rootPath, inGit, "")
+		p, code, message, hint := resolveProject(st, "")
 		if code != 0 {
 			if code != exitNotRegistered {
 				return fail(false, code, message, hint)
@@ -354,7 +374,9 @@ func runInit(args []string) int {
 	if found {
 		return printProject(existing, jsonMode)
 	}
-	if !inGit {
+	// Explicit --name/--prefix means the user is asking for a new Project at the
+	// cwd — returning a covering ancestor would silently drop the flags.
+	if !inGit && manualName == "" && manualPrefix == "" {
 		existing, found, err := st.FindClosestProjectAncestor(rootPath)
 		if err != nil {
 			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the ancestor project: %v", err), "try again or inspect the central store.")
@@ -405,15 +427,28 @@ func runInit(args []string) int {
 		}
 		created, err = st.CreateProject(name, prefix, rootPath)
 		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not register the project: %v", err), "check for name, prefix or root_path collisions.")
+			return failCreateProject(jsonMode, name, prefix, err)
 		}
 	} else {
 		created, err = st.CreateProjectWithGeneratedPrefix(name, filepath.Base(rootPath), rootPath)
 		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not register the project: %v", err), "check for name, prefix or root_path collisions.")
+			return failCreateProject(jsonMode, name, prefix, err)
 		}
 	}
 	return printProject(created, jsonMode)
+}
+
+// failCreateProject renders a project-creation failure, mapping the store's
+// typed uniqueness errors (which close the check-then-insert race window) to
+// the same actionable exit-2 messages the pre-checks produce.
+func failCreateProject(jsonMode bool, name, prefix string, err error) int {
+	if errors.Is(err, itostore.ErrNameExists) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("a project named %q already exists.", name), "choose another one with --name.")
+	}
+	if errors.Is(err, itostore.ErrPrefixExists) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("a project with prefix %q already exists.", prefix), "choose another one with --prefix.")
+	}
+	return fail(jsonMode, exitGeneric, fmt.Sprintf("could not register the project: %v", err), "check for name, prefix or root_path collisions.")
 }
 
 func runRename(args []string) int {
@@ -439,17 +474,13 @@ func runRename(args []string) int {
 		return failInvalidProjectName(jsonMode, newName)
 	}
 
-	rootPath, inGit, err := resolveCurrentRoot()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
-	}
 	db, st, openFail := openMigratedStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
 
-	p, code, message, hint := resolveProject(st, rootPath, inGit, projectName)
+	p, code, message, hint := resolveProject(st, projectName)
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
@@ -496,14 +527,14 @@ func runNew(args []string) int {
 		return fail(jsonMode, exitBadUsage, "title is required.", "use --title <title> with non-empty text.")
 	}
 	if !isValidValue(status, validStatuses) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use backlog, todo, in_progress, in_review or done.")
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use "+statusList+".")
 	}
 	if !isValidValue(priority, validPriorities) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use low, medium, high or urgent.")
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use "+priorityList+".")
 	}
 	for _, label := range labels {
 		if !isValidValue(label, validLabels) {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", label), "use feature, bug, docs, tests, refactor, chore, research or infra.")
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", label), "use "+labelList+".")
 		}
 	}
 	if body == "-" {
@@ -514,17 +545,13 @@ func runNew(args []string) int {
 		body = string(input)
 	}
 
-	rootPath, inGit, err := resolveCurrentRoot()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
-	}
 	db, st, openFail := openMigratedStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
 
-	p, code, message, hint := resolveProject(st, rootPath, inGit, projectName)
+	p, code, message, hint := resolveProject(st, projectName)
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
@@ -609,7 +636,7 @@ func runMove(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
 	}
 	if !isValidValue(targetStatus, validStatuses) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", targetStatus), "use backlog, todo, in_progress, in_review or done.")
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", targetStatus), "use "+statusList+".")
 	}
 	prefix := matches[1]
 	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
@@ -708,7 +735,7 @@ func runEdit(args []string) int {
 	}
 	if options.PrioritySet {
 		if !isValidValue(priority, validPriorities) {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use low, medium, high or urgent.")
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use "+priorityList+".")
 		}
 		options.Priority = priority
 	}
@@ -724,7 +751,7 @@ func runEdit(args []string) int {
 	}
 	for _, op := range options.LabelOps {
 		if !isValidValue(op.Label, validLabels) {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", op.Label), "use feature, bug, docs, tests, refactor, chore, research or infra.")
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", op.Label), "use "+labelList+".")
 		}
 	}
 	for _, op := range options.LinkOps {
@@ -749,6 +776,10 @@ func runEdit(args []string) int {
 
 	edited, err := st.Edit(p, issueID, options)
 	if err != nil {
+		var linkTarget *itostore.LinkTargetNotFoundError
+		if errors.As(err, &linkTarget) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", linkTarget.TargetID), "check the linked Issue ID.")
+		}
 		if errors.Is(err, itostore.ErrNotFound) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", issueID), "check the full Issue ID.")
 		}
@@ -849,22 +880,18 @@ func runPrune(args []string) int {
 		return fail(jsonMode, exitBadUsage, "explicit confirmation is required.", "add --yes to confirm the destructive deletion.")
 	}
 	if !isValidValue(status, validStatuses) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use backlog, todo, in_progress, in_review or done.")
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use "+statusList+".")
 	}
 	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
 		return failInvalidProjectName(jsonMode, projectName)
 	}
 
-	rootPath, inGit, err := resolveCurrentRoot()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
-	}
 	db, st, openFail := openMigratedStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
 	defer db.Close()
-	p, code, message, hint := resolveProject(st, rootPath, inGit, projectName)
+	p, code, message, hint := resolveProject(st, projectName)
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
@@ -913,14 +940,14 @@ func runList(args []string) int {
 		return fail(jsonMode, exitBadUsage, "--project and --all-projects cannot be used together.", "choose a scope: an explicit Project or all Projects.")
 	}
 	if status != "" && !isValidValue(status, validStatuses) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use backlog, todo, in_progress, in_review or done.")
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use "+statusList+".")
 	}
 	if priority != "" && !isValidValue(priority, validPriorities) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use low, medium, high or urgent.")
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use "+priorityList+".")
 	}
 	for _, label := range labels {
 		if !isValidValue(label, validLabels) {
-			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", label), "use feature, bug, docs, tests, refactor, chore, research or infra.")
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", label), "use "+labelList+".")
 		}
 	}
 
@@ -939,11 +966,7 @@ func runList(args []string) int {
 		Ready:       ready,
 	}
 	if !allProjects {
-		rootPath, inGit, err := resolveCurrentRoot()
-		if err != nil {
-			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory.")
-		}
-		p, code, message, hint := resolveProject(st, rootPath, inGit, projectName)
+		p, code, message, hint := resolveProject(st, projectName)
 		if code != 0 {
 			return fail(jsonMode, code, message, hint)
 		}
@@ -983,7 +1006,10 @@ func runInitReattach(st *itostore.Store, rootPath string, name string, jsonMode 
 	return printProject(reattached, jsonMode)
 }
 
-func resolveProject(st *itostore.Store, rootPath string, inGit bool, explicitName string) (project, int, string, string) {
+// resolveProject resolves the Project a command acts on. With an explicit name
+// it never touches git or the cwd — so --project keeps working on machines
+// without git in PATH; only the implicit path resolves the current root.
+func resolveProject(st *itostore.Store, explicitName string) (project, int, string, string) {
 	if explicitName != "" {
 		if !itostore.ProjectNamePattern.MatchString(explicitName) {
 			return project{}, exitBadUsage, fmt.Sprintf("invalid project name %q.", explicitName), "use the format [a-z0-9][a-z0-9-]{1,62}."
@@ -998,6 +1024,10 @@ func resolveProject(st *itostore.Store, rootPath string, inGit bool, explicitNam
 		return p, 0, "", ""
 	}
 
+	rootPath, inGit, err := resolveCurrentRoot()
+	if err != nil {
+		return project{}, exitGeneric, fmt.Sprintf("could not resolve the current project: %v", err), "run the command inside an accessible directory."
+	}
 	p, err := st.ResolveProject(rootPath, inGit, "")
 	if err != nil {
 		var detached *itostore.DetachedError
@@ -1147,18 +1177,19 @@ Flags:
   --project <name>     Target Project when the cwd should not resolve implicitly.
   --json               Prints JSON.`)
 	case "new":
-		fmt.Println(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--label <label>] [--body <text>|-] [--project <name>] [--json]
+		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--label <label>] [--body <text>|-] [--project <name>] [--json]
 
 Creates an Issue and prints the ID in human mode.
 
 Flags:
   --title <title>          Title is required.
-  --status <status>        backlog, todo, in_progress, in_review or done. Default: backlog.
-  --priority <priority>    low, medium, high or urgent. Default: low.
-  --label <label>          Repeatable initial Label: feature, bug, docs, tests, refactor, chore, research or infra.
+  --status <status>        %s. Default: backlog.
+  --priority <priority>    %s. Default: low.
+  --label <label>          Repeatable initial Label: %s.
   --body <text>|-          Markdown body. Use "-" to read stdin.
   --project <name>         Explicit Project.
-  --json                   Prints JSON.`)
+  --json                   Prints JSON.
+`, statusList, priorityList, labelList)
 	case "show":
 		fmt.Println(`usage: ito show [--project <name>] [--json] <PREFIX>-<n>
 
@@ -1168,20 +1199,21 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "list":
-		fmt.Println(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--project <name>|--all-projects] [--json]
+		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--project <name>|--all-projects] [--json]
 
 Lists Issues in the current Project. Issues in done are hidden by default, except with --status done.
 Use --ready to list the backlog/todo frontier whose blockers are all done; an agent can fan out one git worktree per ready Issue.
 
 Flags:
   --ready                  Filter to backlog/todo Issues whose blockers are done.
-  --status <status>        Filter by backlog, todo, in_progress, in_review or done.
-  --priority <priority>    Filter by low, medium, high or urgent.
+  --status <status>        Filter by %s.
+  --priority <priority>    Filter by %s.
   --label <label>          Filter by Label. Repeatable.
   --search <text>          Full-text search in title and body.
   --project <name>         Explicit Project.
   --all-projects           Lists all Projects.
-  --json                   Prints JSON.`)
+  --json                   Prints JSON.
+`, statusList, priorityList)
 	case "move":
 		fmt.Println(`usage: ito move [--project <name>] [--json] <PREFIX>-<n> <status>
 
@@ -1191,13 +1223,13 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "edit":
-		fmt.Println(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--project <name>] [--json]
 
 Edits an Issue. Requires at least one change.
 
 Flags:
   --title <title>          New title.
-  --priority <priority>    low, medium, high or urgent.
+  --priority <priority>    %s.
   --body <text>|-          New markdown body. Use "-" to read stdin.
   --add-label <label>      Adds a Label. Repeatable.
   --remove-label <label>   Removes a Label. Repeatable.
@@ -1206,7 +1238,8 @@ Flags:
   --relate <ID>            Adds a relates_to link.
   --unrelate <ID>          Removes a relates_to link.
   --project <name>         Validates that the Issue belongs to the given Project.
-  --json                   Prints JSON.`)
+  --json                   Prints JSON.
+`, priorityList)
 	case "rm":
 		fmt.Println(`usage: ito rm [--project <name>] [--json] <PREFIX>-<n>
 
@@ -1216,15 +1249,16 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "prune":
-		fmt.Println(`usage: ito prune --status <status> --yes [--project <name>] [--json]
+		fmt.Printf(`usage: ito prune --status <status> --yes [--project <name>] [--json]
 
 Deletes Issues in bulk. Requires an explicit filter and flag confirmation.
 
 Flags:
-  --status <status>    Filter by backlog, todo, in_progress, in_review or done.
+  --status <status>    Filter by %s.
   --yes                Confirms the destructive deletion.
   --project <name>     Explicit Project.
-  --json               Prints JSON.`)
+  --json               Prints JSON.
+`, statusList)
 	}
 }
 
@@ -1402,19 +1436,7 @@ func splitFlagsAndPositionals(args []string, valueFlags map[string]struct{}) (fl
 }
 
 func splitEditArgs(args []string) ([]string, string, int) {
-	valueFlags := map[string]struct{}{
-		"project":      {},
-		"title":        {},
-		"priority":     {},
-		"body":         {},
-		"add-label":    {},
-		"remove-label": {},
-		"block":        {},
-		"unblock":      {},
-		"relate":       {},
-		"unrelate":     {},
-	}
-	flagArgs, positionals := splitFlagsAndPositionals(args, valueFlags)
+	flagArgs, positionals := splitFlagsAndPositionals(args, commandValueFlags("edit"))
 	issueID := ""
 	if len(positionals) > 0 {
 		issueID = positionals[0]
