@@ -34,6 +34,119 @@ func TestResolveProjectReturnsDetachedErrorWithProjectName(t *testing.T) {
 	}
 }
 
+func TestCreateIssueDeduplicatesLabels(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("label-app", "LAB", filepath.Join(t.TempDir(), "label"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	created, err := st.CreateIssue(project, "Repeated label", "backlog", "low", []string{"bug", "bug", "docs"}, "")
+	if err != nil {
+		t.Fatalf("create issue with repeated label: %v", err)
+	}
+	if !slices.Equal(created.Labels, []string{"bug", "docs"}) {
+		t.Fatalf("expected deduplicated labels [bug docs], got %#v", created.Labels)
+	}
+}
+
+func TestEditMissingLinkTargetNamesTheTarget(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("link-app", "LNK", filepath.Join(t.TempDir(), "link"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	source, err := st.CreateIssue(project, "Source issue", "backlog", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	_, err = st.Edit(project, source.ID, EditIssueOptions{
+		LinkOps: []LinkEditOp{{Kind: "blocked_by", Action: "add", Target: "LNK-999"}},
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected the error to unwrap to ErrNotFound, got %v", err)
+	}
+	var linkTarget *LinkTargetNotFoundError
+	if !errors.As(err, &linkTarget) {
+		t.Fatalf("expected *LinkTargetNotFoundError, got %T", err)
+	}
+	if linkTarget.TargetID != "LNK-999" {
+		t.Fatalf("expected target LNK-999, got %q", linkTarget.TargetID)
+	}
+}
+
+func TestCreateProjectReturnsTypedUniquenessErrors(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	if _, err := st.CreateProject("taken-app", "TAK", filepath.Join(t.TempDir(), "taken")); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	if _, err := st.CreateProject("taken-app", "OTH", filepath.Join(t.TempDir(), "other")); !errors.Is(err, ErrNameExists) {
+		t.Fatalf("expected ErrNameExists for a duplicate name, got %v", err)
+	}
+	if _, err := st.CreateProject("other-app", "TAK", filepath.Join(t.TempDir(), "other")); !errors.Is(err, ErrPrefixExists) {
+		t.Fatalf("expected ErrPrefixExists for a duplicate prefix, got %v", err)
+	}
+	if _, err := st.CreateProjectWithGeneratedPrefix("taken-app", "taken-app", filepath.Join(t.TempDir(), "gen")); !errors.Is(err, ErrNameExists) {
+		t.Fatalf("expected ErrNameExists from the generated-prefix path, got %v", err)
+	}
+}
+
+func TestListIssuesIncludeDoneLiftsTheDefaultFilter(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("done-app", "DON", filepath.Join(t.TempDir(), "done"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Open issue", "todo", "low", nil, ""); err != nil {
+		t.Fatalf("create open issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Done issue", "done", "low", nil, ""); err != nil {
+		t.Fatalf("create done issue: %v", err)
+	}
+
+	hidden, err := st.ListIssues(ListOptions{ProjectID: project.ID})
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(hidden) != 1 || hidden[0].Status != "todo" {
+		t.Fatalf("expected the default list to hide done, got %#v", hidden)
+	}
+
+	all, err := st.ListIssues(ListOptions{ProjectID: project.ID, IncludeDone: true})
+	if err != nil {
+		t.Fatalf("list issues with IncludeDone: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected IncludeDone to return both issues, got %#v", all)
+	}
+}
+
 func TestListProjectsReturnsProjectsByName(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

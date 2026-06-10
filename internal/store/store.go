@@ -44,12 +44,47 @@ var (
 	Labels     = []string{"feature", "bug", "docs", "tests", "refactor", "chore", "research", "infra"}
 )
 
+// The list ordering derives its precedence from the canonical slices above, so
+// adding a vocabulary value automatically ranks it — values are package
+// constants, never user input.
+var (
+	statusOrderSQL   = orderCase("issues.status", Statuses)
+	priorityOrderSQL = orderCase("issues.priority", Priorities)
+)
+
+func orderCase(column string, values []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "CASE %s", column)
+	for i, value := range values {
+		fmt.Fprintf(&b, " WHEN '%s' THEN %d", value, i+1)
+	}
+	b.WriteString(" ELSE 99 END")
+	return b.String()
+}
+
 var (
 	ErrNotRegistered = errors.New("project not registered")
 	ErrDetached      = errors.New("project detached")
 	ErrNotFound      = errors.New("not found")
 	ErrCrossProject  = errors.New("cross-project link")
+	ErrNameExists    = errors.New("project name already exists")
+	ErrPrefixExists  = errors.New("project prefix already exists")
 )
+
+// LinkTargetNotFoundError distinguishes a missing link *target* from a missing
+// source Issue, so the CLI can name the right Issue in its error. It unwraps to
+// ErrNotFound to keep the existing not-found handling working.
+type LinkTargetNotFoundError struct {
+	TargetID string
+}
+
+func (e *LinkTargetNotFoundError) Error() string {
+	return fmt.Sprintf("%v: link target %q", ErrNotFound, e.TargetID)
+}
+
+func (e *LinkTargetNotFoundError) Unwrap() error {
+	return ErrNotFound
+}
 
 type DetachedError struct {
 	ProjectName string
@@ -106,6 +141,9 @@ type ListOptions struct {
 	Labels      []string
 	Search      string
 	Ready       bool
+	// IncludeDone lifts the default "done is hidden" filter when no Status is
+	// set, so a caller can load every status in one consistent query.
+	IncludeDone bool
 }
 
 type EditIssueOptions struct {
@@ -152,7 +190,13 @@ type Store struct {
 	db *sql.DB
 }
 
-func Open(home string) (*sql.DB, error) {
+// openAtPath opens (creating the directory if needed) the SQLite store under
+// home. _txlock=immediate makes db.Begin() emit BEGIN IMMEDIATE so write
+// transactions take the write lock up front, avoiding lock-upgrade deadlocks
+// (read-then-write would otherwise fail with SQLITE_BUSY). WAL improves
+// read/write concurrency. The _pragma settings apply to every pooled
+// connection, unlike a single post-open db.Exec.
+func openAtPath(home string) (*sql.DB, error) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return nil, err
 	}
@@ -160,7 +204,11 @@ func Open(home string) (*sql.DB, error) {
 		"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)",
 		filepath.Join(home, "ito.db"),
 	)
-	db, err := sql.Open("sqlite", dsn)
+	return sql.Open("sqlite", dsn)
+}
+
+func Open(home string) (*sql.DB, error) {
+	db, err := openAtPath(home)
 	if err != nil {
 		return nil, err
 	}
@@ -265,30 +313,22 @@ func (s *Store) FindIssue(p Project, id string) (Issue, error) {
 }
 
 func (s *Store) Move(p Project, id string, targetStatus string) (MoveResult, error) {
-	beforeStatus, changed, err := moveIssueStatus(s.db, p, id, targetStatus)
+	moved, beforeStatus, changed, err := moveIssueStatus(s.db, p, id, targetStatus)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return MoveResult{}, ErrNotFound
 		}
 		return MoveResult{}, err
 	}
-	moved, err := s.FindIssue(p, id)
-	if err != nil {
-		return MoveResult{}, err
-	}
 	return MoveResult{Issue: moved, BeforeStatus: beforeStatus, Changed: changed}, nil
 }
 
 func (s *Store) Edit(p Project, id string, options EditIssueOptions) (EditResult, error) {
-	changed, err := editIssue(s.db, p, id, options)
+	edited, changed, err := editIssue(s.db, p, id, options)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return EditResult{}, ErrNotFound
 		}
-		return EditResult{}, err
-	}
-	edited, err := s.FindIssue(p, id)
-	if err != nil {
 		return EditResult{}, err
 	}
 	return EditResult{Issue: edited, Changed: changed}, nil
@@ -360,23 +400,7 @@ func OpenDefault() (*sql.DB, error) {
 		}
 		home = filepath.Join(userHome, ".ito")
 	}
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		return nil, err
-	}
-	// _txlock=immediate makes db.Begin() emit BEGIN IMMEDIATE so write
-	// transactions take the write lock up front, avoiding lock-upgrade
-	// deadlocks (read-then-write would otherwise fail with SQLITE_BUSY).
-	// WAL improves read/write concurrency. The _pragma settings apply to
-	// every pooled connection, unlike a single post-open db.Exec.
-	dsn := fmt.Sprintf(
-		"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)",
-		filepath.Join(home, "ito.db"),
-	)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, err
-	}
-	return db, nil
+	return openAtPath(home)
 }
 
 func Migrate(db *sql.DB) error {
@@ -647,13 +671,35 @@ func isPathAncestor(root, child string) bool {
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
+// insertProject checks name/prefix uniqueness and inserts inside a single
+// IMMEDIATE transaction, so two concurrent inits cannot both pass the checks
+// and surface a raw constraint error — the loser gets a typed error instead.
 func insertProject(db *sql.DB, name, prefix, rootPath string) (Project, error) {
-	result, err := db.Exec(`INSERT INTO projects(name, prefix, root_path) VALUES (?, ?, ?)`, name, prefix, rootPath)
+	tx, err := db.Begin()
+	if err != nil {
+		return Project{}, err
+	}
+	defer tx.Rollback()
+
+	if exists, err := valueExists(tx, `SELECT 1 FROM projects WHERE name = ?`, name); err != nil {
+		return Project{}, err
+	} else if exists {
+		return Project{}, ErrNameExists
+	}
+	if exists, err := valueExists(tx, `SELECT 1 FROM projects WHERE prefix = ?`, prefix); err != nil {
+		return Project{}, err
+	} else if exists {
+		return Project{}, ErrPrefixExists
+	}
+	result, err := tx.Exec(`INSERT INTO projects(name, prefix, root_path) VALUES (?, ?, ?)`, name, prefix, rootPath)
 	if err != nil {
 		return Project{}, err
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
+		return Project{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return Project{}, err
 	}
 	return Project{ID: id, Name: name, Prefix: prefix, RootPath: &rootPath}, nil
@@ -670,6 +716,11 @@ func insertProjectWithGeneratedPrefix(db *sql.DB, name, baseInput, rootPath stri
 	}
 	defer tx.Rollback()
 
+	if exists, err := valueExists(tx, `SELECT 1 FROM projects WHERE name = ?`, name); err != nil {
+		return Project{}, err
+	} else if exists {
+		return Project{}, ErrNameExists
+	}
 	prefix, err := nextGeneratedPrefixTx(tx, baseInput)
 	if err != nil {
 		return Project{}, err
@@ -749,15 +800,12 @@ func insertIssue(db *sql.DB, p Project, title, status, priority string, labels [
 		Title:     title,
 		Status:    status,
 		Priority:  priority,
-		Labels:    append([]string{}, labels...),
+		Labels:    dedupeStrings(labels),
 		BlockedBy: []string{},
 		RelatesTo: []string{},
 		Body:      body,
 		Created:   now,
 		Updated:   now,
-	}
-	if created.Labels == nil {
-		created.Labels = []string{}
 	}
 
 	result, err = tx.Exec(`
@@ -785,46 +833,54 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 	return created, nil
 }
 
-func moveIssueStatus(db *sql.DB, p Project, id string, targetStatus string) (string, bool, error) {
+// moveIssueStatus moves an Issue and reads the resulting object inside the same
+// transaction, so the returned Issue reflects exactly this write — never a
+// concurrent writer's state between commit and a separate re-read.
+func moveIssueStatus(db *sql.DB, p Project, id string, targetStatus string) (Issue, string, bool, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return "", false, err
+		return Issue{}, "", false, err
 	}
 	defer tx.Rollback()
 
 	var currentStatus string
 	if err := tx.QueryRow(`SELECT status FROM issues WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&currentStatus); err != nil {
-		return "", false, err
+		return Issue{}, "", false, err
 	}
-	if currentStatus == targetStatus {
-		if err := tx.Commit(); err != nil {
-			return "", false, err
+	changed := currentStatus != targetStatus
+	if changed {
+		now := time.Now().UTC().Format(time.RFC3339)
+		result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND id = ?`, targetStatus, now, p.ID, id)
+		if err != nil {
+			return Issue{}, "", false, err
 		}
-		return currentStatus, false, nil
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return Issue{}, "", false, err
+		}
+		if affected != 1 {
+			return Issue{}, "", false, sql.ErrNoRows
+		}
 	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND id = ?`, targetStatus, now, p.ID, id)
+	moved, found, err := findIssueByID(tx, p, id)
 	if err != nil {
-		return "", false, err
+		return Issue{}, "", false, err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return "", false, err
-	}
-	if affected != 1 {
-		return "", false, sql.ErrNoRows
+	if !found {
+		return Issue{}, "", false, sql.ErrNoRows
 	}
 	if err := tx.Commit(); err != nil {
-		return "", false, err
+		return Issue{}, "", false, err
 	}
-	return currentStatus, true, nil
+	return moved, currentStatus, changed, nil
 }
 
-func editIssue(db *sql.DB, p Project, id string, options EditIssueOptions) (bool, error) {
+// editIssue applies the edit and reads the resulting object inside the same
+// transaction — see moveIssueStatus for why.
+func editIssue(db *sql.DB, p Project, id string, options EditIssueOptions) (Issue, bool, error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return false, err
+		return Issue{}, false, err
 	}
 	defer tx.Rollback()
 
@@ -834,12 +890,12 @@ func editIssue(db *sql.DB, p Project, id string, options EditIssueOptions) (bool
 SELECT row_id, title, priority, body
 FROM issues
 WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &currentPriority, &currentBody); err != nil {
-		return false, err
+		return Issue{}, false, err
 	}
 
 	currentLabels, err := stringColumn(tx, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, p.ID, id)
 	if err != nil {
-		return false, err
+		return Issue{}, false, err
 	}
 	nextLabels := make(map[string]struct{}, len(currentLabels))
 	for _, label := range currentLabels {
@@ -855,7 +911,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 	}
 	currentLinks, err := linkSetTx(tx, p.ID, id)
 	if err != nil {
-		return false, err
+		return Issue{}, false, err
 	}
 	nextLinks := make(map[string]struct{}, len(currentLinks))
 	for linkKey := range currentLinks {
@@ -864,18 +920,18 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 	for _, op := range options.LinkOps {
 		targetProject, found, err := findProjectByIssueIDTx(tx, op.Target)
 		if err != nil {
-			return false, err
+			return Issue{}, false, err
 		}
 		if !found {
-			return false, ErrNotFound
+			return Issue{}, false, &LinkTargetNotFoundError{TargetID: op.Target}
 		}
 		if targetProject.ID != p.ID {
-			return false, &CrossProjectError{IssueID: op.Target, SourceProject: p.Name, TargetProject: targetProject.Name}
+			return Issue{}, false, &CrossProjectError{IssueID: op.Target, SourceProject: p.Name, TargetProject: targetProject.Name}
 		}
 		if exists, err := issueExistsTx(tx, p.ID, op.Target); err != nil {
-			return false, err
+			return Issue{}, false, err
 		} else if !exists {
-			return false, ErrNotFound
+			return Issue{}, false, &LinkTargetNotFoundError{TargetID: op.Target}
 		}
 		sourceID, targetID := normalizedLinkIDs(id, op.Target, op.Kind)
 		linkKey := issueLinkKey(sourceID, targetID, op.Kind)
@@ -904,61 +960,65 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 	labelsChanged := !labelSetMatches(currentLabels, nextLabels)
 	linksChanged := !stringSetMatches(currentLinks, nextLinks)
 	changed := scalarChanged || labelsChanged || linksChanged
-	if !changed {
-		if err := tx.Commit(); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := tx.Exec(`
+	if changed {
+		now := time.Now().UTC().Format(time.RFC3339)
+		result, err := tx.Exec(`
 UPDATE issues
 SET title = ?, priority = ?, body = ?, updated = ?
 WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextBody, now, p.ID, id)
-	if err != nil {
-		return false, err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if affected != 1 {
-		return false, sql.ErrNoRows
-	}
-	if nextTitle != currentTitle || nextBody != currentBody {
-		if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, currentTitle, currentBody); err != nil {
-			return false, err
+		if err != nil {
+			return Issue{}, false, err
 		}
-		if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, nextTitle, nextBody); err != nil {
-			return false, err
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return Issue{}, false, err
 		}
-	}
-	if labelsChanged {
-		if _, err := tx.Exec(`DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ?`, p.ID, id); err != nil {
-			return false, err
+		if affected != 1 {
+			return Issue{}, false, sql.ErrNoRows
 		}
-		for label := range nextLabels {
-			if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, id, label); err != nil {
-				return false, err
+		if nextTitle != currentTitle || nextBody != currentBody {
+			if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, currentTitle, currentBody); err != nil {
+				return Issue{}, false, err
+			}
+			if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, nextTitle, nextBody); err != nil {
+				return Issue{}, false, err
+			}
+		}
+		if labelsChanged {
+			if _, err := tx.Exec(`DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ?`, p.ID, id); err != nil {
+				return Issue{}, false, err
+			}
+			for label := range nextLabels {
+				if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, id, label); err != nil {
+					return Issue{}, false, err
+				}
+			}
+		}
+		if linksChanged {
+			if _, err := tx.Exec(`DELETE FROM issue_links WHERE project_id = ? AND (source_id = ? OR target_id = ?)`, p.ID, id, id); err != nil {
+				return Issue{}, false, err
+			}
+			for linkKey := range nextLinks {
+				sourceID, targetID, kind := parseIssueLinkKey(linkKey)
+				if _, err := tx.Exec(`INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, ?, ?, ?)`, p.ID, sourceID, targetID, kind); err != nil {
+					return Issue{}, false, err
+				}
 			}
 		}
 	}
-	if linksChanged {
-		if _, err := tx.Exec(`DELETE FROM issue_links WHERE project_id = ? AND (source_id = ? OR target_id = ?)`, p.ID, id, id); err != nil {
-			return false, err
-		}
-		for linkKey := range nextLinks {
-			sourceID, targetID, kind := parseIssueLinkKey(linkKey)
-			if _, err := tx.Exec(`INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, ?, ?, ?)`, p.ID, sourceID, targetID, kind); err != nil {
-				return false, err
-			}
-		}
+
+	edited, found, err := findIssueByID(tx, p, id)
+	if err != nil {
+		return Issue{}, false, err
+	}
+	if !found {
+		return Issue{}, false, sql.ErrNoRows
 	}
 	if err := tx.Commit(); err != nil {
-		return false, err
+		return Issue{}, false, err
 	}
-	return true, nil
+	return edited, changed, nil
 }
 
 func deleteIssue(db *sql.DB, p Project, id string) error {
@@ -1048,8 +1108,8 @@ func deleteIssueRowsTx(tx *sql.Tx, p Project, matches []issueDeletionRow) (int, 
 	return len(matches), nil
 }
 
-func findIssueByID(db *sql.DB, p Project, id string) (Issue, bool, error) {
-	row := db.QueryRow(`
+func findIssueByID(q rowQuerier, p Project, id string) (Issue, bool, error) {
+	row := q.QueryRow(`
 SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.body, issues.created, issues.updated
 FROM issues
 JOIN projects ON projects.id = issues.project_id
@@ -1066,7 +1126,7 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 		return Issue{}, false, err
 	}
 
-	if err := loadIssueRelations(db, p.ID, &found); err != nil {
+	if err := loadIssueRelations(q, p.ID, &found); err != nil {
 		return Issue{}, false, err
 	}
 	return found, true, nil
@@ -1123,7 +1183,7 @@ func listIssues(db *sql.DB, options ListOptions) ([]Issue, error) {
 	if options.Status != "" {
 		where = append(where, "issues.status = ?")
 		args = append(args, options.Status)
-	} else {
+	} else if !options.IncludeDone {
 		where = append(where, "issues.status != 'done'")
 	}
 	if options.Priority != "" {
@@ -1170,21 +1230,7 @@ ORDER BY `
 	if searching {
 		query += "bm25(issues_fts), "
 	}
-	query += `CASE issues.status
-  WHEN 'backlog' THEN 1
-  WHEN 'todo' THEN 2
-  WHEN 'in_progress' THEN 3
-  WHEN 'in_review' THEN 4
-  WHEN 'done' THEN 5
-  ELSE 99
-END,
-CASE issues.priority
-  WHEN 'urgent' THEN 1
-  WHEN 'high' THEN 2
-  WHEN 'medium' THEN 3
-  WHEN 'low' THEN 4
-  ELSE 99
-END,
+	query += statusOrderSQL + ",\n" + priorityOrderSQL + `,
 issues.updated DESC,
 issues.id ASC`
 
@@ -1289,15 +1335,7 @@ func findProjectByIssueIDTx(tx *sql.Tx, issueID string) (Project, bool, error) {
 }
 
 func issueExistsTx(tx *sql.Tx, projectID int64, issueID string) (bool, error) {
-	var value int
-	err := tx.QueryRow(`SELECT 1 FROM issues WHERE project_id = ? AND id = ?`, projectID, issueID).Scan(&value)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
+	return valueExists(tx, `SELECT 1 FROM issues WHERE project_id = ? AND id = ?`, projectID, issueID)
 }
 
 func normalizedLinkIDs(sourceID, targetID, kind string) (string, string) {
@@ -1359,8 +1397,12 @@ func stringSetMatches(left, right map[string]struct{}) bool {
 }
 
 func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, error) {
+	return valueExists(db, `SELECT 1 FROM projects WHERE name = ? AND id != ?`, name, id)
+}
+
+func valueExists(q rowQuerier, query string, args ...any) (bool, error) {
 	var value int
-	err := db.QueryRow(`SELECT 1 FROM projects WHERE name = ? AND id != ?`, name, id).Scan(&value)
+	err := q.QueryRow(query, args...).Scan(&value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -1370,14 +1412,17 @@ func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, err
 	return true, nil
 }
 
-func valueExists(q rowQuerier, query string, arg string) (bool, error) {
-	var value int
-	err := q.QueryRow(query, arg).Scan(&value)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
+// dedupeStrings returns a new slice with duplicates removed, preserving the
+// first occurrence's order. Always non-nil.
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	deduped := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
 		}
-		return false, err
+		seen[value] = struct{}{}
+		deduped = append(deduped, value)
 	}
-	return true, nil
+	return deduped
 }
