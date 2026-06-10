@@ -4,6 +4,8 @@ A local, solo issue tracker for the terminal — built to be driven by an AI age
 
 **ito** — 糸 (*the thread that links the issues*) · 意図 (*intention*). The thread of intentions.
 
+![The ito TUI: digest, issue detail and board views](./docs/demo.gif)
+
 ## Why
 
 Projects are born from the conversation with an AI, on the local machine — but tracking them still requires ceremony: configuring a SaaS project before you can file the first task breaks the flow. `ito` gives you traceability with zero ceremony: the agent plans the work, files the issues through the CLI, and you watch the board in the terminal. No server, no account, no API key.
