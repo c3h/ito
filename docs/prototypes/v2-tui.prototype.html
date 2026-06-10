@@ -231,6 +231,12 @@ function sectionC(status, label, focused, selIdx){
   out.push('');
   return out;
 }
+function hiddenSectionC(label, count, focused){
+  return [
+    ' '+(focused?'▌':' ')+rule('▸ '+label+'  ('+count+') · h to show  ', W-2),
+    '',
+  ];
+}
 function renderDigest(){
   const lines=[];
   lines.push(topTabs('digest', ISSUES.length+' issues   '+PROJECT+' '));
@@ -239,7 +245,7 @@ function renderDigest(){
   DIGEST_ORDER.forEach(([s,lb],i)=>{
     const n = byStatus(s).length;
     if(filterQuery){ if(n===0) return; lines.push(...sectionC(s, lb, i===dSec, dSel)); return; }   // filtering reveals matches everywhere
-    if(hidden.has(s)){ lines.push(' '+(i===dSec?'▌':' ')+rule('▸ '+lb+'  ('+n+')  ·  h to show  ', W-2)); return; }
+    if(hidden.has(s)){ lines.push(...hiddenSectionC(lb, n, i===dSec)); return; }
     lines.push(...sectionC(s, lb, i===dSec, dSel));
   });
   return { body: lines.join('\n'), status: statusbar([

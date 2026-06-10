@@ -56,7 +56,13 @@ const (
 	viewProjects viewMode = "projects"
 )
 
-var priorityCycle = []string{"low", "medium", "high", "urgent"}
+// priorityCycle steps a priority upward (low → urgent, wrapping), so it walks
+// store.Priorities — ordered by descending precedence — in reverse.
+var priorityCycle = func() []string {
+	cycle := slices.Clone(store.Priorities)
+	slices.Reverse(cycle)
+	return cycle
+}()
 
 var commandActions = []commandAction{
 	{Shortcut: "s", Name: "status"},
@@ -253,8 +259,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // editInlineInput applies a key to an open inline input — the / filter or the :
-// command bar. Ctrl-C quits, Esc closes and clears, Backspace and runes edit
-// the query in place; any other key is ignored.
+// command bar. Ctrl-C quits, Esc closes and clears, Backspace, Space and runes
+// edit the query in place; any other key is ignored.
 func editInlineInput(open *bool, query *string, msg tea.KeyMsg) tea.Cmd {
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -267,6 +273,8 @@ func editInlineInput(open *bool, query *string, msg tea.KeyMsg) tea.Cmd {
 			runes := []rune(*query)
 			*query = string(runes[:len(runes)-1])
 		}
+	case tea.KeySpace:
+		*query += " "
 	case tea.KeyRunes:
 		*query += string(msg.Runes)
 	}
@@ -306,6 +314,7 @@ func (m model) View() string {
 		focused := i == m.focusIndex
 		if section.hidden {
 			lines = append(lines, sectionHeading(section.Label, len(section.Issues), focused, true, width))
+			lines = append(lines, "")
 			continue
 		}
 		lines = append(lines, sectionHeading(section.Label, len(section.Issues), focused, false, width))
@@ -564,7 +573,7 @@ func sectionHeading(label string, count int, focused, collapsed bool, width int)
 	}
 	triangle, suffix := "▾", fmt.Sprintf("  (%d)", count)
 	if collapsed {
-		triangle, suffix = "▸", fmt.Sprintf(" (%d) · h to show", count)
+		triangle, suffix = "▸", fmt.Sprintf("  (%d) · h to show", count)
 	}
 	styledBody := styleActive.Render(triangle) + " " + styleStatus.Render(label) + styleText.Render(suffix)
 
@@ -791,11 +800,9 @@ func (m model) digestSectionCapacities(sections []digestSection) []int {
 	}
 
 	nonEmptySections := 0
-	hiddenSections := 0
 	totalIssues := 0
 	for _, section := range sections {
 		if section.hidden {
-			hiddenSections++
 			continue
 		}
 		if len(section.Issues) == 0 {
@@ -808,10 +815,9 @@ func (m model) digestSectionCapacities(sections []digestSection) []int {
 		return capacities
 	}
 
-	// Each visible section spends sectionChromeLines on its heading and trailing
-	// blank — empty sections included; collapsed sections render as a single line.
-	visibleSections := len(sections) - hiddenSections
-	fixedLines := digestChromeLines + visibleSections*sectionChromeLines + hiddenSections
+	// Every section spends sectionChromeLines on its heading and trailing blank,
+	// including collapsed sections, so hiding preserves the Digest's visual rhythm.
+	fixedLines := digestChromeLines + len(sections)*sectionChromeLines
 	available := m.height - fixedLines
 	if available >= totalIssues {
 		return showAll()
@@ -927,7 +933,7 @@ func (m model) digestSections() []digestSection {
 }
 
 func (m model) boardSections() []digestSection {
-	sections := m.digestSections()
+	sections := slices.Clone(m.digestSections())
 	for i := range sections {
 		sections[i].hidden = false
 	}
@@ -1197,7 +1203,7 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 	dot := styleDim.Render("   ·   ")
 	meta := " " + styleStatus.Render(issue.Status) + dot + styledPriorityWord(issue.Priority)
 	if len(issue.Labels) > 0 {
-		meta += dot + labelChipsSep(issue.Labels, "  ")
+		meta += dot + labelChips(issue.Labels, "  ")
 	}
 	top = []string{
 		issueHeader(m.project.Name, issue, width),
@@ -1436,16 +1442,11 @@ func padBetween(left, right string, width int) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-// labelChips renders each label as a filled chip, joined by plain spaces. The
-// background applies per word only — the separators stay unstyled so the plain
-// width matches strings.Join(labels, " ").
-func labelChips(labels []string) string {
-	return labelChipsSep(labels, " ")
-}
-
-// labelChipsSep is labelChips with an explicit separator — the Issue meta line
-// joins with two spaces, like the prototype, while the rows join with one.
-func labelChipsSep(labels []string, sep string) string {
+// labelChips renders each label as a filled chip joined by sep — the styling
+// applies per word only, so the plain width matches strings.Join(labels, sep).
+// The Issue meta line joins with two spaces, like the prototype, while the
+// Digest rows join with one.
+func labelChips(labels []string, sep string) string {
 	chips := make([]string, len(labels))
 	for i, label := range labels {
 		chips[i] = styleLabel.Render(label)
@@ -1487,7 +1488,7 @@ func renderIssueRow(issue store.Issue, width int) string {
 	}
 	if len(issue.Labels) > 0 {
 		plainRight += strings.Join(issue.Labels, " ") + " "
-		styledRight += labelChips(issue.Labels) + " "
+		styledRight += labelChips(issue.Labels, " ") + " "
 	}
 
 	mark, id := priorityMark(issue.Priority), issue.ID

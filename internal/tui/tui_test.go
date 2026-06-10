@@ -60,7 +60,7 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 		"TODO  (1)",
 		"IN PROGRESS  (1)",
 		"IN REVIEW  (1)",
-		"▸ DONE (1) · h to show",
+		"▸ DONE  (1) · h to show",
 		"◆ DIG-1 Backlog research",
 		"▲ DIG-2 Unblock the TUI",
 		"● DIG-3 Blocked Digest row",
@@ -108,6 +108,46 @@ func TestNumberKeysSwitchBetweenDigestAndBoard(t *testing.T) {
 	digest := current.View()
 	if !strings.Contains(digest, "ito · [1] digest · [2] board") || !strings.Contains(digest, "h hide") {
 		t.Fatalf("expected [1] to switch back to the Digest, got:\n%s", digest)
+	}
+}
+
+func TestBoardRenderDoesNotRevealHiddenDigestSections(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("board-hidden-app", "BHD", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Backlog can hide", "backlog", "medium", nil, ""); err != nil {
+		t.Fatalf("create backlog issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Done stays hidden", "done", "low", nil, ""); err != nil {
+		t.Fatalf("create done issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "h"))
+	hiddenDigest := current.View()
+	if !strings.Contains(hiddenDigest, "▌▸ BACKLOG  (1) · h to show") ||
+		!strings.Contains(hiddenDigest, "▸ DONE  (1) · h to show") {
+		t.Fatalf("expected Digest setup to have hidden BACKLOG and DONE, got:\n%s", hiddenDigest)
+	}
+
+	current, _ = current.Update(keyMsg(t, "2"))
+	board := current.View()
+	if !strings.Contains(board, "BACKLOG  (1)") || !strings.Contains(board, "DONE  (1)") {
+		t.Fatalf("expected Board to render all statuses, got:\n%s", board)
+	}
+
+	current, _ = current.Update(keyMsg(t, "1"))
+	digest := current.View()
+	if !strings.Contains(digest, "▌▸ BACKLOG  (1) · h to show") ||
+		!strings.Contains(digest, "▸ DONE  (1) · h to show") {
+		t.Fatalf("expected Digest hidden sections to survive rendered Board switch, got:\n%s", digest)
 	}
 }
 
@@ -379,11 +419,20 @@ func TestDigestHidesAndRevealsFocusedSection(t *testing.T) {
 
 	current, _ := newModel(st, project).Update(keyMsg(t, "h"))
 	hiddenBacklog := current.View()
-	if !strings.Contains(hiddenBacklog, "▌▸ BACKLOG (1) · h to show") {
+	if !strings.Contains(hiddenBacklog, "▌▸ BACKLOG  (1) · h to show") {
 		t.Fatalf("expected h to collapse the focused BACKLOG section, got:\n%s", hiddenBacklog)
 	}
 	if strings.Contains(hiddenBacklog, "HID-1 Backlog can hide") {
 		t.Fatalf("expected collapsed BACKLOG to hide its Issue row, got:\n%s", hiddenBacklog)
+	}
+	hiddenBacklogLines := strings.Split(hiddenBacklog, "\n")
+	collapsedBacklogLine := slices.IndexFunc(hiddenBacklogLines, func(line string) bool {
+		return strings.Contains(line, "BACKLOG") && strings.Contains(line, "h to show")
+	})
+	if collapsedBacklogLine == -1 || collapsedBacklogLine+2 >= len(hiddenBacklogLines) ||
+		hiddenBacklogLines[collapsedBacklogLine+1] != "" ||
+		!strings.Contains(hiddenBacklogLines[collapsedBacklogLine+2], "▾ TODO") {
+		t.Fatalf("expected collapsed BACKLOG to preserve section spacing before TODO, got:\n%s", hiddenBacklog)
 	}
 
 	current, _ = current.Update(keyMsg(t, "h"))
@@ -396,7 +445,7 @@ func TestDigestHidesAndRevealsFocusedSection(t *testing.T) {
 		current, _ = current.Update(keyMsg(t, "tab"))
 	}
 	focusedDone := current.View()
-	if !strings.Contains(focusedDone, "▌▸ DONE (1) · h to show") {
+	if !strings.Contains(focusedDone, "▌▸ DONE  (1) · h to show") {
 		t.Fatalf("expected collapsed DONE section to be focusable, got:\n%s", focusedDone)
 	}
 
@@ -509,6 +558,43 @@ func TestDigestInlineFilterNarrowsLiveByIDTitleAndLabels(t *testing.T) {
 	}
 }
 
+func TestDigestInlineFilterAcceptsSpaceKey(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("filter-space-app", "FSP", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Two word title", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create matching issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Two unrelated", "todo", "medium", nil, ""); err != nil {
+		t.Fatalf("create non-matching issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	for _, r := range "Two" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "space"))
+	for _, r := range "word" {
+		current, _ = current.Update(runeMsg(r))
+	}
+
+	view := current.View()
+	if !strings.Contains(view, " / Two word▏") {
+		t.Fatalf("expected Space to appear in the filter query, got:\n%s", view)
+	}
+	if !strings.Contains(view, "FSP-1 Two word title") || strings.Contains(view, "FSP-2 Two unrelated") {
+		t.Fatalf("expected spaced query to narrow by Title, got:\n%s", view)
+	}
+}
+
 func TestDigestInlineFilterRevealsMatchesInHiddenSections(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -536,7 +622,7 @@ func TestDigestInlineFilterRevealsMatchesInHiddenSections(t *testing.T) {
 	if !strings.Contains(view, "▾ DONE  (1)") || !strings.Contains(view, "· FHD-2 Completed docs") {
 		t.Fatalf("expected filter to reveal matching Issues in hidden DONE, got:\n%s", view)
 	}
-	if strings.Contains(view, "▸ DONE (1) · h to show") {
+	if strings.Contains(view, "▸ DONE  (1) · h to show") {
 		t.Fatalf("expected matching hidden section to be expanded while filtering, got:\n%s", view)
 	}
 	if strings.Contains(view, "FHD-1 Open issue") {
@@ -1128,8 +1214,7 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 		"↑ 3 more",
 		"OVR-4 Scrollable issue 4",
 		" ▸ ◆ OVR-5 Scrollable issue 5",
-		"OVR-6 Scrollable issue 6",
-		"↓ 2 more",
+		"↓ 3 more",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected scrolled Digest viewport to contain %q, got:\n%s", want, view)
@@ -1284,6 +1369,8 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
 	case ":":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{':'}}
+	case "space":
+		return tea.KeyMsg{Type: tea.KeySpace}
 	default:
 		t.Fatalf("unsupported key %q", key)
 		return tea.KeyMsg{Type: tea.KeyNull}
