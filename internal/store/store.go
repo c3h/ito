@@ -19,11 +19,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// The canonical identifier formats. The store owns them; the CLI validates its
+// input against these same patterns so each format lives in exactly one place.
 var (
-	projectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
-	prefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
-	issueIDPattern     = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,7})-([1-9][0-9]*)$`)
-	searchTermPattern  = regexp.MustCompile(`[\pL\pN]+`)
+	ProjectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+	PrefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
+	IssueIDPattern     = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,7})-([1-9][0-9]*)$`)
+)
+
+var (
+	searchTermPattern = regexp.MustCompile(`[\pL\pN]+`)
 	// asciiFold decomposes (NFD) and strips combining marks, transliterating
 	// Latin accents to ASCII (café → cafe). Scripts with no decomposition to
 	// ASCII (Cyrillic, CJK) pass through intact and are discarded downstream.
@@ -335,7 +340,7 @@ func (s *Store) ResolveProject(rootPath string, inGit bool, explicitName string)
 			return p, nil
 		}
 	}
-	name := normalizeProjectName(filepath.Base(rootPath))
+	name := NormalizeProjectName(filepath.Base(rootPath))
 	detached, found, err := findDetachedProjectByName(s.db, name, rootPath)
 	if err != nil {
 		return Project{}, err
@@ -435,7 +440,11 @@ SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version)`)
 	return err
 }
 
-func canonicalPath(path string) (string, error) {
+// CanonicalPath resolves a path to its absolute, symlink-free form, falling
+// back to the cleaned absolute path when symlinks cannot be resolved. It is
+// exported so the CLI canonicalizes roots with the exact rule the store uses
+// to compare them.
+func CanonicalPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
@@ -447,7 +456,10 @@ func canonicalPath(path string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
-func normalizeProjectName(input string) string {
+// NormalizeProjectName derives a valid Project name from arbitrary input
+// (a directory basename), folding accents and squeezing separators to dashes.
+// It is exported so the CLI derives names with the exact rule the store uses.
+func NormalizeProjectName(input string) string {
 	var b strings.Builder
 	lastDash := false
 	for _, r := range strings.ToLower(TransliterateASCII(input)) {
@@ -520,40 +532,29 @@ func generatedPrefixBase(input string) string {
 	return prefix
 }
 
-func findProjectByRoot(db *sql.DB, rootPath string) (Project, bool, error) {
-	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE root_path = ?`, rootPath)
+// findProjectWhere runs a single-Project lookup, mapping sql.ErrNoRows to a
+// plain not-found instead of an error.
+func findProjectWhere(q rowQuerier, query string, args ...any) (Project, bool, error) {
 	var p Project
-	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
+	if err := q.QueryRow(query, args...).Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Project{}, false, nil
 		}
 		return Project{}, false, err
 	}
 	return p, true, nil
+}
+
+func findProjectByRoot(db *sql.DB, rootPath string) (Project, bool, error) {
+	return findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE root_path = ?`, rootPath)
 }
 
 func findProjectByName(db *sql.DB, name string) (Project, bool, error) {
-	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
-	var p Project
-	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Project{}, false, nil
-		}
-		return Project{}, false, err
-	}
-	return p, true, nil
+	return findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
 }
 
 func findProjectByPrefix(db *sql.DB, prefix string) (Project, bool, error) {
-	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, prefix)
-	var p Project
-	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Project{}, false, nil
-		}
-		return Project{}, false, err
-	}
-	return p, true, nil
+	return findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, prefix)
 }
 
 func listProjects(db *sql.DB) ([]Project, error) {
@@ -616,12 +617,8 @@ func findClosestProjectAncestor(db *sql.DB, cwd string) (Project, bool, error) {
 // is a pure read; it never mutates the store (the NULL-clearing on the moved-repo
 // path lives on the init write path, in runInit's detached branch).
 func findDetachedProjectByName(db *sql.DB, name string, currentRoot string) (Project, bool, error) {
-	row := db.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
-	var p Project
-	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Project{}, false, nil
-		}
+	p, found, err := findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
+	if err != nil || !found {
 		return Project{}, false, err
 	}
 	if p.RootPath == nil {
@@ -632,7 +629,7 @@ func findDetachedProjectByName(db *sql.DB, name string, currentRoot string) (Pro
 	// canonicalize error (ENOTDIR, EACCES, stale NFS, gone) means we cannot
 	// confirm the stored root still names the current root, which is itself a
 	// detached signal rather than an aborting error.
-	storedRoot, err := canonicalPath(*p.RootPath)
+	storedRoot, err := CanonicalPath(*p.RootPath)
 	if err != nil || storedRoot != currentRoot {
 		return p, true, nil
 	}
@@ -1069,33 +1066,42 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 		return Issue{}, false, err
 	}
 
-	labels, err := stringColumn(db, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, p.ID, id)
-	if err != nil {
+	if err := loadIssueRelations(db, p.ID, &found); err != nil {
 		return Issue{}, false, err
 	}
-	blockedBy, err := stringColumn(db, `
+	return found, true, nil
+}
+
+// loadIssueRelations fills an Issue's Labels, BlockedBy and RelatesTo from the
+// label and link tables, with the link IDs in canonical order.
+func loadIssueRelations(q rowQuerier, projectID int64, issue *Issue) error {
+	labels, err := stringColumn(q, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, projectID, issue.ID)
+	if err != nil {
+		return err
+	}
+	blockedBy, err := stringColumn(q, `
 SELECT target_id
 FROM issue_links
 JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
 WHERE issue_links.project_id = ? AND source_id = ? AND kind = 'blocked_by'
-ORDER BY target_id`, p.ID, id)
+ORDER BY target_id`, projectID, issue.ID)
 	if err != nil {
-		return Issue{}, false, err
+		return err
 	}
-	relatesTo, err := stringColumn(db, `
+	relatesTo, err := stringColumn(q, `
 SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END
 FROM issue_links
 JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
 JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
 WHERE issue_links.project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
-ORDER BY 1`, id, p.ID, id, id)
+ORDER BY 1`, issue.ID, projectID, issue.ID, issue.ID)
 	if err != nil {
-		return Issue{}, false, err
+		return err
 	}
-	found.Labels = labels
-	found.BlockedBy = sortIssueIDs(blockedBy)
-	found.RelatesTo = sortIssueIDs(relatesTo)
-	return found, true, nil
+	issue.Labels = labels
+	issue.BlockedBy = sortIssueIDs(blockedBy)
+	issue.RelatesTo = sortIssueIDs(relatesTo)
+	return nil
 }
 
 func listIssues(db *sql.DB, options ListOptions) ([]Issue, error) {
@@ -1212,32 +1218,9 @@ issues.id ASC`
 
 	issues := make([]Issue, 0, len(rowIssues))
 	for _, rowIssue := range rowIssues {
-		labels, err := stringColumn(db, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, rowIssue.ProjectID, rowIssue.ID)
-		if err != nil {
+		if err := loadIssueRelations(db, rowIssue.ProjectID, &rowIssue.Issue); err != nil {
 			return nil, err
 		}
-		blockedBy, err := stringColumn(db, `
-SELECT target_id
-FROM issue_links
-JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
-WHERE issue_links.project_id = ? AND source_id = ? AND kind = 'blocked_by'
-ORDER BY target_id`, rowIssue.ProjectID, rowIssue.ID)
-		if err != nil {
-			return nil, err
-		}
-		relatesTo, err := stringColumn(db, `
-SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END
-FROM issue_links
-JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
-JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
-WHERE issue_links.project_id = ? AND kind = 'relates_to' AND (source_id = ? OR target_id = ?)
-ORDER BY 1`, rowIssue.ID, rowIssue.ProjectID, rowIssue.ID, rowIssue.ID)
-		if err != nil {
-			return nil, err
-		}
-		rowIssue.Labels = labels
-		rowIssue.BlockedBy = sortIssueIDs(blockedBy)
-		rowIssue.RelatesTo = sortIssueIDs(relatesTo)
 		issues = append(issues, rowIssue.Issue)
 	}
 	return issues, nil
@@ -1298,19 +1281,11 @@ WHERE issue_links.project_id = ? AND (source_id = ? OR target_id = ?)`, projectI
 }
 
 func findProjectByIssueIDTx(tx *sql.Tx, issueID string) (Project, bool, error) {
-	matches := issueIDPattern.FindStringSubmatch(issueID)
+	matches := IssueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return Project{}, false, nil
 	}
-	row := tx.QueryRow(`SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, matches[1])
-	var p Project
-	if err := row.Scan(&p.ID, &p.Name, &p.Prefix, &p.RootPath); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Project{}, false, nil
-		}
-		return Project{}, false, err
-	}
-	return p, true, nil
+	return findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, matches[1])
 }
 
 func issueExistsTx(tx *sql.Tx, projectID int64, issueID string) (bool, error) {
@@ -1340,8 +1315,8 @@ func sortIssueIDs(ids []string) []string {
 }
 
 func issueIDLess(left, right string) bool {
-	leftMatches := issueIDPattern.FindStringSubmatch(left)
-	rightMatches := issueIDPattern.FindStringSubmatch(right)
+	leftMatches := IssueIDPattern.FindStringSubmatch(left)
+	rightMatches := IssueIDPattern.FindStringSubmatch(right)
 	if leftMatches == nil || rightMatches == nil || leftMatches[1] != rightMatches[1] {
 		return left < right
 	}

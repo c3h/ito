@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -28,12 +27,10 @@ const (
 )
 
 var (
-	projectNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
-	prefixPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,7}$`)
-	issueIDPattern     = regexp.MustCompile(`^([A-Z][A-Z0-9]{1,7})-([1-9][0-9]*)$`)
-	searchTermPattern  = regexp.MustCompile(`[\pL\pN]+`)
 	// The validation sets are derived from the store's canonical vocabularies so
-	// the domain values live in exactly one place (internal/store).
+	// the domain values live in exactly one place (internal/store); the
+	// identifier formats come from the store's exported patterns for the same
+	// reason.
 	validStatuses   = valueSet(itostore.Statuses)
 	validPriorities = valueSet(itostore.Priorities)
 	validLabels     = valueSet(itostore.Labels)
@@ -334,10 +331,10 @@ func runInit(args []string) int {
 
 	name := manualName
 	if name == "" {
-		name = normalizeProjectName(filepath.Base(rootPath))
+		name = itostore.NormalizeProjectName(filepath.Base(rootPath))
 	}
-	if !projectNamePattern.MatchString(name) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if !itostore.ProjectNamePattern.MatchString(name) {
+		return failInvalidProjectName(jsonMode, name)
 	}
 
 	db, st, openFail := openMigratedStore()
@@ -398,7 +395,7 @@ func runInit(args []string) int {
 	var created project
 	prefix := manualPrefix
 	if prefix != "" {
-		if !prefixPattern.MatchString(prefix) {
+		if !itostore.PrefixPattern.MatchString(prefix) {
 			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid prefix %q.", prefix), "use the format [A-Z][A-Z0-9]{1,7}.")
 		}
 		if exists, err := st.ProjectPrefixExists(prefix); err != nil {
@@ -438,8 +435,8 @@ func runRename(args []string) int {
 		return fail(jsonMode, exitBadUsage, "ito rename takes exactly one new name.", "use: ito rename <name>.")
 	}
 	newName := positionals[0]
-	if !projectNamePattern.MatchString(newName) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", newName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if !itostore.ProjectNamePattern.MatchString(newName) {
+		return failInvalidProjectName(jsonMode, newName)
 	}
 
 	rootPath, inGit, err := resolveCurrentRoot()
@@ -557,13 +554,13 @@ func runShow(args []string) int {
 		return fail(jsonMode, exitBadUsage, "ito show takes exactly one full ID.", "use: ito show <PREFIX>-<n>.")
 	}
 	issueID := positionals[0]
-	matches := issueIDPattern.FindStringSubmatch(issueID)
+	matches := itostore.IssueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
 	}
 	prefix := matches[1]
-	if projectName != "" && !projectNamePattern.MatchString(projectName) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
+		return failInvalidProjectName(jsonMode, projectName)
 	}
 
 	db, st, openFail := openMigratedStore()
@@ -607,7 +604,7 @@ func runMove(args []string) int {
 	}
 	issueID := positionals[0]
 	targetStatus := positionals[1]
-	matches := issueIDPattern.FindStringSubmatch(issueID)
+	matches := itostore.IssueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
 	}
@@ -615,8 +612,8 @@ func runMove(args []string) int {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", targetStatus), "use backlog, todo, in_progress, in_review or done.")
 	}
 	prefix := matches[1]
-	if projectName != "" && !projectNamePattern.MatchString(projectName) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
+		return failInvalidProjectName(jsonMode, projectName)
 	}
 
 	db, st, openFail := openMigratedStore()
@@ -680,13 +677,13 @@ func runEdit(args []string) int {
 	if fs.NArg() != 0 || positionalCount != 1 {
 		return fail(jsonMode, exitBadUsage, "ito edit takes exactly one full ID.", "use: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--block <ID>].")
 	}
-	matches := issueIDPattern.FindStringSubmatch(issueID)
+	matches := itostore.IssueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
 	}
 	prefix := matches[1]
-	if projectName != "" && !projectNamePattern.MatchString(projectName) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
+		return failInvalidProjectName(jsonMode, projectName)
 	}
 
 	options := editIssueOptions{LabelOps: labelOps, LinkOps: linkOps}
@@ -731,7 +728,7 @@ func runEdit(args []string) int {
 		}
 	}
 	for _, op := range options.LinkOps {
-		if !issueIDPattern.MatchString(op.Target) {
+		if !itostore.IssueIDPattern.MatchString(op.Target) {
 			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", op.Target), "use the full format <PREFIX>-<n>, for example AUTH-12.")
 		}
 		if op.Target == issueID {
@@ -791,13 +788,13 @@ func runRm(args []string) int {
 		return fail(jsonMode, exitBadUsage, "ito rm takes exactly one full ID.", "use: ito rm <PREFIX>-<n>.")
 	}
 	issueID := positionals[0]
-	matches := issueIDPattern.FindStringSubmatch(issueID)
+	matches := itostore.IssueIDPattern.FindStringSubmatch(issueID)
 	if matches == nil {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid Issue ID %q.", issueID), "use the full format <PREFIX>-<n>, for example AUTH-12.")
 	}
 	prefix := matches[1]
-	if projectName != "" && !projectNamePattern.MatchString(projectName) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
+		return failInvalidProjectName(jsonMode, projectName)
 	}
 
 	db, st, openFail := openMigratedStore()
@@ -817,15 +814,8 @@ func runRm(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete Issue %q: %v", issueID, err), "try again or inspect the central store.")
 	}
-	deleted := deletedIssue{Deleted: 1, ID: issueID}
 	if jsonMode {
-		encoded, err := json.Marshal(deleted)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not serialize the removal: %v\n", err)
-			return exitGeneric
-		}
-		fmt.Println(string(encoded))
-		return 0
+		return printJSON(deletedIssue{Deleted: 1, ID: issueID}, "removal")
 	}
 	fmt.Printf("%s deleted.\n", issueID)
 	return 0
@@ -861,8 +851,8 @@ func runPrune(args []string) int {
 	if !isValidValue(status, validStatuses) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use backlog, todo, in_progress, in_review or done.")
 	}
-	if projectName != "" && !projectNamePattern.MatchString(projectName) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", projectName), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
+		return failInvalidProjectName(jsonMode, projectName)
 	}
 
 	rootPath, inGit, err := resolveCurrentRoot()
@@ -883,15 +873,8 @@ func runPrune(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete Issues with status %q: %v", status, err), "try again or inspect the central store.")
 	}
-	result := deletedIssues{Deleted: deleted}
 	if jsonMode {
-		encoded, err := json.Marshal(result)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not serialize the removal: %v\n", err)
-			return exitGeneric
-		}
-		fmt.Println(string(encoded))
-		return 0
+		return printJSON(deletedIssues{Deleted: deleted}, "removal")
 	}
 	fmt.Printf("%d\n", deleted)
 	return 0
@@ -975,8 +958,8 @@ func runList(args []string) int {
 }
 
 func runInitReattach(st *itostore.Store, rootPath string, name string, jsonMode bool) int {
-	if !projectNamePattern.MatchString(name) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+	if !itostore.ProjectNamePattern.MatchString(name) {
+		return failInvalidProjectName(jsonMode, name)
 	}
 	existingAtRoot, found, err := st.FindProjectByRoot(rootPath)
 	if err != nil {
@@ -1002,7 +985,7 @@ func runInitReattach(st *itostore.Store, rootPath string, name string, jsonMode 
 
 func resolveProject(st *itostore.Store, rootPath string, inGit bool, explicitName string) (project, int, string, string) {
 	if explicitName != "" {
-		if !projectNamePattern.MatchString(explicitName) {
+		if !itostore.ProjectNamePattern.MatchString(explicitName) {
 			return project{}, exitBadUsage, fmt.Sprintf("invalid project name %q.", explicitName), "use the format [a-z0-9][a-z0-9-]{1,62}."
 		}
 		p, found, err := st.FindProjectByName(explicitName)
@@ -1245,6 +1228,12 @@ Flags:
 	}
 }
 
+// failInvalidProjectName reports the standard usage error for a malformed
+// Project name.
+func failInvalidProjectName(jsonMode bool, name string) int {
+	return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+}
+
 func fail(jsonMode bool, code int, message string, hint string) int {
 	if jsonMode {
 		encoded, err := json.Marshal(cliError{Error: message, Code: code, Hint: hint})
@@ -1261,15 +1250,21 @@ func fail(jsonMode bool, code int, message string, hint string) int {
 	return code
 }
 
+// printJSON marshals value to a single stdout line, reporting a marshal failure
+// on stderr with the value described as what.
+func printJSON(value any, what string) int {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not serialize the %s: %v\n", what, err)
+		return exitGeneric
+	}
+	fmt.Println(string(encoded))
+	return 0
+}
+
 func printProject(p project, jsonMode bool) int {
 	if jsonMode {
-		encoded, err := json.Marshal(p)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not serialize the project: %v\n", err)
-			return exitGeneric
-		}
-		fmt.Println(string(encoded))
-		return 0
+		return printJSON(p, "project")
 	}
 	rootPath := "(detached)"
 	if p.RootPath != nil {
@@ -1281,13 +1276,7 @@ func printProject(p project, jsonMode bool) int {
 
 func printIssue(i issue, jsonMode bool) int {
 	if jsonMode {
-		encoded, err := json.Marshal(i)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not serialize the Issue: %v\n", err)
-			return exitGeneric
-		}
-		fmt.Println(string(encoded))
-		return 0
+		return printJSON(i, "Issue")
 	}
 	fmt.Println(i.ID)
 	return 0
@@ -1295,13 +1284,7 @@ func printIssue(i issue, jsonMode bool) int {
 
 func printIssueDetail(i issue, jsonMode bool) int {
 	if jsonMode {
-		encoded, err := json.Marshal(i)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not serialize the Issue: %v\n", err)
-			return exitGeneric
-		}
-		fmt.Println(string(encoded))
-		return 0
+		return printJSON(i, "Issue")
 	}
 	fmt.Printf("ID: %s\n", i.ID)
 	fmt.Printf("Project: %s\n", i.Project)
@@ -1339,13 +1322,7 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 				Updated:   i.Updated,
 			})
 		}
-		encoded, err := json.Marshal(items)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "could not serialize the Issue list: %v\n", err)
-			return exitGeneric
-		}
-		fmt.Println(string(encoded))
-		return 0
+		return printJSON(items, "Issue list")
 	}
 	if len(issues) == 0 {
 		fmt.Println("no Issues found. adjust the filters or create one with 'ito new --title <title>'.")
@@ -1451,10 +1428,10 @@ func resolveCurrentRoot() (string, bool, error) {
 	if err == nil {
 		commonDir := strings.TrimSpace(string(output))
 		if filepath.Base(commonDir) == ".git" {
-			root, err := canonicalPath(filepath.Dir(commonDir))
+			root, err := itostore.CanonicalPath(filepath.Dir(commonDir))
 			return root, true, err
 		}
-		root, err := canonicalPath(commonDir)
+		root, err := itostore.CanonicalPath(commonDir)
 		return root, true, err
 	}
 	var exitErr *exec.ExitError
@@ -1465,48 +1442,6 @@ func resolveCurrentRoot() (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	root, err := canonicalPath(cwd)
+	root, err := itostore.CanonicalPath(cwd)
 	return root, false, err
-}
-
-func canonicalPath(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err == nil {
-		return filepath.Clean(resolved), nil
-	}
-	return filepath.Clean(abs), nil
-}
-
-func normalizeProjectName(input string) string {
-	var b strings.Builder
-	lastDash := false
-	for _, r := range strings.ToLower(itostore.TransliterateASCII(input)) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash && b.Len() > 0 {
-			b.WriteByte('-')
-			lastDash = true
-		}
-	}
-	name := strings.Trim(b.String(), "-")
-	if name == "" {
-		name = "ito"
-	}
-	if len(name) == 1 {
-		name += "0"
-	}
-	if len(name) > 63 {
-		name = strings.TrimRight(name[:63], "-")
-		if len(name) < 2 {
-			name = "ito"
-		}
-	}
-	return name
 }
