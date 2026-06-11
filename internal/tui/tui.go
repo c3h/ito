@@ -321,18 +321,20 @@ func (m model) View() string {
 		lines = append(lines, sectionHeading(section.Label, len(section.Issues), focused, false, width))
 		window := windows[i]
 		if window.showAbove {
-			lines = append(lines, styleDim.Render(fmt.Sprintf("   ↑ %d more", window.start)))
+			lines = append(lines, styleDim.Render(fmt.Sprintf("    ↑ %d more", window.start)))
 		}
 		for j, issue := range section.Issues[window.start:window.end] {
 			issueIndex := window.start + j
-			prefix := "   "
+			// Two leading spaces put the cursor under the heading's ▾ and the
+			// priority mark under the first letter of the status label.
+			prefix := "    "
 			if focused && issueIndex == section.selected {
-				prefix = " " + styleActive.Render("▸") + " "
+				prefix = "  " + styleActive.Render("▸") + " "
 			}
-			lines = append(lines, prefix+renderIssueRow(issue, width-3))
+			lines = append(lines, prefix+renderIssueRow(issue, width-4))
 		}
 		if window.showBelow {
-			lines = append(lines, styleDim.Render(fmt.Sprintf("   ↓ %d more", len(section.Issues)-window.end)))
+			lines = append(lines, styleDim.Render(fmt.Sprintf("    ↓ %d more", len(section.Issues)-window.end)))
 		}
 		lines = append(lines, "")
 	}
