@@ -55,7 +55,7 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 	view := newModel(st, project).View()
 	for _, want := range []string{
 		"ito · [1] digest · [2] board",
-		"5 issues   digest-app",
+		"4 issues   digest-app",
 		"BACKLOG  (1)",
 		"TODO  (1)",
 		"IN PROGRESS  (1)",

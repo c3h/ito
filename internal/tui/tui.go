@@ -302,7 +302,7 @@ func (m model) View() string {
 	width := m.viewWidth()
 	sections := m.digestSections()
 	lines := []string{
-		header(m.project.Name, issueCount(sections), width, viewDigest),
+		header(m.project.Name, activeIssueCount(sections), width, viewDigest),
 		fullRule(width),
 		"",
 	}
@@ -347,7 +347,7 @@ func (m model) boardView() string {
 	width := m.boardViewWidth(len(sections))
 	visible := m.visibleBoardSections(sections, width)
 	lines := []string{
-		header(m.project.Name, issueCount(sections), width, viewBoard),
+		header(m.project.Name, activeIssueCount(sections), width, viewBoard),
 		fullRule(width),
 		"",
 	}
@@ -909,6 +909,17 @@ func issueRange(total, selected, capacity int) issueWindow {
 func issueCount(sections []digestSection) int {
 	total := 0
 	for _, section := range sections {
+		total += len(section.Issues)
+	}
+	return total
+}
+
+func activeIssueCount(sections []digestSection) int {
+	total := 0
+	for _, section := range sections {
+		if section.Label == statusLabel("done") {
+			continue
+		}
 		total += len(section.Issues)
 	}
 	return total
