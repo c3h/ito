@@ -2,8 +2,7 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-// Theme tokens for the TUI surfaces, mirroring the v2 prototype
-// (docs/prototypes/v2-tui.prototype.html). Chromatic accents are fixed hex —
+// Theme tokens for the TUI surfaces. Chromatic accents are fixed hex —
 // they read on both light and dark terminals — while the neutrals (text,
 // dimmed text, separators) adapt to the terminal background.
 var (
@@ -12,10 +11,10 @@ var (
 	colorDim  = lipgloss.AdaptiveColor{Light: "#8089a8", Dark: "#565f89"}
 	colorLine = lipgloss.AdaptiveColor{Light: "#c4c8da", Dark: "#2c3047"}
 
-	// Labels — a muted ink, straight from the prototype's chip foreground.
+	// Labels — a muted ink sitting between the text and dim neutrals.
 	colorLabelInk = lipgloss.AdaptiveColor{Light: "#5a6178", Dark: "#9aa5ce"}
 
-	// Chromatic accents — fixed, straight from the prototype palette.
+	// Chromatic accents — fixed across terminal themes.
 	colorID     = lipgloss.Color("#7dcfff")
 	colorSel    = lipgloss.Color("#bb9af7")
 	colorUrgent = lipgloss.Color("#f7768e")

@@ -39,8 +39,8 @@ const (
 )
 
 // detailBodyWidth keeps the Issue body at a readable prose measure, narrower
-// than the full surface frame (see docs/prototypes/NOTES.md). On a narrow
-// terminal the body shrinks below this to fit (see issueDetailView).
+// than the full surface frame. On a narrow terminal the body shrinks below
+// this to fit (see issueDetailView).
 const detailBodyWidth = 80
 
 // linkIDWidth is the column the linked Issue id occupies before its title in
@@ -560,15 +560,15 @@ func divider(head string, width int) string {
 }
 
 // fullRule is the full-width horizontal separator the surfaces draw under the
-// header (and around the detail view), in the dim separator colour — matching
-// the prototype, where every ─ renders in --line, not the default foreground.
+// header (and around the detail view). Every ─ renders in the dim separator
+// colour, never the default foreground, so rules read as chrome, not content.
 func fullRule(width int) string {
 	return styleLine.Render(strings.Repeat("─", width))
 }
 
 // sectionHeading renders a Digest section heading: the focus bar and disclosure
 // triangle in the accent colour, the status label in cyan, the count in ink,
-// then a dim rule filling the rest of the width — matching the prototype.
+// then a dim rule filling the rest of the width.
 func sectionHeading(label string, count int, focused, collapsed bool, width int) string {
 	bar, styledBar := " ", " "
 	if focused {
@@ -1488,8 +1488,7 @@ func padBetween(left, right string, width int) string {
 
 // labelChips renders each label as a filled chip joined by sep — the styling
 // applies per word only, so the plain width matches strings.Join(labels, sep).
-// The Issue meta line joins with two spaces, like the prototype, while the
-// Digest rows join with one.
+// The Issue meta line joins with two spaces, the Digest rows with one.
 func labelChips(labels []string, sep string) string {
 	chips := make([]string, len(labels))
 	for i, label := range labels {
@@ -1553,7 +1552,7 @@ func renderBoardIssue(issue store.Issue, selected bool, width int) string {
 		pointer, styledPointer = "▸", styleActive.Render("▸")
 	}
 	// Board cards are mark + id + title only — the narrow columns leave no room
-	// for labels, matching the prototype's boardColumn.
+	// for labels.
 	plainPrefix := fmt.Sprintf("%s %s %s ", pointer, priorityMark(issue.Priority), issue.ID)
 	styledPrefix := styledPointer + " " + styledPriorityMark(issue.Priority) + " " + styleID.Render(issue.ID) + " "
 
@@ -1579,7 +1578,7 @@ func priorityMark(priority string) string {
 }
 
 // styledPriorityMark colours the priority mark: urgent red, high orange, medium
-// blue, low left in the default ink — matching the prototype palette.
+// blue, low left in the default ink.
 func styledPriorityMark(priority string) string {
 	switch priority {
 	case "urgent":
