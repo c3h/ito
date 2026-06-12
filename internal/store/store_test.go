@@ -103,6 +103,57 @@ VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '
 	}
 }
 
+func TestDeleteBatchRollsBackWhenMemberClearFails(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("atomic-batch", "ATB", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "storage-refactor"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Member", "todo", "low", nil, "", "storage-refactor"); err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	if _, err := db.Exec(`
+CREATE TRIGGER fail_batch_clear
+BEFORE UPDATE OF batch_id ON issues
+WHEN OLD.batch_id IS NOT NULL AND NEW.batch_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'forced batch clear failure');
+END;
+`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	if _, err := st.DeleteBatch(project, "storage-refactor"); err == nil {
+		t.Fatal("expected forced member-clear failure")
+	}
+	if _, err := db.Exec(`DROP TRIGGER fail_batch_clear`); err != nil {
+		t.Fatalf("drop failure trigger: %v", err)
+	}
+	batches, err := st.ListBatches(project)
+	if err != nil {
+		t.Fatalf("list batches: %v", err)
+	}
+	if len(batches) != 1 || batches[0].Name != "storage-refactor" || batches[0].Total != 1 {
+		t.Fatalf("failed delete must leave Batch and membership intact, got %#v", batches)
+	}
+	issue, err := st.FindIssue(project, "ATB-1")
+	if err != nil {
+		t.Fatalf("find member: %v", err)
+	}
+	if issue.Batch == nil || *issue.Batch != "storage-refactor" {
+		t.Fatalf("failed delete must keep member in Batch, got %#v", issue)
+	}
+}
+
 func assertSchemaVersion(t *testing.T, db *sql.DB, want int) {
 	t.Helper()
 	var got int

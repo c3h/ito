@@ -206,6 +206,11 @@ type batchListItem struct {
 	Done    int    `json:"done"`
 }
 
+type deletedBatch struct {
+	Deleted        string `json:"deleted"`
+	MembersCleared int    `json:"members_cleared"`
+}
+
 type issueListItem struct {
 	ID            string   `json:"id"`
 	Project       string   `json:"project"`
@@ -353,6 +358,10 @@ func runBatch(args []string) int {
 		return runBatchNew(args[1:])
 	case "list":
 		return runBatchList(args[1:])
+	case "rename":
+		return runBatchRename(args[1:])
+	case "rm":
+		return runBatchRM(args[1:])
 	default:
 		return fail(wantsJSON(args[1:], nil), exitBadUsage, "unknown batch command: "+args[0]+".", "Run 'ito batch --help' to see available commands.")
 	}
@@ -434,6 +443,92 @@ func runBatchList(args []string) int {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not list Batches: %v", err), "try again or inspect the central store.")
 	}
 	return printBatchList(batches, jsonMode)
+}
+
+func runBatchRename(args []string) int {
+	if wantsHelp(args, commandValueFlags("batch rename")) {
+		printCommandHelp("batch rename")
+		return 0
+	}
+	fs := flag.NewFlagSet("batch rename", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, commandValueFlags("batch rename")), exitBadUsage, err.Error(), "run 'ito batch rename --help' to see the accepted flags.")
+	}
+	if len(positionals) != 2 {
+		return fail(jsonMode, exitBadUsage, "ito batch rename takes exactly two names.", "use: ito batch rename <old> <new>.")
+	}
+	oldName, newName := positionals[0], positionals[1]
+	if !itostore.ProjectNamePattern.MatchString(newName) {
+		return failInvalidBatchName(jsonMode, newName)
+	}
+
+	db, st, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+
+	p, code, message, hint := resolveProject(st, projectName)
+	if code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+	renamed, err := st.RenameBatch(p, oldName, newName)
+	if err != nil {
+		if errors.Is(err, itostore.ErrBatchExists) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("a batch named %q already exists in Project %q.", newName, p.Name), "choose another Batch name.")
+		}
+		if errors.Is(err, itostore.ErrBatchNotFound) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", oldName, p.Name), "run 'ito batch list' to see the Project's Batches.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not rename the Batch: %v", err), "try again or inspect the central store.")
+	}
+	return printRenamedBatch(oldName, renamed, jsonMode)
+}
+
+func runBatchRM(args []string) int {
+	if wantsHelp(args, commandValueFlags("batch rm")) {
+		printCommandHelp("batch rm")
+		return 0
+	}
+	fs := flag.NewFlagSet("batch rm", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, commandValueFlags("batch rm")), exitBadUsage, err.Error(), "run 'ito batch rm --help' to see the accepted flags.")
+	}
+	if len(positionals) != 1 {
+		return fail(jsonMode, exitBadUsage, "ito batch rm takes exactly one name.", "use: ito batch rm <name>.")
+	}
+	name := positionals[0]
+
+	db, st, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+
+	p, code, message, hint := resolveProject(st, projectName)
+	if code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+	deleted, err := st.DeleteBatch(p, name)
+	if err != nil {
+		if errors.Is(err, itostore.ErrBatchNotFound) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", name, p.Name), "run 'ito batch list' to see the Project's Batches.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete the Batch: %v", err), "try again or inspect the central store.")
+	}
+	return printDeletedBatch(deleted.Name, deleted.MembersCleared, jsonMode)
 }
 
 func runInit(args []string) int {
@@ -1210,6 +1305,10 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "batch list":
 		return map[string]struct{}{"project": {}}
+	case "batch rename":
+		return map[string]struct{}{"project": {}}
+	case "batch rm":
+		return map[string]struct{}{"project": {}}
 	case "move":
 		return map[string]struct{}{"project": {}}
 	case "edit":
@@ -1379,6 +1478,8 @@ Manages Batches in the current Project.
 Commands:
   new      Creates a Batch.
   list     Lists Batches newest-first.
+  rename   Renames a Batch.
+  rm       Deletes a Batch and releases its members.
 
 Use "ito batch <command> --help" to see the command's flags.`)
 	case "batch new":
@@ -1393,6 +1494,22 @@ Flags:
 		fmt.Println(`usage: ito batch list [--project <name>] [--json]
 
 Lists Batches newest-first with created date and done/total progress.
+
+Flags:
+  --project <name>     Explicit Project.
+  --json               Prints JSON.`)
+	case "batch rename":
+		fmt.Println(`usage: ito batch rename [--project <name>] [--json] <old> <new>
+
+Renames a Batch in the current Project. The new name uses the Project-name format.
+
+Flags:
+  --project <name>     Explicit Project.
+  --json               Prints JSON.`)
+	case "batch rm":
+		fmt.Println(`usage: ito batch rm [--project <name>] [--json] <name>
+
+Deletes a Batch and clears membership from its Issues. Issues are never deleted.
 
 Flags:
   --project <name>     Explicit Project.
@@ -1535,6 +1652,22 @@ func printBatchList(batches []batch, jsonMode bool) int {
 	for _, b := range batches {
 		fmt.Printf("%s %s %d/%d\n", b.Name, batchCreatedDate(b.Created), b.Done, b.Total)
 	}
+	return 0
+}
+
+func printRenamedBatch(oldName string, b batch, jsonMode bool) int {
+	if jsonMode {
+		return printJSON(batchListItem{Name: b.Name, Project: b.Project, Created: b.Created, Total: b.Total, Done: b.Done}, "Batch")
+	}
+	fmt.Printf("%s renamed to %s.\n", oldName, b.Name)
+	return 0
+}
+
+func printDeletedBatch(name string, membersCleared int, jsonMode bool) int {
+	if jsonMode {
+		return printJSON(deletedBatch{Deleted: name, MembersCleared: membersCleared}, "Batch deletion")
+	}
+	fmt.Printf("%s deleted. %d members released.\n", name, membersCleared)
 	return 0
 }
 

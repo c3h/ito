@@ -145,6 +145,11 @@ type Batch struct {
 	Done    int    `json:"done"`
 }
 
+type DeleteBatchResult struct {
+	Name           string
+	MembersCleared int
+}
+
 type ListOptions struct {
 	ProjectID   int64
 	AllProjects bool
@@ -326,6 +331,14 @@ func (s *Store) CreateBatch(p Project, name string) (Batch, error) {
 
 func (s *Store) ListBatches(p Project) ([]Batch, error) {
 	return listBatches(s.db, p)
+}
+
+func (s *Store) RenameBatch(p Project, oldName, newName string) (Batch, error) {
+	return renameBatch(s.db, p, oldName, newName)
+}
+
+func (s *Store) DeleteBatch(p Project, name string) (DeleteBatchResult, error) {
+	return deleteBatch(s.db, p, name)
 }
 
 func (s *Store) FindIssue(p Project, id string) (Issue, error) {
@@ -912,6 +925,89 @@ ORDER BY batches.created DESC, batches.id DESC`, p.ID)
 		return nil, err
 	}
 	return batches, nil
+}
+
+func renameBatch(db *sql.DB, p Project, oldName, newName string) (Batch, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return Batch{}, err
+	}
+	defer tx.Rollback()
+
+	id, found, err := findBatchIDTx(tx, p.ID, oldName)
+	if err != nil {
+		return Batch{}, err
+	}
+	if !found {
+		return Batch{}, ErrBatchNotFound
+	}
+	if exists, err := valueExists(tx, `SELECT 1 FROM batches WHERE project_id = ? AND name = ? AND id != ?`, p.ID, newName, id); err != nil {
+		return Batch{}, err
+	} else if exists {
+		return Batch{}, ErrBatchExists
+	}
+	result, err := tx.Exec(`UPDATE batches SET name = ? WHERE id = ?`, newName, id)
+	if err != nil {
+		return Batch{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Batch{}, err
+	}
+	if affected != 1 {
+		return Batch{}, sql.ErrNoRows
+	}
+	renamed, found, err := findBatchByIDTx(tx, id)
+	if err != nil {
+		return Batch{}, err
+	}
+	if !found {
+		return Batch{}, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return Batch{}, err
+	}
+	return renamed, nil
+}
+
+func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	defer tx.Rollback()
+
+	id, found, err := findBatchIDTx(tx, p.ID, name)
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if !found {
+		return DeleteBatchResult{}, ErrBatchNotFound
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := tx.Exec(`UPDATE issues SET batch_id = NULL, updated = ? WHERE project_id = ? AND batch_id = ?`, now, p.ID, id)
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	membersCleared, err := result.RowsAffected()
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	result, err = tx.Exec(`DELETE FROM batches WHERE project_id = ? AND id = ?`, p.ID, id)
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if affected != 1 {
+		return DeleteBatchResult{}, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return DeleteBatchResult{}, err
+	}
+	return DeleteBatchResult{Name: name, MembersCleared: int(membersCleared)}, nil
 }
 
 func updateProjectRoot(db *sql.DB, p Project) (Project, error) {
@@ -1604,6 +1700,26 @@ func findBatchID(db *sql.DB, projectID int64, name string) (int64, bool, error) 
 
 func findBatchIDTx(tx *sql.Tx, projectID int64, name string) (int64, bool, error) {
 	return findBatchIDQuery(tx, projectID, name)
+}
+
+func findBatchByIDTx(tx *sql.Tx, id int64) (Batch, bool, error) {
+	row := tx.QueryRow(`
+SELECT batches.name, projects.name, batches.created,
+       count(issues.row_id) AS total,
+       count(CASE WHEN issues.status = 'done' THEN 1 END) AS done
+FROM batches
+JOIN projects ON projects.id = batches.project_id
+LEFT JOIN issues ON issues.batch_id = batches.id
+WHERE batches.id = ?
+GROUP BY batches.id, batches.name, projects.name, batches.created`, id)
+	var batch Batch
+	if err := row.Scan(&batch.Name, &batch.Project, &batch.Created, &batch.Total, &batch.Done); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Batch{}, false, nil
+		}
+		return Batch{}, false, err
+	}
+	return batch, true, nil
 }
 
 func findBatchIDQuery(q rowQuerier, projectID int64, name string) (int64, bool, error) {
