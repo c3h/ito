@@ -12,17 +12,32 @@ import (
 // batchSection is one Batch rendered as a Digest-style section. The waves come
 // from the shared core derivation (store.ShowBatch) — the TUI never recomputes
 // them — and a cyclic Batch carries the Issues in the cycle instead of waves.
+// selected indexes the flattened listed rows (batchIssues), so the cursor
+// crosses Wave sub-headings transparently.
 type batchSection struct {
 	batch     store.Batch
 	waves     []store.BatchWave
 	cycle     []string
 	collapsed bool
+	selected  int
 }
 
 // reloadBatches snapshots the Project's Batches newest-first, deriving each
 // plan through the core. A fully-done Batch starts collapsed; a blocked_by
 // cycle is captured per Batch so one bad graph never blanks the surface.
+// Across reloads the focus follows its Batch by name, a manual collapse toggle
+// survives (except that a Batch completing right now collapses on the spot),
+// and each selection keeps its Issue by ID, falling back to clamping.
 func (m *model) reloadBatches() {
+	previous := make(map[string]batchSection, len(m.batchSections))
+	for _, section := range m.batchSections {
+		previous[section.batch.Name] = section
+	}
+	focusedName := ""
+	if m.batchFocus >= 0 && m.batchFocus < len(m.batchSections) {
+		focusedName = m.batchSections[m.batchFocus].batch.Name
+	}
+
 	m.loadErr = nil
 	batches, err := m.store.ListBatches(m.project)
 	if err != nil {
@@ -30,8 +45,9 @@ func (m *model) reloadBatches() {
 		return
 	}
 	sections := make([]batchSection, 0, len(batches))
-	for _, b := range batches {
-		section := batchSection{batch: b, collapsed: b.Total > 0 && b.Done == b.Total}
+	focusIndex := 0
+	for i, b := range batches {
+		section := batchSection{batch: b, collapsed: batchDone(b)}
 		plan, err := m.store.ShowBatch(m.project, b.Name)
 		var cycleErr *store.BatchCycleError
 		switch {
@@ -43,9 +59,172 @@ func (m *model) reloadBatches() {
 		default:
 			section.waves = plan.Waves
 		}
+		if prev, ok := previous[b.Name]; ok {
+			// A manual toggle survives the reload, but a Batch that just went
+			// fully done collapses on the spot.
+			if !batchDone(b) || batchDone(prev.batch) {
+				section.collapsed = prev.collapsed
+			}
+			section.selected = restoredBatchSelection(prev, section)
+		}
+		if b.Name == focusedName {
+			focusIndex = i
+		}
 		sections = append(sections, section)
 	}
 	m.batchSections = sections
+	m.batchFocus = focusIndex
+}
+
+// restoredBatchSelection keeps a Batch's selection on the same Issue across a
+// reload when it still renders, otherwise clamps the old index to the new rows.
+func restoredBatchSelection(prev, next batchSection) int {
+	issues := batchIssues(next)
+	if id := batchSelectedID(prev); id != "" {
+		for j, issue := range issues {
+			if issue.ID == id {
+				return j
+			}
+		}
+	}
+	return min(max(prev.selected, 0), max(0, len(issues)-1))
+}
+
+func batchDone(b store.Batch) bool {
+	return b.Total > 0 && b.Done == b.Total
+}
+
+// batchIssues flattens the rows a Batch lists — its open members in wave
+// order — the list the selection cursor walks.
+func batchIssues(section batchSection) []store.Issue {
+	var issues []store.Issue
+	for _, wave := range section.waves {
+		issues = append(issues, wave.Issues...)
+	}
+	return issues
+}
+
+// batchSelectedID resolves a section's selection to its Issue ID, "" when the
+// section lists no rows.
+func batchSelectedID(section batchSection) string {
+	issues := batchIssues(section)
+	if section.selected >= 0 && section.selected < len(issues) {
+		return issues[section.selected].ID
+	}
+	return ""
+}
+
+// batchIssueCount totals the listed rows — open members across every Batch —
+// feeding the filter bar's matched/total counts.
+func batchIssueCount(sections []batchSection) int {
+	total := 0
+	for _, section := range sections {
+		total += len(batchIssues(section))
+	}
+	return total
+}
+
+func (m *model) moveBatchFocus(delta int) {
+	if len(m.batchSections) == 0 {
+		return
+	}
+	m.batchFocus = (m.batchFocus + delta + len(m.batchSections)) % len(m.batchSections)
+}
+
+func (m *model) moveBatchSelection(delta int) {
+	if m.batchFocus < 0 || m.batchFocus >= len(m.batchSections) {
+		return
+	}
+	section := &m.batchSections[m.batchFocus]
+	issues := batchIssues(*section)
+	if section.collapsed || len(issues) == 0 {
+		return
+	}
+	section.selected = min(max(section.selected+delta, 0), len(issues)-1)
+}
+
+func (m *model) toggleFocusedBatch() {
+	if m.batchFocus < 0 || m.batchFocus >= len(m.batchSections) {
+		return
+	}
+	m.batchSections[m.batchFocus].collapsed = !m.batchSections[m.batchFocus].collapsed
+}
+
+// selectedBatchIssue is the member the surface's actions apply to: the focused
+// Batch's selected row. A collapsed Batch exposes no rows, so it never yields
+// a selection — mirroring a hidden Digest section.
+func (m model) selectedBatchIssue() (store.Issue, bool) {
+	if m.batchFocus < 0 || m.batchFocus >= len(m.batchSections) {
+		return store.Issue{}, false
+	}
+	section := m.batchSections[m.batchFocus]
+	if section.collapsed {
+		return store.Issue{}, false
+	}
+	issues := batchIssues(section)
+	if section.selected < 0 || section.selected >= len(issues) {
+		return store.Issue{}, false
+	}
+	return issues[section.selected], true
+}
+
+// focusBatchIssue points the Batch focus and selection at an Issue when it
+// still renders on the surface — collapsed Batches are skipped, like hidden
+// Digest sections in focusIssue.
+func (m *model) focusBatchIssue(id string) {
+	for i := range m.batchSections {
+		if m.batchSections[i].collapsed {
+			continue
+		}
+		for j, issue := range batchIssues(m.batchSections[i]) {
+			if issue.ID == id {
+				m.batchFocus = i
+				m.batchSections[i].selected = j
+				return
+			}
+		}
+	}
+}
+
+// displayBatchSections applies the live / filter to the Batch rows with the
+// Digest's matching rules: only matching members stay, empty Waves drop, the
+// selection follows its Issue into the filtered rows, and a collapsed Batch
+// with matches is revealed — mirroring digestSections.
+func (m model) displayBatchSections() []batchSection {
+	query := strings.TrimSpace(strings.ToLower(m.filterQuery))
+	if query == "" {
+		return m.batchSections
+	}
+	sections := make([]batchSection, 0, len(m.batchSections))
+	for _, section := range m.batchSections {
+		selectedID := batchSelectedID(section)
+		filtered := section
+		filtered.waves = nil
+		filtered.selected = 0
+		row := 0
+		for _, wave := range section.waves {
+			match := wave
+			match.Issues = nil
+			for _, issue := range wave.Issues {
+				if !issueMatchesFilter(issue, query) {
+					continue
+				}
+				if issue.ID == selectedID {
+					filtered.selected = row
+				}
+				match.Issues = append(match.Issues, issue)
+				row++
+			}
+			if len(match.Issues) > 0 {
+				filtered.waves = append(filtered.waves, match)
+			}
+		}
+		if row > 0 {
+			filtered.collapsed = false
+		}
+		sections = append(sections, filtered)
+	}
+	return sections
 }
 
 func (m model) batchesView() string {
@@ -62,53 +241,73 @@ func (m model) batchesView() string {
 			" run ito batch new <name> to plan one",
 			"",
 			fullRule(width),
-			batchesBottomBar(),
+			m.batchesBottomBar(0, 0),
 		)
 		return strings.Join(lines, "\n")
 	}
 
-	bodies := make([][]string, len(m.batchSections))
-	counts := make([]int, len(m.batchSections))
-	for i, section := range m.batchSections {
-		bodies[i] = batchBody(section, width)
+	sections := m.displayBatchSections()
+	filtering := strings.TrimSpace(m.filterQuery) != ""
+	bodies := make([][]string, len(sections))
+	selectedLines := make([]int, len(sections))
+	counts := make([]int, len(sections))
+	for i, section := range sections {
+		if filtering && len(batchIssues(section)) == 0 {
+			continue // while filtering, only Batches with matches are shown
+		}
+		bodies[i], selectedLines[i] = batchBody(section, i == m.batchFocus, width)
 		counts[i] = len(bodies[i])
 	}
 	budgets := allocateLineBudgets(counts, m.height)
-	for i, section := range m.batchSections {
-		// Focus interactions arrive in the next slice; until then the first
-		// (newest) Batch wears the focus bar, like the Digest's initial focus.
-		lines = append(lines, batchHeading(section, i == 0, width))
-		window := visibleIssueWindow(len(bodies[i]), 0, budgets[i])
+	for i, section := range sections {
+		if filtering && len(batchIssues(section)) == 0 {
+			continue
+		}
+		lines = append(lines, batchHeading(section, i == m.batchFocus, width))
+		window := visibleIssueWindow(len(bodies[i]), selectedLines[i], budgets[i])
+		if window.showAbove {
+			lines = append(lines, styleDim.Render(fmt.Sprintf("    ↑ %d more", window.start)))
+		}
 		lines = append(lines, bodies[i][window.start:window.end]...)
 		if window.showBelow {
 			lines = append(lines, styleDim.Render(fmt.Sprintf("    ↓ %d more", len(bodies[i])-window.end)))
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, fullRule(width), batchesBottomBar())
+	lines = append(lines, fullRule(width),
+		m.batchesBottomBar(batchIssueCount(sections), batchIssueCount(m.batchSections)))
 	return strings.Join(lines, "\n")
 }
 
 // batchBody renders a Batch's open members under their Wave sub-headings —
 // done members live only in the heading count, a collapsed Batch has no body,
-// and a cyclic Batch shows the cycle line instead of waves.
-func batchBody(section batchSection, width int) []string {
+// and a cyclic Batch shows the cycle line instead of waves. It also reports
+// the line the selection cursor sits on, so windowing keeps it visible.
+func batchBody(section batchSection, focused bool, width int) ([]string, int) {
 	if section.collapsed {
-		return nil
+		return nil, 0
 	}
 	if len(section.cycle) > 0 {
 		return []string{"    " + styleBlock.Render("⊘ ") +
-			styleText.Render("blocked_by cycle among ") + styleID.Render(strings.Join(section.cycle, ", "))}
+			styleText.Render("blocked_by cycle among ") + styleID.Render(strings.Join(section.cycle, ", "))}, 0
 	}
 	var lines []string
+	selectedLine := 0
+	row := 0
 	for _, wave := range section.waves {
 		lines = append(lines, waveHeading(wave))
 		for _, issue := range wave.Issues {
 			// Rows sit two columns right of Digest rows, under their Wave heading.
-			lines = append(lines, "      "+renderIssueRow(issue, width-6))
+			prefix := "      "
+			if focused && row == section.selected {
+				prefix = "    " + styleActive.Render("▸") + " "
+				selectedLine = len(lines)
+			}
+			lines = append(lines, prefix+renderIssueRow(issue, width-6))
+			row++
 		}
 	}
-	return lines
+	return lines, selectedLine
 }
 
 // batchHeading is the Digest sectionHeading shape with the Batch's derived
@@ -141,7 +340,7 @@ func batchHeading(section batchSection, focused bool, width int) string {
 // waves (a cyclic or empty Batch has none).
 func batchMeta(section batchSection) string {
 	b := section.batch
-	if b.Total > 0 && b.Done == b.Total {
+	if batchDone(b) {
 		return "done"
 	}
 	if len(section.waves) == 0 {
@@ -171,11 +370,19 @@ func batchCreatedDate(created string) string {
 	return parsed.UTC().Format("2006-01-02")
 }
 
-// batchesBottomBar lists only the keys this read-only slice honours — the
-// focus/selection/edit keys join when the interactions land.
-func batchesBottomBar() string {
+// batchesBottomBar mirrors the Digest's bar: the inline filter input with its
+// matched/total hint, the : command line, or the surface's key set.
+func (m model) batchesBottomBar(matched, total int) string {
+	if m.filterOpen {
+		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
+		return inputBar("/", m.filterQuery, hint)
+	}
+	if m.commandOpen {
+		return m.commandBottomBar()
+	}
 	return statusBar(
-		[2]string{"1", "digest"}, [2]string{"2", "board"},
-		[2]string{"r", "refresh"}, [2]string{"q", "quit"},
+		[2]string{"tab", "focus"}, [2]string{"↑↓", "select"}, [2]string{"⏎", "open"},
+		[2]string{"s", "status"}, [2]string{"h", "hide"}, [2]string{"/", "filter"},
+		[2]string{":", "cmd"}, [2]string{"q", "quit"},
 	)
 }

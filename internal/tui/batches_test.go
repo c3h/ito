@@ -110,7 +110,10 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 	if !strings.Contains(view, "    WAVE 1 · READY  (2)") || !strings.Contains(view, "    WAVE 2 · WAITING  (1)") {
 		t.Fatalf("expected Wave sub-headings with READY on Wave 1 only, got:\n%s", view)
 	}
-	if !strings.Contains(view, "      ▲ "+root.ID+" Extract config loader") {
+	// The focused Batch's selected row wears the cursor; the rest sit two
+	// columns right of Digest rows.
+	if !strings.Contains(view, "    ▸ ▲ "+root.ID+" Extract config loader") ||
+		!strings.Contains(view, "      ◆ ") {
 		t.Fatalf("expected Digest-style rows indented under their Wave, got:\n%s", view)
 	}
 	if !strings.Contains(view, "⊘ "+root.ID) || !strings.Contains(view, "refactor") {
@@ -329,7 +332,7 @@ func TestBatchesWindowsRowsToTerminalHeight(t *testing.T) {
 	}
 }
 
-func TestBatchesSurfaceIgnoresEditAndSelectionKeysReadOnly(t *testing.T) {
+func TestBatchesTabCyclesFocusAcrossBatches(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -337,31 +340,430 @@ func TestBatchesSurfaceIgnoresEditAndSelectionKeysReadOnly(t *testing.T) {
 	defer db.Close()
 
 	st := store.New(db)
-	project, err := st.CreateProject("batch-readonly-app", "BRO", t.TempDir())
+	project, err := st.CreateProject("batch-focus-app", "BFO", t.TempDir())
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateBatch(project, "quiet-effort"); err != nil {
+	for _, name := range []string{"older-effort", "newer-effort"} {
+		if _, err := st.CreateBatch(project, name); err != nil {
+			t.Fatalf("create batch %s: %v", name, err)
+		}
+		if _, err := st.CreateIssueInBatch(project, "Member of "+name, "todo", "medium", nil, "", name); err != nil {
+			t.Fatalf("create member of %s: %v", name, err)
+		}
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	view := current.View()
+	if !strings.Contains(view, " ▌▾ newer-effort") || strings.Contains(view, " ▌▾ older-effort") {
+		t.Fatalf("expected the newest Batch to wear the initial focus bar, got:\n%s", view)
+	}
+	if !strings.Contains(view, "tab focus   ↑↓ select") || !strings.Contains(view, "h hide") {
+		t.Fatalf("expected the surface key set in the bottom bar, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "tab"))
+	if view := current.View(); !strings.Contains(view, " ▌▾ older-effort") || strings.Contains(view, " ▌▾ newer-effort") {
+		t.Fatalf("expected Tab to move focus to the next Batch, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "tab"))
+	if view := current.View(); !strings.Contains(view, " ▌▾ newer-effort") {
+		t.Fatalf("expected Tab to wrap focus back to the first Batch, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "shift+tab"))
+	if view := current.View(); !strings.Contains(view, " ▌▾ older-effort") {
+		t.Fatalf("expected Shift+Tab to cycle focus backward, got:\n%s", view)
+	}
+}
+
+func TestBatchesUpDownMovesSelectionAcrossWavesClamped(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-select-app", "BSL", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "wave-walk"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	member, err := st.CreateIssueInBatch(project, "Stay untouched", "todo", "medium", nil, "", "quiet-effort")
+	first, err := st.CreateIssueInBatch(project, "First ready", "todo", "high", nil, "", "wave-walk")
+	if err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	second, err := st.CreateIssueInBatch(project, "Second ready", "todo", "medium", nil, "", "wave-walk")
+	if err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+	tail, err := st.CreateIssueInBatch(project, "Blocked tail", "todo", "medium", nil, "", "wave-walk")
+	if err != nil {
+		t.Fatalf("create tail: %v", err)
+	}
+	if _, err := st.Edit(project, tail.ID, store.EditIssueOptions{
+		LinkOps: []store.LinkEditOp{{Kind: "blocked_by", Action: "add", Target: first.ID}},
+	}); err != nil {
+		t.Fatalf("block tail: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
+		t.Fatalf("expected the selection cursor on the first listed row, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "▸ ◆ "+second.ID) {
+		t.Fatalf("expected Down to select the next row, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "▸ ◆ "+tail.ID) {
+		t.Fatalf("expected Down to cross the Wave sub-heading transparently, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "▸ ◆ "+tail.ID) {
+		t.Fatalf("expected Down past the last row to clamp, got:\n%s", view)
+	}
+
+	for range 3 {
+		current, _ = current.Update(keyMsg(t, "up"))
+	}
+	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
+		t.Fatalf("expected Up past the first row to clamp, got:\n%s", view)
+	}
+}
+
+func TestBatchesSelectionSurvivesRefreshWhenIssueStillRenders(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-refresh-app", "BRF", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "refresh-keep"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	alpha, err := st.CreateIssueInBatch(project, "Keep alpha", "todo", "high", nil, "", "refresh-keep")
+	if err != nil {
+		t.Fatalf("create alpha: %v", err)
+	}
+	beta, err := st.CreateIssueInBatch(project, "Keep beta", "todo", "medium", nil, "", "refresh-keep")
+	if err != nil {
+		t.Fatalf("create beta: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "▸ ◆ "+beta.ID) {
+		t.Fatalf("expected the selection on beta before the refresh, got:\n%s", view)
+	}
+
+	// The agent finishes alpha from another process; r pulls the change in.
+	if _, err := st.Move(project, alpha.ID, "done"); err != nil {
+		t.Fatalf("move alpha done: %v", err)
+	}
+	current, _ = current.Update(keyMsg(t, "r"))
+	view := current.View()
+	if strings.Contains(view, alpha.ID) {
+		t.Fatalf("expected the done member to leave the rows, got:\n%s", view)
+	}
+	if !strings.Contains(view, "refresh-keep  (2) · 1/2 done") {
+		t.Fatalf("expected the heading progress to update, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▸ ◆ "+beta.ID) {
+		t.Fatalf("expected the selection to stay on beta by ID, got:\n%s", view)
+	}
+}
+
+func TestBatchesHideTogglesFocusedBatchAndInteropsWithDefaultCollapse(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-hide-app", "BHD", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "done-effort"); err != nil {
+		t.Fatalf("create done batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Finished member", "done", "low", nil, "", "done-effort"); err != nil {
+		t.Fatalf("create done member: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "open-effort"); err != nil {
+		t.Fatalf("create open batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Open member", "todo", "medium", nil, "", "open-effort"); err != nil {
+		t.Fatalf("create open member: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ = current.Update(keyMsg(t, "h"))
+	view := current.View()
+	if !strings.Contains(view, "▸ open-effort  (1)") || !strings.Contains(view, "h to show") {
+		t.Fatalf("expected h to collapse the focused Batch, got:\n%s", view)
+	}
+	if strings.Contains(view, "Open member") {
+		t.Fatalf("expected a collapsed Batch to skip its rows, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "h"))
+	if view := current.View(); !strings.Contains(view, "▾ open-effort  (1)") || !strings.Contains(view, "Open member") {
+		t.Fatalf("expected h to reveal the Batch again, got:\n%s", view)
+	}
+
+	// The fully-done Batch starts collapsed by default; a manual reveal both
+	// works and survives a refresh.
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "h"))
+	if view := current.View(); !strings.Contains(view, "▾ done-effort  (1) · done") || strings.Contains(view, "▸ done-effort") {
+		t.Fatalf("expected h to reveal the fully-done Batch, got:\n%s", view)
+	}
+	current, _ = current.Update(keyMsg(t, "r"))
+	if view := current.View(); !strings.Contains(view, "▾ done-effort  (1) · done") {
+		t.Fatalf("expected the manual reveal to survive a refresh, got:\n%s", view)
+	}
+}
+
+func TestBatchesEnterOpensIssueDetailAndEscReturnsInPlace(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-detail-app", "BDT", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "detail-effort"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Open me first", "todo", "medium", nil, "", "detail-effort"); err != nil {
+		t.Fatalf("create first member: %v", err)
+	}
+	second, err := st.CreateIssueInBatch(project, "Open me second", "todo", "low", nil, "", "detail-effort")
+	if err != nil {
+		t.Fatalf("create second member: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ = current.Update(keyMsg(t, "down"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	if view := current.View(); !strings.Contains(view, "ito · "+second.ID+" · Open me second") {
+		t.Fatalf("expected Enter to open the selected member's detail, got:\n%s", view)
+	}
+
+	// A detail edit re-derives the surface it returns to: p cycles low → medium.
+	current, _ = current.Update(keyMsg(t, "p"))
+	current, _ = current.Update(keyMsg(t, "esc"))
+	view := current.View()
+	if !strings.Contains(view, " ▌▾ detail-effort") || !strings.Contains(view, "WAVE 1") {
+		t.Fatalf("expected Esc to return to the Batches surface, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▸ ◆ "+second.ID) {
+		t.Fatalf("expected the edited member selected with its new priority mark, got:\n%s", view)
+	}
+	edited, err := st.FindIssue(project, second.ID)
+	if err != nil {
+		t.Fatalf("find edited member: %v", err)
+	}
+	if edited.Priority != "medium" {
+		t.Fatalf("expected the detail edit to reach the store, got priority %q", edited.Priority)
+	}
+}
+
+func TestBatchesStatusKeyRederivesWavesAndCollapsesCompletedBatch(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-edit-app", "BED", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "ship-effort"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	core, err := st.CreateIssueInBatch(project, "Ship core", "in_review", "high", nil, "", "ship-effort")
+	if err != nil {
+		t.Fatalf("create core: %v", err)
+	}
+	docs, err := st.CreateIssueInBatch(project, "Ship docs", "todo", "medium", nil, "", "ship-effort")
+	if err != nil {
+		t.Fatalf("create docs: %v", err)
+	}
+	if _, err := st.Edit(project, docs.ID, store.EditIssueOptions{
+		LinkOps: []store.LinkEditOp{{Kind: "blocked_by", Action: "add", Target: core.ID}},
+	}); err != nil {
+		t.Fatalf("block docs: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	if view := current.View(); !strings.Contains(view, "WAVE 2 · WAITING") {
+		t.Fatalf("expected the blocked member on Wave 2 before the edit, got:\n%s", view)
+	}
+
+	// s moves the selected member in_review → done; the waves re-derive on the
+	// spot: the done member leaves the rows and the blocked one becomes Wave 1.
+	current, _ = current.Update(keyMsg(t, "s"))
+	view := current.View()
+	if strings.Contains(view, "Ship core") || strings.Contains(view, "WAVE 2") {
+		t.Fatalf("expected the done member to dissolve its wave, got:\n%s", view)
+	}
+	if !strings.Contains(view, "ship-effort  (2) · 1/2 done · wave 1/1") {
+		t.Fatalf("expected the heading progress to update, got:\n%s", view)
+	}
+	if !strings.Contains(view, "WAVE 1 · READY  (1)") || !strings.Contains(view, "▸ ◆ "+docs.ID) {
+		t.Fatalf("expected the unblocked member selected on Wave 1, got:\n%s", view)
+	}
+	moved, err := st.FindIssue(project, core.ID)
+	if err != nil {
+		t.Fatalf("find core: %v", err)
+	}
+	if moved.Status != "done" {
+		t.Fatalf("expected s to move the member through the store, got %q", moved.Status)
+	}
+
+	// Walking the last member to done completes the Batch and collapses it.
+	for range 3 {
+		current, _ = current.Update(keyMsg(t, "s"))
+	}
+	if view := current.View(); !strings.Contains(view, "▸ ship-effort  (2) · done · h to show") {
+		t.Fatalf("expected the completed Batch to collapse on the spot, got:\n%s", view)
+	}
+}
+
+func TestBatchesCommandLineRunsPriorityAndLabelsOnSelectedMember(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-cmd-app", "BCM", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "cmd-effort"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	member, err := st.CreateIssueInBatch(project, "Tune me", "todo", "medium", nil, "", "cmd-effort")
 	if err != nil {
 		t.Fatalf("create member: %v", err)
 	}
 
 	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
-	for _, key := range []string{"down", "up", "h", "s", "enter", ":"} {
-		current, _ = current.Update(keyMsg(t, key))
+	current, _ = current.Update(keyMsg(t, ":"))
+	for _, r := range "priority" {
+		current, _ = current.Update(runeMsg(r))
 	}
-	view := current.View()
-	if !strings.Contains(view, "quiet-effort  (1)") || strings.Contains(view, "esc cancel") {
-		t.Fatalf("expected read-only Batches surface to stay put, got:\n%s", view)
+	current, _ = current.Update(keyMsg(t, "enter"))
+	if view := current.View(); !strings.Contains(view, "▸ ▲ "+member.ID) || strings.Contains(view, "esc cancel") {
+		t.Fatalf("expected :priority to cycle the selected member and close the bar, got:\n%s", view)
 	}
-	unchanged, err := st.FindIssue(project, member.ID)
+	cycled, err := st.FindIssue(project, member.ID)
 	if err != nil {
 		t.Fatalf("find member: %v", err)
 	}
-	if unchanged.Status != "todo" {
-		t.Fatalf("expected Batches keys to leave the store untouched, got status %q", unchanged.Status)
+	if cycled.Priority != "high" {
+		t.Fatalf("expected :priority to reach the store, got %q", cycled.Priority)
+	}
+
+	current, _ = current.Update(keyMsg(t, ":"))
+	for _, r := range "labels" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	if view := current.View(); !strings.Contains(view, "[ ] feature") {
+		t.Fatalf("expected :labels to open the picker for the selected member, got:\n%s", view)
+	}
+	current, _ = current.Update(keyMsg(t, "enter")) // toggle feature
+	current, _ = current.Update(keyMsg(t, "esc"))   // picker → detail
+	current, _ = current.Update(keyMsg(t, "esc"))   // detail → batches
+	view := current.View()
+	if !strings.Contains(view, " ▌▾ cmd-effort") || !strings.Contains(view, "feature") {
+		t.Fatalf("expected the toggled label back on the Batches row, got:\n%s", view)
+	}
+	labeled, err := st.FindIssue(project, member.ID)
+	if err != nil {
+		t.Fatalf("find labeled member: %v", err)
+	}
+	if len(labeled.Labels) != 1 || labeled.Labels[0] != "feature" {
+		t.Fatalf("expected the label toggle to reach the store, got %v", labeled.Labels)
+	}
+}
+
+func TestBatchesInlineFilterNarrowsRowsWithCounts(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-filter-app", "BFL", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "noise-effort"); err != nil {
+		t.Fatalf("create noise batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Unrelated chore", "todo", "low", nil, "", "noise-effort"); err != nil {
+		t.Fatalf("create noise member: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "signal-effort"); err != nil {
+		t.Fatalf("create signal batch: %v", err)
+	}
+	match, err := st.CreateIssueInBatch(project, "Fix parser bug", "todo", "high", []string{"bug"}, "", "signal-effort")
+	if err != nil {
+		t.Fatalf("create matching member: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Write docs page", "todo", "low", nil, "", "signal-effort"); err != nil {
+		t.Fatalf("create other member: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ = current.Update(keyMsg(t, "/"))
+	for _, r := range "bug" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	view := current.View()
+	if !strings.Contains(view, " / bug▏") || !strings.Contains(view, "1 of 3 issues · esc to clear") {
+		t.Fatalf("expected the filter input with matched/total counts, got:\n%s", view)
+	}
+	if !strings.Contains(view, match.ID+" Fix parser bug") {
+		t.Fatalf("expected the matching row to stay listed, got:\n%s", view)
+	}
+	if strings.Contains(view, "Write docs page") || strings.Contains(view, "noise-effort") {
+		t.Fatalf("expected non-matching rows and matchless Batches hidden, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "esc"))
+	restored := current.View()
+	if !strings.Contains(restored, "Write docs page") || !strings.Contains(restored, "noise-effort") {
+		t.Fatalf("expected Esc to leave the filter and restore the rows, got:\n%s", restored)
+	}
+	if !strings.Contains(restored, "tab focus   ↑↓ select") {
+		t.Fatalf("expected Esc to restore the shortcut bar, got:\n%s", restored)
 	}
 }

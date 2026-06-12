@@ -85,6 +85,7 @@ type model struct {
 	project       store.Project
 	sections      []digestSection
 	batchSections []batchSection
+	batchFocus    int
 	focusIndex    int
 	mode          viewMode
 	returnMode    viewMode
@@ -182,33 +183,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.reloadBatches()
 			}
 		case "/":
-			if m.mode == viewDigest || m.mode == viewBoard {
+			if m.isSurfaceMode() {
 				m.filterOpen = true
 			}
 		case ":":
-			// The Batches surface stays read-only in this slice: its focus model
-			// arrives next, so : (acting on the Digest selection) would mutate an
-			// Issue this surface doesn't show.
-			if m.mode != viewLabels && m.mode != viewBatches {
+			if m.mode != viewLabels {
 				m.commandOpen = true
 			}
 		case "enter":
 			switch m.mode {
-			case viewDigest, viewBoard:
+			case viewDigest, viewBoard, viewBatches:
 				m.openSelectedIssue()
 			case viewLabels:
 				m.toggleFocusedLabel()
 			}
 		case "tab":
-			if m.mode == viewDigest || m.mode == viewBoard {
+			switch m.mode {
+			case viewDigest, viewBoard:
 				m.moveFocus(1)
+			case viewBatches:
+				m.moveBatchFocus(1)
 			}
 		case "h":
-			if m.mode == viewDigest {
+			switch m.mode {
+			case viewDigest:
 				m.toggleFocusedSection()
+			case viewBatches:
+				m.toggleFocusedBatch()
 			}
 		case "s":
-			if m.mode != viewLabels && m.mode != viewBatches {
+			if m.mode != viewLabels {
 				m.moveSelectedIssueStatus()
 			}
 		case "r":
@@ -228,8 +232,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openLabelPicker()
 			}
 		case "shift+tab":
-			if m.mode == viewDigest || m.mode == viewBoard {
+			switch m.mode {
+			case viewDigest, viewBoard:
 				m.moveFocus(-1)
+			case viewBatches:
+				m.moveBatchFocus(-1)
 			}
 		case "up":
 			switch m.mode {
@@ -237,7 +244,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveDetailIssue(-1)
 			case viewLabels:
 				m.moveLabelCursor(-1)
-			case viewBatches: // selection arrives in the next slice
+			case viewBatches:
+				m.moveBatchSelection(-1)
 			default:
 				m.moveSelection(-1)
 			}
@@ -247,7 +255,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveDetailIssue(1)
 			case viewLabels:
 				m.moveLabelCursor(1)
-			case viewBatches: // selection arrives in the next slice
+			case viewBatches:
+				m.moveBatchSelection(1)
 			default:
 				m.moveSelection(1)
 			}
@@ -656,7 +665,7 @@ func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
 	m.commandOpen = false
 	m.commandQuery = ""
 	// The : command line never opens in viewLabels, so these actions always run
-	// against the Digest or the Issue detail.
+	// against a surface selection (Digest, Board or Batches) or the Issue detail.
 	switch actions[0].Name {
 	case "status":
 		m.moveSelectedIssueStatus()
@@ -667,7 +676,11 @@ func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
 	case "switch project":
 		m.openProjectPicker()
 	case "refresh":
-		m.reloadDigest()
+		if m.mode == viewBatches {
+			m.reloadBatches()
+		} else {
+			m.reloadDigest()
+		}
 	case "quit":
 		return m, tea.Quit
 	}
@@ -722,6 +735,8 @@ func (m *model) switchToSelectedProject() {
 	}
 	m.project = m.projects[m.projectCursor]
 	m.sections = nil
+	m.batchSections = nil
+	m.batchFocus = 0
 	m.focusIndex = 0
 	m.detailIssue = store.Issue{}
 	m.linkTitles = map[string]string{}
@@ -1067,7 +1082,7 @@ func (m *model) openLabelPicker() {
 	if !ok {
 		return
 	}
-	if m.mode == viewDigest || m.mode == viewBoard {
+	if m.isSurfaceMode() {
 		m.returnMode = m.mode
 	}
 	if m.detailIssue.ID != issue.ID {
@@ -1114,10 +1129,16 @@ func (m *model) toggleFocusedLabel() {
 
 // reloadAfterEdit refreshes the Digest from the store and keeps the edited
 // Issue focused, re-rendering whichever detail surface is open so the change
-// shows immediately.
+// shows immediately. When the Batches surface is active (or the open detail
+// returns to it), the waves re-derive too — a member moved to done leaves its
+// rows on the spot.
 func (m *model) reloadAfterEdit(edited store.Issue) {
 	m.reloadDigest()
 	m.focusIssue(edited.ID)
+	if m.mode == viewBatches || m.returnMode == viewBatches {
+		m.reloadBatches()
+		m.focusBatchIssue(edited.ID)
+	}
 	switch m.mode {
 	case viewIssue:
 		m.showIssue(edited)
@@ -1135,27 +1156,33 @@ func (m *model) openSelectedIssue() {
 }
 
 // showIssue opens the read-only detail for an Issue already loaded in the
-// Digest sections, so opening and prev/next navigation never re-read the store
-// for data the sections already hold.
+// originating surface, so opening and prev/next navigation never re-read the
+// store for data the sections already hold.
 func (m *model) showIssue(issue store.Issue) {
-	if m.mode == viewDigest || m.mode == viewBoard {
+	if m.isSurfaceMode() {
 		m.returnMode = m.mode
 	}
 	m.detailIssue = issue
 	m.detailScroll = 0
 	m.linkTitles = m.loadLinkTitles(issue)
 	m.focusIssue(issue.ID)
+	if m.returnMode == viewBatches {
+		m.focusBatchIssue(issue.ID)
+	}
 	m.mode = viewIssue
 }
 
 func (m model) detailReturnMode() viewMode {
-	if m.returnMode == viewBoard {
-		return viewBoard
+	if m.returnMode == viewBoard || m.returnMode == viewBatches {
+		return m.returnMode
 	}
 	return viewDigest
 }
 
 func (m model) selectedIssue() (store.Issue, bool) {
+	if m.mode == viewBatches {
+		return m.selectedBatchIssue()
+	}
 	if len(m.sections) == 0 || m.focusIndex < 0 || m.focusIndex >= len(m.sections) {
 		return store.Issue{}, false
 	}
@@ -1199,8 +1226,19 @@ func (m *model) moveDetailIssue(delta int) {
 
 // allIssues lists the Issues prev/next navigation walks: the sections as the
 // originating view shows them — the Board displays hidden sections, so a detail
-// opened from it navigates across them too.
+// opened from it navigates across them too, and a detail opened from the
+// Batches surface walks that surface's listed rows (collapsed Batches skipped).
 func (m model) allIssues() []store.Issue {
+	if m.detailReturnMode() == viewBatches {
+		var issues []store.Issue
+		for _, section := range m.batchSections {
+			if section.collapsed {
+				continue
+			}
+			issues = append(issues, batchIssues(section)...)
+		}
+		return issues
+	}
 	includeHidden := m.detailReturnMode() == viewBoard
 	var issues []store.Issue
 	for _, section := range m.sections {
