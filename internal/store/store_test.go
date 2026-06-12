@@ -1,11 +1,129 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"slices"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
+
+func TestMigrateFreshDatabaseReachesBatchSchemaVersion(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	assertSchemaVersion(t, db, 2)
+	assertColumnExists(t, db, "issues", "batch_id")
+	if _, err := db.Exec(`INSERT INTO batches(project_id, name, created) VALUES (1, 'orphan', '2026-06-12T10:00:00Z')`); err == nil {
+		t.Fatal("expected foreign key to reject a Batch without a Project")
+	}
+}
+
+func TestMigrateUpgradesExistingV1DatabaseInPlace(t *testing.T) {
+	home := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(home, "ito.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version(version) VALUES (1);
+CREATE TABLE projects (
+  id        INTEGER PRIMARY KEY,
+  name      TEXT UNIQUE NOT NULL,
+  root_path TEXT UNIQUE,
+  prefix    TEXT UNIQUE NOT NULL,
+  last_id   INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE issues (
+  row_id     INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id),
+  id         TEXT NOT NULL,
+  title      TEXT NOT NULL,
+  status     TEXT NOT NULL,
+  priority   TEXT NOT NULL,
+  body       TEXT NOT NULL DEFAULT '',
+  created    TEXT NOT NULL,
+  updated    TEXT NOT NULL,
+  UNIQUE (project_id, id)
+);
+CREATE VIRTUAL TABLE issues_fts USING fts5(
+  title,
+  body,
+  content='issues',
+  content_rowid='row_id',
+  tokenize='unicode61',
+  prefix='2 3 4'
+);
+CREATE TABLE issue_links (
+  project_id INTEGER NOT NULL,
+  source_id  TEXT NOT NULL,
+  target_id  TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  PRIMARY KEY (project_id, source_id, target_id, kind),
+  FOREIGN KEY (project_id, source_id) REFERENCES issues(project_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (project_id, target_id) REFERENCES issues(project_id, id) ON DELETE CASCADE,
+  CHECK (source_id != target_id)
+);
+CREATE TABLE issue_labels (
+  project_id INTEGER NOT NULL,
+  issue_id   TEXT NOT NULL,
+  label      TEXT NOT NULL,
+  PRIMARY KEY (project_id, issue_id, label),
+  FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, id) ON DELETE CASCADE
+);
+INSERT INTO projects(id, name, root_path, prefix, last_id) VALUES (1, 'legacy-app', '/tmp/legacy-app', 'LEG', 1);
+INSERT INTO issues(project_id, id, title, status, priority, body, created, updated)
+VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '2026-06-12T10:00:00Z');
+`); err != nil {
+		t.Fatalf("seed v1 database: %v", err)
+	}
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate v1 database: %v", err)
+	}
+
+	assertSchemaVersion(t, db, 2)
+	assertColumnExists(t, db, "issues", "batch_id")
+	var title string
+	if err := db.QueryRow(`SELECT title FROM issues WHERE id = 'LEG-1'`).Scan(&title); err != nil {
+		t.Fatalf("legacy issue was not preserved: %v", err)
+	}
+	if title != "Legacy issue" {
+		t.Fatalf("expected legacy issue title to survive, got %q", title)
+	}
+	if _, err := db.Exec(`INSERT INTO batches(project_id, name, created) VALUES (1, 'refactor', '2026-06-12T11:00:00Z')`); err != nil {
+		t.Fatalf("insert batch after migration: %v", err)
+	}
+}
+
+func assertSchemaVersion(t *testing.T, db *sql.DB, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow(`SELECT version FROM schema_version`).Scan(&got); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if got != want {
+		t.Fatalf("expected schema version %d, got %d", want, got)
+	}
+}
+
+func assertColumnExists(t *testing.T, db *sql.DB, table, column string) {
+	t.Helper()
+	found, err := columnExists(db, table, column)
+	if err != nil {
+		t.Fatalf("read columns for %s: %v", table, err)
+	}
+	if !found {
+		t.Fatalf("expected %s.%s to exist", table, column)
+	}
+}
 
 func TestResolveProjectReturnsDetachedErrorWithProjectName(t *testing.T) {
 	db, err := Open(t.TempDir())

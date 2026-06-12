@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	itostore "github.com/c3h/ito/internal/store"
 	"github.com/c3h/ito/internal/tui"
@@ -189,6 +190,22 @@ type cliError struct {
 
 type issue = itostore.Issue
 
+type batch = itostore.Batch
+
+type createdBatch struct {
+	Name    string `json:"name"`
+	Project string `json:"project"`
+	Created string `json:"created"`
+}
+
+type batchListItem struct {
+	Name    string `json:"name"`
+	Project string `json:"project"`
+	Created string `json:"created"`
+	Total   int    `json:"total"`
+	Done    int    `json:"done"`
+}
+
 type issueListItem struct {
 	ID        string   `json:"id"`
 	Project   string   `json:"project"`
@@ -309,6 +326,8 @@ func runCLI(args []string) int {
 		return runShow(args[1:])
 	case "list":
 		return runList(args[1:])
+	case "batch":
+		return runBatch(args[1:])
 	case "move":
 		return runMove(args[1:])
 	case "edit":
@@ -320,6 +339,99 @@ func runCLI(args []string) int {
 	default:
 		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0]+".", "Run 'ito --help' to see available commands.")
 	}
+}
+
+func runBatch(args []string) int {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		printCommandHelp("batch")
+		return 0
+	}
+	switch args[0] {
+	case "new":
+		return runBatchNew(args[1:])
+	case "list":
+		return runBatchList(args[1:])
+	default:
+		return fail(wantsJSON(args[1:], nil), exitBadUsage, "unknown batch command: "+args[0]+".", "Run 'ito batch --help' to see available commands.")
+	}
+}
+
+func runBatchNew(args []string) int {
+	if wantsHelp(args, commandValueFlags("batch new")) {
+		printCommandHelp("batch new")
+		return 0
+	}
+	fs := flag.NewFlagSet("batch new", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, commandValueFlags("batch new")), exitBadUsage, err.Error(), "run 'ito batch new --help' to see the accepted flags.")
+	}
+	if len(positionals) != 1 {
+		return fail(jsonMode, exitBadUsage, "ito batch new takes exactly one name.", "use: ito batch new <name>.")
+	}
+	name := positionals[0]
+	if !itostore.ProjectNamePattern.MatchString(name) {
+		return failInvalidBatchName(jsonMode, name)
+	}
+
+	db, st, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+
+	p, code, message, hint := resolveProject(st, projectName)
+	if code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+	created, err := st.CreateBatch(p, name)
+	if err != nil {
+		if errors.Is(err, itostore.ErrBatchExists) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("a batch named %q already exists in Project %q.", name, p.Name), "choose another Batch name.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not create the Batch: %v", err), "try again or inspect the central store.")
+	}
+	return printCreatedBatch(created, jsonMode)
+}
+
+func runBatchList(args []string) int {
+	if wantsHelp(args, commandValueFlags("batch list")) {
+		printCommandHelp("batch list")
+		return 0
+	}
+	fs := flag.NewFlagSet("batch list", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	if err := fs.Parse(args); err != nil {
+		return fail(wantsJSON(args, commandValueFlags("batch list")), exitBadUsage, err.Error(), "run 'ito batch list --help' to see the accepted flags.")
+	}
+	if fs.NArg() != 0 {
+		return fail(jsonMode, exitBadUsage, "ito batch list takes no positional arguments.", "use flags like --project or --json.")
+	}
+
+	db, st, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+
+	p, code, message, hint := resolveProject(st, projectName)
+	if code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+	batches, err := st.ListBatches(p)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not list Batches: %v", err), "try again or inspect the central store.")
+	}
+	return printBatchList(batches, jsonMode)
 }
 
 func runInit(args []string) int {
@@ -1057,6 +1169,10 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "list":
 		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "search": {}, "label": {}}
+	case "batch new":
+		return map[string]struct{}{"project": {}}
+	case "batch list":
+		return map[string]struct{}{"project": {}}
 	case "move":
 		return map[string]struct{}{"project": {}}
 	case "edit":
@@ -1146,6 +1262,7 @@ Commands:
   init     Registers or re-points the Project for the current directory.
   new      Creates an Issue in the current Project.
   list     Lists Issues.
+  batch    Manages Batches in the current Project.
   show     Shows an Issue by full ID.
   move     Moves an Issue to another status.
   edit     Edits an Issue's fields, Labels and Links.
@@ -1214,6 +1331,32 @@ Flags:
   --all-projects           Lists all Projects.
   --json                   Prints JSON.
 `, statusList, priorityList)
+	case "batch":
+		fmt.Println(`usage: ito batch <command> [flags]
+
+Manages Batches in the current Project.
+
+Commands:
+  new      Creates a Batch.
+  list     Lists Batches newest-first.
+
+Use "ito batch <command> --help" to see the command's flags.`)
+	case "batch new":
+		fmt.Println(`usage: ito batch new [--project <name>] [--json] <name>
+
+Creates a Batch in the current Project. The name uses the Project-name format.
+
+Flags:
+  --project <name>     Explicit Project.
+  --json               Prints JSON.`)
+	case "batch list":
+		fmt.Println(`usage: ito batch list [--project <name>] [--json]
+
+Lists Batches newest-first with created date and done/total progress.
+
+Flags:
+  --project <name>     Explicit Project.
+  --json               Prints JSON.`)
 	case "move":
 		fmt.Println(`usage: ito move [--project <name>] [--json] <PREFIX>-<n> <status>
 
@@ -1268,6 +1411,10 @@ func failInvalidProjectName(jsonMode bool, name string) int {
 	return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid project name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 }
 
+func failInvalidBatchName(jsonMode bool, name string) int {
+	return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid batch name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
+}
+
 func fail(jsonMode bool, code int, message string, hint string) int {
 	if jsonMode {
 		encoded, err := json.Marshal(cliError{Error: message, Code: code, Hint: hint})
@@ -1314,6 +1461,46 @@ func printIssue(i issue, jsonMode bool) int {
 	}
 	fmt.Println(i.ID)
 	return 0
+}
+
+func printCreatedBatch(b batch, jsonMode bool) int {
+	if jsonMode {
+		return printJSON(createdBatch{Name: b.Name, Project: b.Project, Created: b.Created}, "Batch")
+	}
+	fmt.Println(b.Name)
+	return 0
+}
+
+func printBatchList(batches []batch, jsonMode bool) int {
+	if jsonMode {
+		items := make([]batchListItem, 0, len(batches))
+		for _, b := range batches {
+			items = append(items, batchListItem{
+				Name:    b.Name,
+				Project: b.Project,
+				Created: b.Created,
+				Total:   b.Total,
+				Done:    b.Done,
+			})
+		}
+		return printJSON(items, "Batch list")
+	}
+	if len(batches) == 0 {
+		fmt.Println("no batches. create one with 'ito batch new <name>'.")
+		return 0
+	}
+	for _, b := range batches {
+		fmt.Printf("%s %s %d/%d\n", b.Name, batchCreatedDate(b.Created), b.Done, b.Total)
+	}
+	return 0
+}
+
+func batchCreatedDate(created string) string {
+	parsed, err := time.Parse(time.RFC3339, created)
+	if err != nil {
+		return created
+	}
+	return parsed.UTC().Format("2006-01-02")
 }
 
 func printIssueDetail(i issue, jsonMode bool) int {

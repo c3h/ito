@@ -38,6 +38,14 @@ type issueJSON struct {
 	Updated   string   `json:"updated"`
 }
 
+type batchJSON struct {
+	Name    string `json:"name"`
+	Project string `json:"project"`
+	Created string `json:"created"`
+	Total   int    `json:"total"`
+	Done    int    `json:"done"`
+}
+
 func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 	repo := t.TempDir()
 	itoHome := t.TempDir()
@@ -50,7 +58,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "root long help",
 			args:     []string{"--help"},
-			contains: []string{"usage: ito <command> [flags]", "Commands:", "init", "new", "list"},
+			contains: []string{"usage: ito <command> [flags]", "Commands:", "init", "new", "list", "batch"},
 		},
 		{
 			name:     "root short help",
@@ -71,6 +79,21 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 			name:     "list help",
 			args:     []string{"list", "--help"},
 			contains: []string{"usage: ito list", "--ready", "one git worktree per ready Issue"},
+		},
+		{
+			name:     "batch help",
+			args:     []string{"batch", "--help"},
+			contains: []string{"usage: ito batch <command>", "new", "list"},
+		},
+		{
+			name:     "batch new help",
+			args:     []string{"batch", "new", "--help"},
+			contains: []string{"usage: ito batch new", "--project", "--json"},
+		},
+		{
+			name:     "batch list help",
+			args:     []string{"batch", "list", "--help"},
+			contains: []string{"usage: ito batch list", "--project", "--json"},
 		},
 		{
 			name:     "edit help",
@@ -816,6 +839,185 @@ func TestListEmptyResultsSucceed(t *testing.T) {
 	human := runITO(t, repo, itoHome, "list", "--label", "bug")
 	if human.exitCode != 0 || !strings.Contains(human.stdout, "no Issues found") || human.stderr != "" {
 		t.Fatalf("expected human empty success, got exit=%d stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+}
+
+func TestBatchNewCreatesBatchAndRejectsInvalidOrDuplicateNames(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "batch-app", "--prefix", "BAT"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	created := runITO(t, repo, itoHome, "batch", "new", "refactor", "--json")
+	if created.exitCode != 0 {
+		t.Fatalf("ito batch new failed with exit %d\nstdout: %s\nstderr: %s", created.exitCode, created.stdout, created.stderr)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(created.stdout), &raw); err != nil {
+		t.Fatalf("stdout is not a JSON object: %v\nstdout: %s", err, created.stdout)
+	}
+	for _, key := range []string{"name", "project", "created"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("batch new JSON missing key %q in %s", key, created.stdout)
+		}
+	}
+	if len(raw) != 3 {
+		t.Fatalf("batch new JSON must contain only name, project and created, got %s", created.stdout)
+	}
+	var batch batchJSON
+	if err := json.Unmarshal([]byte(created.stdout), &batch); err != nil {
+		t.Fatalf("stdout is not a Batch JSON object: %v\nstdout: %s", err, created.stdout)
+	}
+	if batch.Name != "refactor" || batch.Project != "batch-app" {
+		t.Fatalf("unexpected batch identity: %#v", batch)
+	}
+	createdAt, err := time.Parse(time.RFC3339, batch.Created)
+	if err != nil {
+		t.Fatalf("created timestamp must be RFC3339, got %q: %v", batch.Created, err)
+	}
+	if createdAt.Location() != time.UTC {
+		t.Fatalf("created timestamp must be UTC, got %q", batch.Created)
+	}
+
+	human := runITO(t, repo, itoHome, "batch", "new", "cleanup")
+	if human.exitCode != 0 || human.stdout != "cleanup\n" || human.stderr != "" {
+		t.Fatalf("expected human batch new to print only the name, got exit=%d stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+
+	duplicate := runITO(t, repo, itoHome, "batch", "new", "refactor", "--json")
+	if duplicate.exitCode != exitBadUsage || duplicate.stdout != "" {
+		t.Fatalf("duplicate batch must fail with exit 2 and no stdout, got exit=%d stdout=%q stderr=%q", duplicate.exitCode, duplicate.stdout, duplicate.stderr)
+	}
+	envelope := decodeErrorEnvelope(t, duplicate.stderr)
+	if envelope.Code != exitBadUsage || !strings.Contains(envelope.Error, "already exists") || envelope.Hint == "" {
+		t.Fatalf("expected actionable duplicate error, got %#v", envelope)
+	}
+
+	invalid := runITO(t, repo, itoHome, "batch", "new", "Bad_Name", "--json")
+	if invalid.exitCode != exitBadUsage || invalid.stdout != "" {
+		t.Fatalf("invalid batch name must fail with exit 2 and no stdout, got exit=%d stdout=%q stderr=%q", invalid.exitCode, invalid.stdout, invalid.stderr)
+	}
+	envelope = decodeErrorEnvelope(t, invalid.stderr)
+	if envelope.Code != exitBadUsage || !strings.Contains(envelope.Error, "invalid batch name") || envelope.Hint == "" {
+		t.Fatalf("expected actionable invalid-name error, got %#v", envelope)
+	}
+}
+
+func TestBatchNamesAreProjectScopedAndListNewestFirst(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "first")
+	secondRepo := filepath.Join(parent, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "batch-alpha", "--prefix", "BAA"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "batch-beta", "--prefix", "BAB"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, fixture := range []struct {
+		repo string
+		name string
+	}{
+		{firstRepo, "refactor"},
+		{secondRepo, "refactor"},
+		{firstRepo, "cleanup"},
+	} {
+		if result := runITO(t, fixture.repo, itoHome, "batch", "new", fixture.name, "--json"); result.exitCode != 0 {
+			t.Fatalf("ito batch new %s failed with exit %d\nstdout: %s\nstderr: %s", fixture.name, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`
+UPDATE batches SET created = '2026-06-12T10:00:00Z' WHERE name = 'refactor' AND project_id = (SELECT id FROM projects WHERE name = 'batch-alpha');
+UPDATE batches SET created = '2026-06-12T12:00:00Z' WHERE name = 'cleanup' AND project_id = (SELECT id FROM projects WHERE name = 'batch-alpha');
+UPDATE batches SET created = '2026-06-12T11:00:00Z' WHERE name = 'refactor' AND project_id = (SELECT id FROM projects WHERE name = 'batch-beta');
+`); err != nil {
+		t.Fatal(err)
+	}
+
+	listed := runITO(t, firstRepo, itoHome, "batch", "list", "--json")
+	if listed.exitCode != 0 {
+		t.Fatalf("ito batch list failed with exit %d\nstdout: %s\nstderr: %s", listed.exitCode, listed.stdout, listed.stderr)
+	}
+	batches := decodeBatchList(t, listed.stdout)
+	if got := batchNames(batches); !stringSlicesEqual(got, []string{"cleanup", "refactor"}) {
+		t.Fatalf("expected newest-first alpha batches [cleanup refactor], got %v\nstdout: %s", got, listed.stdout)
+	}
+	for _, batch := range batches {
+		if batch.Project != "batch-alpha" || batch.Total != 0 || batch.Done != 0 {
+			t.Fatalf("expected alpha batch with 0/0 progress, got %#v", batch)
+		}
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(listed.stdout), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"name", "project", "created", "total", "done"} {
+		if _, ok := raw[0][key]; !ok {
+			t.Fatalf("batch list JSON missing key %q in %s", key, listed.stdout)
+		}
+	}
+
+	human := runITO(t, firstRepo, itoHome, "batch", "list")
+	if human.exitCode != 0 || human.stderr != "" {
+		t.Fatalf("ito batch list human failed with exit %d\nstdout: %s\nstderr: %s", human.exitCode, human.stdout, human.stderr)
+	}
+	if !strings.Contains(human.stdout, "cleanup 2026-06-12 0/0") || !strings.Contains(human.stdout, "refactor 2026-06-12 0/0") {
+		t.Fatalf("human batch list must show date and progress, got %q", human.stdout)
+	}
+	if strings.Index(human.stdout, "cleanup") > strings.Index(human.stdout, "refactor") {
+		t.Fatalf("human batch list must be newest-first, got %q", human.stdout)
+	}
+
+	explicit := runITO(t, t.TempDir(), itoHome, "batch", "list", "--project", "batch-beta", "--json")
+	if explicit.exitCode != 0 {
+		t.Fatalf("ito batch list --project failed with exit %d\nstdout: %s\nstderr: %s", explicit.exitCode, explicit.stdout, explicit.stderr)
+	}
+	if got := batchNames(decodeBatchList(t, explicit.stdout)); !stringSlicesEqual(got, []string{"refactor"}) {
+		t.Fatalf("expected beta to own its own refactor batch, got %v", got)
+	}
+}
+
+func TestBatchListEmptyAndUnregisteredCwd(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "empty-batches", "--prefix", "EBT"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	jsonResult := runITO(t, repo, itoHome, "batch", "list", "--json")
+	if jsonResult.exitCode != 0 || strings.TrimSpace(jsonResult.stdout) != "[]" || jsonResult.stderr != "" {
+		t.Fatalf("expected JSON empty success, got exit=%d stdout=%q stderr=%q", jsonResult.exitCode, jsonResult.stdout, jsonResult.stderr)
+	}
+	human := runITO(t, repo, itoHome, "batch", "list")
+	if human.exitCode != 0 || !strings.Contains(human.stdout, "no batches. create one with 'ito batch new <name>'.") || human.stderr != "" {
+		t.Fatalf("expected human empty success, got exit=%d stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+
+	unregisteredNew := runITO(t, t.TempDir(), itoHome, "batch", "new", "refactor", "--json")
+	if unregisteredNew.exitCode != exitNotRegistered || unregisteredNew.stdout != "" {
+		t.Fatalf("batch new outside a Project must fail with exit 4, got exit=%d stdout=%q stderr=%q", unregisteredNew.exitCode, unregisteredNew.stdout, unregisteredNew.stderr)
+	}
+	envelope := decodeErrorEnvelope(t, unregisteredNew.stderr)
+	if envelope.Code != exitNotRegistered || !strings.Contains(envelope.Hint, "ito init") {
+		t.Fatalf("expected init hint outside a Project, got %#v", envelope)
+	}
+
+	unregisteredList := runITO(t, t.TempDir(), itoHome, "batch", "list", "--json")
+	if unregisteredList.exitCode != exitNotRegistered || unregisteredList.stdout != "" {
+		t.Fatalf("batch list outside a Project must fail with exit 4, got exit=%d stdout=%q stderr=%q", unregisteredList.exitCode, unregisteredList.stdout, unregisteredList.stderr)
 	}
 }
 
@@ -3099,12 +3301,29 @@ func decodeIssueList(t *testing.T, stdout string) []issueJSON {
 	return issues
 }
 
+func decodeBatchList(t *testing.T, stdout string) []batchJSON {
+	t.Helper()
+	var batches []batchJSON
+	if err := json.Unmarshal([]byte(stdout), &batches); err != nil {
+		t.Fatalf("stdout is not a JSON Batch array: %v\nstdout: %s", err, stdout)
+	}
+	return batches
+}
+
 func issueIDs(issues []issueJSON) []string {
 	ids := make([]string, 0, len(issues))
 	for _, issue := range issues {
 		ids = append(ids, issue.ID)
 	}
 	return ids
+}
+
+func batchNames(batches []batchJSON) []string {
+	names := make([]string, 0, len(batches))
+	for _, batch := range batches {
+		names = append(names, batch.Name)
+	}
+	return names
 }
 
 func findIssueJSON(issues []issueJSON, id string) (issueJSON, bool) {

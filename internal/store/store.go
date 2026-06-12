@@ -69,6 +69,7 @@ var (
 	ErrCrossProject  = errors.New("cross-project link")
 	ErrNameExists    = errors.New("project name already exists")
 	ErrPrefixExists  = errors.New("project prefix already exists")
+	ErrBatchExists   = errors.New("batch name already exists")
 )
 
 // LinkTargetNotFoundError distinguishes a missing link *target* from a missing
@@ -131,6 +132,14 @@ type Issue struct {
 	Body      string   `json:"body"`
 	Created   string   `json:"created"`
 	Updated   string   `json:"updated"`
+}
+
+type Batch struct {
+	Name    string `json:"name"`
+	Project string `json:"project"`
+	Created string `json:"created"`
+	Total   int    `json:"total"`
+	Done    int    `json:"done"`
 }
 
 type ListOptions struct {
@@ -301,6 +310,14 @@ func (s *Store) CreateIssue(p Project, title, status, priority string, labels []
 	return insertIssue(s.db, p, title, status, priority, labels, body)
 }
 
+func (s *Store) CreateBatch(p Project, name string) (Batch, error) {
+	return insertBatch(s.db, p, name)
+}
+
+func (s *Store) ListBatches(p Project) ([]Batch, error) {
+	return listBatches(s.db, p)
+}
+
 func (s *Store) FindIssue(p Project, id string) (Issue, error) {
 	found, ok, err := findIssueByID(s.db, p, id)
 	if err != nil {
@@ -404,9 +421,61 @@ func OpenDefault() (*sql.DB, error) {
 }
 
 func Migrate(db *sql.DB) error {
-	_, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+		return err
+	}
+	version, err := currentSchemaVersion(db)
+	if err != nil {
+		return err
+	}
+	migrations := []struct {
+		version int
+		apply   func(*sql.Tx) error
+	}{
+		{version: 1, apply: migrateV1},
+		{version: 2, apply: migrateV2},
+	}
+	for _, migration := range migrations {
+		if version >= migration.version {
+			continue
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if err := migration.apply(tx); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM schema_version`); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO schema_version(version) VALUES (?)`, migration.version); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = migration.version
+	}
+	return nil
+}
 
+func currentSchemaVersion(db *sql.DB) (int, error) {
+	var version sql.NullInt64
+	if err := db.QueryRow(`SELECT max(version) FROM schema_version`).Scan(&version); err != nil {
+		return 0, err
+	}
+	if !version.Valid {
+		return 0, nil
+	}
+	return int(version.Int64), nil
+}
+
+func migrateV1(tx *sql.Tx) error {
+	_, err := tx.Exec(`
 CREATE TABLE IF NOT EXISTS projects (
   id        INTEGER PRIMARY KEY,
   name      TEXT UNIQUE NOT NULL,
@@ -456,12 +525,56 @@ CREATE TABLE IF NOT EXISTS issue_labels (
   FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, id) ON DELETE CASCADE
 );
 `)
+	return err
+}
+
+func migrateV2(tx *sql.Tx) error {
+	if _, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS batches (
+  id         INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  created    TEXT NOT NULL,
+  UNIQUE (project_id, name)
+);
+`); err != nil {
+		return err
+	}
+	hasBatchID, err := columnExists(tx, "issues", "batch_id")
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO schema_version(version)
-SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version)`)
-	return err
+	if !hasBatchID {
+		if _, err := tx.Exec(`ALTER TABLE issues ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func columnExists(q rowQuerier, table, column string) (bool, error) {
+	rows, err := q.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // CanonicalPath resolves a path to its absolute, symlink-free form, falling
@@ -737,6 +850,58 @@ func insertProjectWithGeneratedPrefix(db *sql.DB, name, baseInput, rootPath stri
 		return Project{}, err
 	}
 	return Project{ID: id, Name: name, Prefix: prefix, RootPath: &rootPath}, nil
+}
+
+func insertBatch(db *sql.DB, p Project, name string) (Batch, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return Batch{}, err
+	}
+	defer tx.Rollback()
+
+	if exists, err := valueExists(tx, `SELECT 1 FROM batches WHERE project_id = ? AND name = ?`, p.ID, name); err != nil {
+		return Batch{}, err
+	} else if exists {
+		return Batch{}, ErrBatchExists
+	}
+	created := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(`INSERT INTO batches(project_id, name, created) VALUES (?, ?, ?)`, p.ID, name, created); err != nil {
+		return Batch{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Batch{}, err
+	}
+	return Batch{Name: name, Project: p.Name, Created: created, Total: 0, Done: 0}, nil
+}
+
+func listBatches(db *sql.DB, p Project) ([]Batch, error) {
+	rows, err := db.Query(`
+SELECT batches.name, projects.name, batches.created,
+       count(issues.row_id) AS total,
+       count(CASE WHEN issues.status = 'done' THEN 1 END) AS done
+FROM batches
+JOIN projects ON projects.id = batches.project_id
+LEFT JOIN issues ON issues.batch_id = batches.id
+WHERE batches.project_id = ?
+GROUP BY batches.id, batches.name, projects.name, batches.created
+ORDER BY batches.created DESC, batches.id DESC`, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	batches := []Batch{}
+	for rows.Next() {
+		var batch Batch
+		if err := rows.Scan(&batch.Name, &batch.Project, &batch.Created, &batch.Total, &batch.Done); err != nil {
+			return nil, err
+		}
+		batches = append(batches, batch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return batches, nil
 }
 
 func updateProjectRoot(db *sql.DB, p Project) (Project, error) {
