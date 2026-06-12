@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/c3h/ito/internal/store"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
@@ -38,7 +38,10 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 		t.Fatalf("create blocked issue: %v", err)
 	}
 	if _, err := st.Edit(project, blocked.ID, store.EditIssueOptions{
-		LinkOps: []store.LinkEditOp{{Kind: "blocked_by", Action: "add", Target: blocker.ID}},
+		LinkOps: []store.LinkEditOp{
+			{Kind: "blocked_by", Action: "add", Target: blocker.ID},
+			{Kind: "conflicts_with", Action: "add", Target: blocker.ID},
+		},
 	}); err != nil {
 		t.Fatalf("block issue: %v", err)
 	}
@@ -71,11 +74,30 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 			t.Fatalf("expected Digest to contain %q, got %q", want, view)
 		}
 	}
+	if strings.Count(view, "⊘ DIG-2") < 2 {
+		t.Fatalf("expected Digest row to show blocked and conflict markers, got:\n%s", view)
+	}
 	if strings.Contains(view, "DIG-5 Done still appears") {
 		t.Fatalf("Digest should start with done collapsed, got:\n%s", view)
 	}
 	if strings.Contains(view, "Other project issue") {
 		t.Fatalf("Digest included an Issue from another Project:\n%s", view)
+	}
+}
+
+func TestBoardIssueRowShowsBlockedAndConflictMarkers(t *testing.T) {
+	row := renderBoardIssue(store.Issue{
+		ID:            "BRD-1",
+		Title:         "Render Board markers",
+		Priority:      "medium",
+		BlockedBy:     []string{"BRD-2"},
+		ConflictsWith: []string{"BRD-3"},
+	}, false, 64)
+
+	for _, want := range []string{"BRD-1", "⊘ BRD-2", "⊘ BRD-3"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("expected Board row to contain %q, got %q", want, row)
+		}
 	}
 }
 
@@ -1248,6 +1270,10 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create related issue: %v", err)
 	}
+	conflicting, err := st.CreateIssue(project, "Avoid parallel Board work", "backlog", "high", []string{"tests"}, "conflict body")
+	if err != nil {
+		t.Fatalf("create conflicting issue: %v", err)
+	}
 	target, err := st.CreateIssue(project, "Read-only detail view with a title long enough to truncate in the header", "todo", "urgent", []string{"feature", "docs"}, "## Context\nShow the full markdown body.\n\n## Acceptance\n- read-only")
 	if err != nil {
 		t.Fatalf("create target issue: %v", err)
@@ -1256,6 +1282,7 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 		LinkOps: []store.LinkEditOp{
 			{Kind: "blocked_by", Action: "add", Target: blocker.ID},
 			{Kind: "relates_to", Action: "add", Target: related.ID},
+			{Kind: "conflicts_with", Action: "add", Target: conflicting.ID},
 		},
 	}); err != nil {
 		t.Fatalf("link target issue: %v", err)
@@ -1270,6 +1297,7 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 		"todo   ·   urgent   ·   docs  feature",
 		"blocked by   " + blocker.ID + "   Extract store read path",
 		"relates to   " + related.ID + "   Render the Board later",
+		"conflicts with   " + conflicting.ID + "   Avoid parallel Board work",
 		"created      ",
 		"updated      ",
 		"## Context",

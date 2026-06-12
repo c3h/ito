@@ -25,17 +25,18 @@ type projectJSON struct {
 }
 
 type issueJSON struct {
-	ID        string   `json:"id"`
-	Project   string   `json:"project"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Priority  string   `json:"priority"`
-	Labels    []string `json:"labels"`
-	BlockedBy []string `json:"blocked_by"`
-	RelatesTo []string `json:"relates_to"`
-	Body      string   `json:"body"`
-	Created   string   `json:"created"`
-	Updated   string   `json:"updated"`
+	ID            string   `json:"id"`
+	Project       string   `json:"project"`
+	Title         string   `json:"title"`
+	Status        string   `json:"status"`
+	Priority      string   `json:"priority"`
+	Labels        []string `json:"labels"`
+	BlockedBy     []string `json:"blocked_by"`
+	RelatesTo     []string `json:"relates_to"`
+	ConflictsWith []string `json:"conflicts_with"`
+	Body          string   `json:"body"`
+	Created       string   `json:"created"`
+	Updated       string   `json:"updated"`
 }
 
 type batchJSON struct {
@@ -98,7 +99,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "edit help",
 			args:     []string{"edit", "--help"},
-			contains: []string{"usage: ito edit", "--title", "--priority", "--add-label", "--block", "--relate"},
+			contains: []string{"usage: ito edit", "--title", "--priority", "--add-label", "--block", "--relate", "--conflict", "--unconflict"},
 		},
 	}
 
@@ -247,7 +248,7 @@ func TestNewCreatesIssueWithDefaults(t *testing.T) {
 	if issue.Status != "backlog" || issue.Priority != "low" || issue.Body != "" {
 		t.Fatalf("unexpected issue defaults: %#v", issue)
 	}
-	if len(issue.Labels) != 0 || len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 {
+	if len(issue.Labels) != 0 || len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 || len(issue.ConflictsWith) != 0 {
 		t.Fatalf("expected empty arrays for labels and links, got %#v", issue)
 	}
 	if issue.Created == "" || issue.Updated == "" || issue.Created != issue.Updated {
@@ -535,7 +536,7 @@ func TestListDefaultsToCurrentProjectAndHidesDone(t *testing.T) {
 	if _, ok := raw[0]["body"]; ok {
 		t.Fatalf("list JSON must omit body, got %s", result.stdout)
 	}
-	for _, key := range []string{"id", "project", "title", "status", "priority", "labels", "blocked_by", "relates_to", "created", "updated"} {
+	for _, key := range []string{"id", "project", "title", "status", "priority", "labels", "blocked_by", "relates_to", "conflicts_with", "created", "updated"} {
 		if _, ok := raw[0][key]; !ok {
 			t.Fatalf("list JSON missing key %q in %s", key, result.stdout)
 		}
@@ -1034,7 +1035,7 @@ func TestListIncludesStableArraysForLinks(t *testing.T) {
 	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
 		t.Fatal(err)
 	}
-	for _, title := range []string{"Linked", "Blocker", "Related"} {
+	for _, title := range []string{"Linked", "Blocker", "Related", "Conflicting"} {
 		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title, "--label", "feature"); result.exitCode != 0 {
 			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 		}
@@ -1044,7 +1045,8 @@ func TestListIncludesStableArraysForLinks(t *testing.T) {
 	if _, err := db.Exec(`
 INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'LNK-1', 'LNK-2', 'blocked_by');
 INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'LNK-3', 'LNK-1', 'relates_to');
-`, project.ID, project.ID); err != nil {
+INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'LNK-1', 'LNK-4', 'conflicts_with');
+`, project.ID, project.ID, project.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1057,14 +1059,14 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'LNK-
 	if !found {
 		t.Fatalf("expected linked Issue LNK-1 in list, got %#v", issues)
 	}
-	if !stringSlicesEqual(linked.Labels, []string{"feature"}) || !stringSlicesEqual(linked.BlockedBy, []string{"LNK-2"}) || !stringSlicesEqual(linked.RelatesTo, []string{"LNK-3"}) {
+	if !stringSlicesEqual(linked.Labels, []string{"feature"}) || !stringSlicesEqual(linked.BlockedBy, []string{"LNK-2"}) || !stringSlicesEqual(linked.RelatesTo, []string{"LNK-3"}) || !stringSlicesEqual(linked.ConflictsWith, []string{"LNK-4"}) {
 		t.Fatalf("expected stable labels and links on linked issue, got %#v", linked)
 	}
 	blocker, found := findIssueJSON(issues, "LNK-2")
 	if !found {
 		t.Fatalf("expected blocker Issue LNK-2 in list, got %#v", issues)
 	}
-	if blocker.BlockedBy == nil || blocker.RelatesTo == nil {
+	if blocker.BlockedBy == nil || blocker.RelatesTo == nil || blocker.ConflictsWith == nil {
 		t.Fatalf("expected empty link arrays, got %#v", blocker)
 	}
 }
@@ -1353,12 +1355,16 @@ func TestShowJSONShapeIncludesStableEmptyAndLinkKeys(t *testing.T) {
 	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Related"); result.exitCode != 0 {
 		t.Fatalf("third ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Conflicting"); result.exitCode != 0 {
+		t.Fatalf("fourth ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
 	db := openTestDB(t, itoHome)
 	defer db.Close()
 	if _, err := db.Exec(`
 INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-1', 'SHP-2', 'blocked_by');
 INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-3', 'SHP-1', 'relates_to');
-`, project.ID, project.ID); err != nil {
+INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-4', 'SHP-1', 'conflicts_with');
+`, project.ID, project.ID, project.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1370,7 +1376,7 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-
 	if err := json.Unmarshal([]byte(result.stdout), &raw); err != nil {
 		t.Fatalf("stdout is not a JSON object: %v\nstdout: %s", err, result.stdout)
 	}
-	expectedKeys := []string{"id", "project", "title", "status", "priority", "labels", "blocked_by", "relates_to", "body", "created", "updated"}
+	expectedKeys := []string{"id", "project", "title", "status", "priority", "labels", "blocked_by", "relates_to", "conflicts_with", "body", "created", "updated"}
 	if len(raw) != len(expectedKeys) {
 		t.Fatalf("expected exactly keys %v, got %v in %s", expectedKeys, raw, result.stdout)
 	}
@@ -1386,8 +1392,8 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-
 	if !stringSlicesEqual(issue.Labels, []string{"feature"}) {
 		t.Fatalf("expected labels, got %#v", issue.Labels)
 	}
-	if !stringSlicesEqual(issue.BlockedBy, []string{"SHP-2"}) || !stringSlicesEqual(issue.RelatesTo, []string{"SHP-3"}) {
-		t.Fatalf("expected links from fixtures, got blocked_by=%#v relates_to=%#v", issue.BlockedBy, issue.RelatesTo)
+	if !stringSlicesEqual(issue.BlockedBy, []string{"SHP-2"}) || !stringSlicesEqual(issue.RelatesTo, []string{"SHP-3"}) || !stringSlicesEqual(issue.ConflictsWith, []string{"SHP-4"}) {
+		t.Fatalf("expected links from fixtures, got blocked_by=%#v relates_to=%#v conflicts_with=%#v", issue.BlockedBy, issue.RelatesTo, issue.ConflictsWith)
 	}
 	if issue.Body != "# Shape\n\nFull markdown" || issue.Status != "in_progress" || issue.Priority != "urgent" {
 		t.Fatalf("unexpected canonical issue fields: %#v", issue)
@@ -1401,7 +1407,7 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-
 	if err := json.Unmarshal([]byte(empty.stdout), &emptyIssue); err != nil {
 		t.Fatal(err)
 	}
-	if emptyIssue.Labels == nil || emptyIssue.BlockedBy == nil || emptyIssue.RelatesTo == nil || emptyIssue.Body != "" {
+	if emptyIssue.Labels == nil || emptyIssue.BlockedBy == nil || emptyIssue.RelatesTo == nil || emptyIssue.ConflictsWith == nil || emptyIssue.Body != "" {
 		t.Fatalf("expected stable empty arrays and body string, got %#v", emptyIssue)
 	}
 }
@@ -1416,6 +1422,12 @@ func TestShowHumanOutputIncludesFieldsLinksLabelsAndBody(t *testing.T) {
 	}
 	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Human issue", "--label", "docs", "--body", "## Body\n\ncomplete markdown"); result.exitCode != 0 {
 		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Conflicting work"); result.exitCode != 0 {
+		t.Fatalf("second ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "HSH-1", "--conflict", "HSH-2"); result.exitCode != 0 {
+		t.Fatalf("ito edit conflict failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
 
 	result := runITO(t, t.TempDir(), itoHome, "show", "HSH-1")
@@ -1432,6 +1444,7 @@ func TestShowHumanOutputIncludesFieldsLinksLabelsAndBody(t *testing.T) {
 		"Links:",
 		"blocked_by: []",
 		"relates_to: []",
+		"conflicts_with: HSH-2",
 		"Body:",
 		"## Body\n\ncomplete markdown",
 	} {
@@ -1766,7 +1779,7 @@ func TestEditLinksDirectionalAndSymmetricNormalization(t *testing.T) {
 	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
 		t.Fatal(err)
 	}
-	for _, title := range []string{"Source", "Blocker", "Related"} {
+	for _, title := range []string{"Source", "Blocker", "Related", "Conflicting"} {
 		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title); result.exitCode != 0 {
 			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 		}
@@ -1839,7 +1852,7 @@ func TestEditLinksIdempotencyAndTimestampBehavior(t *testing.T) {
 	if err := json.Unmarshal([]byte(createdProject.stdout), &project); err != nil {
 		t.Fatal(err)
 	}
-	for _, title := range []string{"Source", "Blocker", "Related"} {
+	for _, title := range []string{"Source", "Blocker", "Related", "Conflicting"} {
 		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title); result.exitCode != 0 {
 			t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 		}
@@ -1850,7 +1863,7 @@ func TestEditLinksIdempotencyAndTimestampBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed := runITO(t, t.TempDir(), itoHome, "edit", "--json", "LTS-1", "--block", "LTS-2")
+	changed := runITO(t, t.TempDir(), itoHome, "edit", "--json", "LTS-1", "--block", "LTS-2", "--conflict", "LTS-4")
 	if changed.exitCode != 0 {
 		t.Fatalf("ito edit link change failed with exit %d\nstdout: %s\nstderr: %s", changed.exitCode, changed.stdout, changed.stderr)
 	}
@@ -1858,20 +1871,42 @@ func TestEditLinksIdempotencyAndTimestampBehavior(t *testing.T) {
 	if err := json.Unmarshal([]byte(changed.stdout), &issue); err != nil {
 		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, changed.stdout)
 	}
-	if !stringSlicesEqual(issue.BlockedBy, []string{"LTS-2"}) || issue.Updated == "2026-05-24T10:00:00Z" || issue.Created != "2026-05-24T10:00:00Z" {
+	if !stringSlicesEqual(issue.BlockedBy, []string{"LTS-2"}) || !stringSlicesEqual(issue.ConflictsWith, []string{"LTS-4"}) || issue.Updated == "2026-05-24T10:00:00Z" || issue.Created != "2026-05-24T10:00:00Z" {
 		t.Fatalf("expected changed link and updated timestamp, got %#v", issue)
+	}
+	conflicting := runITO(t, t.TempDir(), itoHome, "show", "--json", "LTS-4")
+	if conflicting.exitCode != 0 {
+		t.Fatalf("ito show conflicting issue failed with exit %d\nstdout: %s\nstderr: %s", conflicting.exitCode, conflicting.stdout, conflicting.stderr)
+	}
+	var conflictingIssue issueJSON
+	if err := json.Unmarshal([]byte(conflicting.stdout), &conflictingIssue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, conflicting.stdout)
+	}
+	if !stringSlicesEqual(conflictingIssue.ConflictsWith, []string{"LTS-1"}) {
+		t.Fatalf("expected symmetric conflicts_with on target, got %#v", conflictingIssue.ConflictsWith)
 	}
 	updatedAfterChange := issue.Updated
 
-	noChange := runITO(t, t.TempDir(), itoHome, "edit", "--json", "LTS-1", "--block", "LTS-2", "--relate", "LTS-3", "--unrelate", "LTS-3")
+	noChange := runITO(t, t.TempDir(), itoHome, "edit", "--json", "LTS-1", "--block", "LTS-2", "--relate", "LTS-3", "--unrelate", "LTS-3", "--conflict", "LTS-4", "--unconflict", "LTS-4", "--conflict", "LTS-4")
 	if noChange.exitCode != 0 {
 		t.Fatalf("idempotent link edit failed with exit %d\nstdout: %s\nstderr: %s", noChange.exitCode, noChange.stdout, noChange.stderr)
 	}
 	if err := json.Unmarshal([]byte(noChange.stdout), &issue); err != nil {
 		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, noChange.stdout)
 	}
-	if !stringSlicesEqual(issue.BlockedBy, []string{"LTS-2"}) || len(issue.RelatesTo) != 0 || issue.Updated != updatedAfterChange {
+	if !stringSlicesEqual(issue.BlockedBy, []string{"LTS-2"}) || len(issue.RelatesTo) != 0 || !stringSlicesEqual(issue.ConflictsWith, []string{"LTS-4"}) || issue.Updated != updatedAfterChange {
 		t.Fatalf("idempotent link operations must preserve final state and updated, got %#v", issue)
+	}
+
+	removed := runITO(t, t.TempDir(), itoHome, "edit", "--json", "LTS-4", "--unconflict", "LTS-1")
+	if removed.exitCode != 0 {
+		t.Fatalf("ito edit conflict removal failed with exit %d\nstdout: %s\nstderr: %s", removed.exitCode, removed.stdout, removed.stderr)
+	}
+	if err := json.Unmarshal([]byte(removed.stdout), &conflictingIssue); err != nil {
+		t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, removed.stdout)
+	}
+	if len(conflictingIssue.ConflictsWith) != 0 {
+		t.Fatalf("expected --unconflict to remove conflict from either side, got %#v", conflictingIssue.ConflictsWith)
 	}
 }
 
@@ -1946,11 +1981,15 @@ func TestEditLinksValidationFailures(t *testing.T) {
 		code int
 	}{
 		{name: "malformed link target", args: []string{"edit", "--json", "FLK-1", "--block", "FLK"}, code: 2},
+		{name: "malformed conflict target", args: []string{"edit", "--json", "FLK-1", "--conflict", "FLK"}, code: 2},
 		{name: "self block", args: []string{"edit", "--json", "FLK-1", "--block", "FLK-1"}, code: 2},
 		{name: "self relate", args: []string{"edit", "--json", "FLK-1", "--relate", "FLK-1"}, code: 2},
+		{name: "self conflict", args: []string{"edit", "--json", "FLK-1", "--conflict", "FLK-1"}, code: 2},
 		{name: "unknown target issue", args: []string{"edit", "--json", "FLK-1", "--block", "FLK-99"}, code: 3},
 		{name: "unknown target prefix", args: []string{"edit", "--json", "FLK-1", "--relate", "ZZZ-1"}, code: 3},
+		{name: "unknown conflict target", args: []string{"edit", "--json", "FLK-1", "--conflict", "FLK-99"}, code: 3},
 		{name: "cross project target", args: []string{"edit", "--json", "FLK-1", "--block", "SLK-1"}, code: 2},
+		{name: "cross project conflict target", args: []string{"edit", "--json", "FLK-1", "--conflict", "SLK-1"}, code: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2345,7 +2384,7 @@ func TestPruneDeletesLabelsLinksAndFTSForMatchingIssues(t *testing.T) {
 			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
 		}
 	}
-	if result := runITO(t, repo, itoHome, "edit", "--json", "CLP-1", "--block", "CLP-2", "--relate", "CLP-3"); result.exitCode != 0 {
+	if result := runITO(t, repo, itoHome, "edit", "--json", "CLP-1", "--block", "CLP-2", "--relate", "CLP-3", "--conflict", "CLP-4"); result.exitCode != 0 {
 		t.Fatalf("ito edit outgoing links failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
 	if result := runITO(t, repo, itoHome, "edit", "--json", "CLP-2", "--block", "CLP-1"); result.exitCode != 0 {
@@ -2368,7 +2407,7 @@ func TestPruneDeletesLabelsLinksAndFTSForMatchingIssues(t *testing.T) {
 		if err := json.Unmarshal([]byte(show.stdout), &issue); err != nil {
 			t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, show.stdout)
 		}
-		if len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 {
+		if len(issue.BlockedBy) != 0 || len(issue.RelatesTo) != 0 || len(issue.ConflictsWith) != 0 {
 			t.Fatalf("links to pruned Issues must be removed from %s, got %#v", id, issue)
 		}
 	}
@@ -3093,6 +3132,11 @@ func TestLinkArraysSortNumericallyForMultiDigitIDs(t *testing.T) {
 			t.Fatalf("relate %s failed: %s", target, result.stderr)
 		}
 	}
+	for _, target := range []string{"LNK-11", "LNK-3", "LNK-10"} {
+		if result := runITO(t, repo, itoHome, "edit", "--json", "LNK-1", "--conflict", target); result.exitCode != 0 {
+			t.Fatalf("conflict %s failed: %s", target, result.stderr)
+		}
+	}
 
 	show := runITO(t, repo, itoHome, "show", "--json", "LNK-1")
 	if show.exitCode != 0 {
@@ -3108,6 +3152,9 @@ func TestLinkArraysSortNumericallyForMultiDigitIDs(t *testing.T) {
 	if want := []string{"LNK-4", "LNK-9", "LNK-12"}; !stringSlicesEqual(shown.RelatesTo, want) {
 		t.Fatalf("relates_to must sort numerically; want %v got %v", want, shown.RelatesTo)
 	}
+	if want := []string{"LNK-3", "LNK-10", "LNK-11"}; !stringSlicesEqual(shown.ConflictsWith, want) {
+		t.Fatalf("conflicts_with must sort numerically; want %v got %v", want, shown.ConflictsWith)
+	}
 
 	list := runITO(t, repo, itoHome, "list", "--json")
 	if list.exitCode != 0 {
@@ -3119,6 +3166,9 @@ func TestLinkArraysSortNumericallyForMultiDigitIDs(t *testing.T) {
 		}
 		if want := []string{"LNK-2", "LNK-3", "LNK-10", "LNK-11"}; !stringSlicesEqual(item.BlockedBy, want) {
 			t.Fatalf("list blocked_by must sort numerically; want %v got %v", want, item.BlockedBy)
+		}
+		if want := []string{"LNK-3", "LNK-10", "LNK-11"}; !stringSlicesEqual(item.ConflictsWith, want) {
+			t.Fatalf("list conflicts_with must sort numerically; want %v got %v", want, item.ConflictsWith)
 		}
 	}
 }

@@ -121,17 +121,18 @@ type Project struct {
 }
 
 type Issue struct {
-	ID        string   `json:"id"`
-	Project   string   `json:"project"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Priority  string   `json:"priority"`
-	Labels    []string `json:"labels"`
-	BlockedBy []string `json:"blocked_by"`
-	RelatesTo []string `json:"relates_to"`
-	Body      string   `json:"body"`
-	Created   string   `json:"created"`
-	Updated   string   `json:"updated"`
+	ID            string   `json:"id"`
+	Project       string   `json:"project"`
+	Title         string   `json:"title"`
+	Status        string   `json:"status"`
+	Priority      string   `json:"priority"`
+	Labels        []string `json:"labels"`
+	BlockedBy     []string `json:"blocked_by"`
+	RelatesTo     []string `json:"relates_to"`
+	ConflictsWith []string `json:"conflicts_with"`
+	Body          string   `json:"body"`
+	Created       string   `json:"created"`
+	Updated       string   `json:"updated"`
 }
 
 type Batch struct {
@@ -960,17 +961,18 @@ func insertIssue(db *sql.DB, p Project, title, status, priority string, labels [
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	created := Issue{
-		ID:        fmt.Sprintf("%s-%d", p.Prefix, nextID),
-		Project:   p.Name,
-		Title:     title,
-		Status:    status,
-		Priority:  priority,
-		Labels:    dedupeStrings(labels),
-		BlockedBy: []string{},
-		RelatesTo: []string{},
-		Body:      body,
-		Created:   now,
-		Updated:   now,
+		ID:            fmt.Sprintf("%s-%d", p.Prefix, nextID),
+		Project:       p.Name,
+		Title:         title,
+		Status:        status,
+		Priority:      priority,
+		Labels:        dedupeStrings(labels),
+		BlockedBy:     []string{},
+		RelatesTo:     []string{},
+		ConflictsWith: []string{},
+		Body:          body,
+		Created:       now,
+		Updated:       now,
 	}
 
 	result, err = tx.Exec(`
@@ -1280,9 +1282,10 @@ FROM issues
 JOIN projects ON projects.id = issues.project_id
 WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 	found := Issue{
-		Labels:    []string{},
-		BlockedBy: []string{},
-		RelatesTo: []string{},
+		Labels:        []string{},
+		BlockedBy:     []string{},
+		RelatesTo:     []string{},
+		ConflictsWith: []string{},
 	}
 	if err := row.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Body, &found.Created, &found.Updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1297,8 +1300,8 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 	return found, true, nil
 }
 
-// loadIssueRelations fills an Issue's Labels, BlockedBy and RelatesTo from the
-// label and link tables, with the link IDs in canonical order.
+// loadIssueRelations fills an Issue's Labels and Links from the label and link
+// tables, with the link IDs in canonical order.
 func loadIssueRelations(q rowQuerier, projectID int64, issue *Issue) error {
 	labels, err := stringColumn(q, `SELECT label FROM issue_labels WHERE project_id = ? AND issue_id = ? ORDER BY label`, projectID, issue.ID)
 	if err != nil {
@@ -1323,9 +1326,20 @@ ORDER BY 1`, issue.ID, projectID, issue.ID, issue.ID)
 	if err != nil {
 		return err
 	}
+	conflictsWith, err := stringColumn(q, `
+SELECT CASE WHEN source_id = ? THEN target_id ELSE source_id END
+FROM issue_links
+JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.project_id = ? AND kind = 'conflicts_with' AND (source_id = ? OR target_id = ?)
+ORDER BY 1`, issue.ID, projectID, issue.ID, issue.ID)
+	if err != nil {
+		return err
+	}
 	issue.Labels = labels
 	issue.BlockedBy = sortIssueIDs(blockedBy)
 	issue.RelatesTo = sortIssueIDs(relatesTo)
+	issue.ConflictsWith = sortIssueIDs(conflictsWith)
 	return nil
 }
 
@@ -1413,9 +1427,10 @@ issues.id ASC`
 	for rows.Next() {
 		found := rowIssue{
 			Issue: Issue{
-				Labels:    []string{},
-				BlockedBy: []string{},
-				RelatesTo: []string{},
+				Labels:        []string{},
+				BlockedBy:     []string{},
+				RelatesTo:     []string{},
+				ConflictsWith: []string{},
 			},
 		}
 		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Body, &found.Created, &found.Updated, &found.ProjectID); err != nil {
@@ -1504,7 +1519,7 @@ func issueExistsTx(tx *sql.Tx, projectID int64, issueID string) (bool, error) {
 }
 
 func normalizedLinkIDs(sourceID, targetID, kind string) (string, string) {
-	if kind == "relates_to" && issueIDLess(targetID, sourceID) {
+	if (kind == "relates_to" || kind == "conflicts_with") && issueIDLess(targetID, sourceID) {
 		return targetID, sourceID
 	}
 	return sourceID, targetID

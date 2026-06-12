@@ -15,25 +15,27 @@ var (
 	colorLabelInk = lipgloss.AdaptiveColor{Light: "#5a6178", Dark: "#9aa5ce"}
 
 	// Chromatic accents — fixed across terminal themes.
-	colorID     = lipgloss.Color("#7dcfff")
-	colorSel    = lipgloss.Color("#bb9af7")
-	colorUrgent = lipgloss.Color("#f7768e")
-	colorHigh   = lipgloss.Color("#ff9e64")
-	colorMedium = lipgloss.Color("#7aa2f7")
-	colorLow    = lipgloss.Color("#6b7394")
-	colorBlock  = lipgloss.Color("#f7768e")
+	colorID       = lipgloss.Color("#7dcfff")
+	colorSel      = lipgloss.Color("#bb9af7")
+	colorUrgent   = lipgloss.Color("#f7768e")
+	colorHigh     = lipgloss.Color("#ff9e64")
+	colorMedium   = lipgloss.Color("#7aa2f7")
+	colorLow      = lipgloss.Color("#6b7394")
+	colorBlock    = lipgloss.Color("#f7768e")
+	colorConflict = lipgloss.Color("#ff9e64")
 )
 
 var (
-	styleText   = lipgloss.NewStyle().Foreground(colorInk)
-	styleDim    = lipgloss.NewStyle().Foreground(colorDim)
-	styleLine   = lipgloss.NewStyle().Foreground(colorLine)
-	styleActive = lipgloss.NewStyle().Foreground(colorSel)
-	styleKey    = lipgloss.NewStyle().Foreground(colorSel).Bold(true)
-	styleStatus = lipgloss.NewStyle().Foreground(colorID)
-	styleID     = lipgloss.NewStyle().Foreground(colorID)
-	styleBlock  = lipgloss.NewStyle().Foreground(colorBlock)
-	styleLabel  = lipgloss.NewStyle().Foreground(colorLabelInk)
+	styleText     = lipgloss.NewStyle().Foreground(colorInk)
+	styleDim      = lipgloss.NewStyle().Foreground(colorDim)
+	styleLine     = lipgloss.NewStyle().Foreground(colorLine)
+	styleActive   = lipgloss.NewStyle().Foreground(colorSel)
+	styleKey      = lipgloss.NewStyle().Foreground(colorSel).Bold(true)
+	styleStatus   = lipgloss.NewStyle().Foreground(colorID)
+	styleID       = lipgloss.NewStyle().Foreground(colorID)
+	styleBlock    = lipgloss.NewStyle().Foreground(colorBlock)
+	styleConflict = lipgloss.NewStyle().Foreground(colorConflict)
+	styleLabel    = lipgloss.NewStyle().Foreground(colorLabelInk)
 
 	// Priority marks — one colour each; low stays in the default ink.
 	stylePriorityUrgent = lipgloss.NewStyle().Foreground(colorUrgent)

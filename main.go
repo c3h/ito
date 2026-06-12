@@ -207,16 +207,17 @@ type batchListItem struct {
 }
 
 type issueListItem struct {
-	ID        string   `json:"id"`
-	Project   string   `json:"project"`
-	Title     string   `json:"title"`
-	Status    string   `json:"status"`
-	Priority  string   `json:"priority"`
-	Labels    []string `json:"labels"`
-	BlockedBy []string `json:"blocked_by"`
-	RelatesTo []string `json:"relates_to"`
-	Created   string   `json:"created"`
-	Updated   string   `json:"updated"`
+	ID            string   `json:"id"`
+	Project       string   `json:"project"`
+	Title         string   `json:"title"`
+	Status        string   `json:"status"`
+	Priority      string   `json:"priority"`
+	Labels        []string `json:"labels"`
+	BlockedBy     []string `json:"blocked_by"`
+	RelatesTo     []string `json:"relates_to"`
+	ConflictsWith []string `json:"conflicts_with"`
+	Created       string   `json:"created"`
+	Updated       string   `json:"updated"`
 }
 
 type listOptions = itostore.ListOptions
@@ -809,6 +810,8 @@ func runEdit(args []string) int {
 	fs.Var(linkEditFlag{kind: "blocked_by", action: "remove", ops: &linkOps}, "unblock", "")
 	fs.Var(linkEditFlag{kind: "relates_to", action: "add", ops: &linkOps}, "relate", "")
 	fs.Var(linkEditFlag{kind: "relates_to", action: "remove", ops: &linkOps}, "unrelate", "")
+	fs.Var(linkEditFlag{kind: "conflicts_with", action: "add", ops: &linkOps}, "conflict", "")
+	fs.Var(linkEditFlag{kind: "conflicts_with", action: "remove", ops: &linkOps}, "unconflict", "")
 	parseArgs, issueID, positionalCount := splitEditArgs(args)
 	if err := fs.Parse(parseArgs); err != nil {
 		return fail(wantsJSON(args, commandValueFlags("edit")), exitBadUsage, err.Error(), "run 'ito edit --help' to see the accepted flags.")
@@ -837,7 +840,7 @@ func runEdit(args []string) int {
 		}
 	})
 	if !options.TitleSet && !options.PrioritySet && !options.BodySet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
-		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --add-label, --block or --relate.")
+		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --add-label, --block, --relate or --conflict.")
 	}
 	if options.TitleSet {
 		if strings.TrimSpace(title) == "" {
@@ -1179,7 +1182,7 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{
 			"project": {}, "title": {}, "priority": {}, "body": {},
 			"add-label": {}, "remove-label": {},
-			"block": {}, "unblock": {}, "relate": {}, "unrelate": {},
+			"block": {}, "unblock": {}, "relate": {}, "unrelate": {}, "conflict": {}, "unconflict": {},
 		}
 	case "rm":
 		return map[string]struct{}{"project": {}}
@@ -1366,7 +1369,7 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "edit":
-		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
 
 Edits an Issue. Requires at least one change.
 
@@ -1380,6 +1383,8 @@ Flags:
   --unblock <ID>           Removes a blocked_by link.
   --relate <ID>            Adds a relates_to link.
   --unrelate <ID>          Removes a relates_to link.
+  --conflict <ID>          Adds a conflicts_with link.
+  --unconflict <ID>        Removes a conflicts_with link.
   --project <name>         Validates that the Issue belongs to the given Project.
   --json                   Prints JSON.
 `, priorityList)
@@ -1518,6 +1523,7 @@ func printIssueDetail(i issue, jsonMode bool) int {
 	fmt.Println("Links:")
 	fmt.Printf("  blocked_by: %s\n", formatList(i.BlockedBy))
 	fmt.Printf("  relates_to: %s\n", formatList(i.RelatesTo))
+	fmt.Printf("  conflicts_with: %s\n", formatList(i.ConflictsWith))
 	fmt.Println("Body:")
 	fmt.Print(i.Body)
 	if i.Body == "" || !strings.HasSuffix(i.Body, "\n") {
@@ -1531,16 +1537,17 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 		items := make([]issueListItem, 0, len(issues))
 		for _, i := range issues {
 			items = append(items, issueListItem{
-				ID:        i.ID,
-				Project:   i.Project,
-				Title:     i.Title,
-				Status:    i.Status,
-				Priority:  i.Priority,
-				Labels:    i.Labels,
-				BlockedBy: i.BlockedBy,
-				RelatesTo: i.RelatesTo,
-				Created:   i.Created,
-				Updated:   i.Updated,
+				ID:            i.ID,
+				Project:       i.Project,
+				Title:         i.Title,
+				Status:        i.Status,
+				Priority:      i.Priority,
+				Labels:        i.Labels,
+				BlockedBy:     i.BlockedBy,
+				RelatesTo:     i.RelatesTo,
+				ConflictsWith: i.ConflictsWith,
+				Created:       i.Created,
+				Updated:       i.Updated,
 			})
 		}
 		return printJSON(items, "Issue list")

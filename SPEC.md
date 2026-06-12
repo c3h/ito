@@ -268,6 +268,7 @@ Philosophy: **the actionable sentence is the product; the exit code is the bonus
     "labels": ["feature", "infra"],
     "blocked_by": ["AUTH-9"],
     "relates_to": [],
+    "conflicts_with": [],
     "body": "## Context\n...",
     "created": "2026-05-24T14:30:00Z",
     "updated": "2026-05-24T14:32:10Z"

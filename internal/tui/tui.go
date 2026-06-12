@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/c3h/ito/internal/store"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Surface frame width: capped at a readable measure so it never sprawls on a
@@ -44,7 +44,7 @@ const (
 const detailBodyWidth = 80
 
 // linkIDWidth is the column the linked Issue id occupies before its title in
-// the detail view, so the titles line up across blocked_by / relates_to rows.
+// the detail view, so the titles line up across link rows.
 const linkIDWidth = 8
 
 type viewMode string
@@ -1234,6 +1234,7 @@ func (m *model) loadLinkTitles(issue store.Issue) map[string]string {
 	}
 	resolve(issue.BlockedBy)
 	resolve(issue.RelatesTo)
+	resolve(issue.ConflictsWith)
 	return titles
 }
 
@@ -1272,6 +1273,9 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 	}
 	for _, id := range issue.RelatesTo {
 		links = append(links, m.linkLine("relates to", id))
+	}
+	for _, id := range issue.ConflictsWith {
+		links = append(links, m.linkLine("conflicts with", id))
 	}
 	if len(links) > 0 {
 		top = append(top, links...)
@@ -1523,28 +1527,18 @@ func styledPriorityWord(priority string) string {
 	}
 }
 
-// linkLine renders a blocked-by / relates-to row: a dim label, the linked id in
-// cyan, then the linked title aligned past linkIDWidth.
+// linkLine renders a link row: a dim label, the linked id in cyan, then the
+// linked title aligned past linkIDWidth.
 func (m model) linkLine(label, id string) string {
 	pad := strings.Repeat(" ", max(1, linkIDWidth-runeLen(id)))
 	return " " + styleDim.Render(label) + "   " + styleID.Render(id) + pad + styleText.Render(m.linkTitles[id])
 }
 
 // renderIssueRow draws a Digest row across width: priority mark, id and title on
-// the left, the blocked indicator and labels right-aligned to the edge — the
-// title absorbs the slack and truncates when the two groups would collide.
+// the left, the link markers and labels right-aligned to the edge — the title
+// absorbs the slack and truncates when the two groups would collide.
 func renderIssueRow(issue store.Issue, width int) string {
-	plainRight, styledRight := "", ""
-	if len(issue.BlockedBy) > 0 {
-		blockers := strings.Join(issue.BlockedBy, ",")
-		plainRight += "⊘ " + blockers + "   "
-		styledRight += styleBlock.Render("⊘ ") + styleID.Render(blockers) + "   "
-	}
-	if len(issue.Labels) > 0 {
-		plainRight += strings.Join(issue.Labels, " ") + " "
-		styledRight += labelChips(issue.Labels, " ") + " "
-	}
-
+	plainRight, styledRight := issueRowRight(issue, true)
 	mark, id := priorityMark(issue.Priority), issue.ID
 	fixed := runeLen(mark) + 1 + runeLen(id) + 1 // "mark id " before the title
 	title := truncate(issue.Title, max(0, width-runeLen(plainRight)-fixed))
@@ -1557,22 +1551,46 @@ func renderIssueRow(issue store.Issue, width int) string {
 	return styledLeft + strings.Repeat(" ", gap) + styledRight
 }
 
+func issueRowRight(issue store.Issue, includeLabels bool) (string, string) {
+	plainRight, styledRight := "", ""
+	if len(issue.BlockedBy) > 0 {
+		blockers := strings.Join(issue.BlockedBy, ",")
+		plainRight += "⊘ " + blockers + "   "
+		styledRight += styleBlock.Render("⊘ ") + styleID.Render(blockers) + "   "
+	}
+	if len(issue.ConflictsWith) > 0 {
+		conflicts := strings.Join(issue.ConflictsWith, ",")
+		plainRight += "⊘ " + conflicts + "   "
+		styledRight += styleConflict.Render("⊘ ") + styleID.Render(conflicts) + "   "
+	}
+	if includeLabels && len(issue.Labels) > 0 {
+		plainRight += strings.Join(issue.Labels, " ") + " "
+		styledRight += labelChips(issue.Labels, " ") + " "
+	}
+	return plainRight, styledRight
+}
+
 func renderBoardIssue(issue store.Issue, selected bool, width int) string {
 	pointer, styledPointer := " ", styleText.Render(" ")
 	if selected {
 		pointer, styledPointer = "▸", styleActive.Render("▸")
 	}
-	// Board cards are mark + id + title only — the narrow columns leave no room
-	// for labels.
+	// Board rows omit labels in narrow columns, but keep link markers so the
+	// traceability signal matches Digest.
+	plainRight, styledRight := issueRowRight(issue, false)
 	plainPrefix := fmt.Sprintf("%s %s %s ", pointer, priorityMark(issue.Priority), issue.ID)
 	styledPrefix := styledPointer + " " + styledPriorityMark(issue.Priority) + " " + styleID.Render(issue.ID) + " "
 
-	titleWidth := width - runeLen(plainPrefix)
+	titleWidth := width - runeLen(plainPrefix) - runeLen(plainRight)
 	if titleWidth < 1 {
 		return truncate(plainPrefix+issue.Title, width) // too narrow to style cleanly
 	}
 	title := truncate(issue.Title, titleWidth)
-	return padStyled(styledPrefix+styleText.Render(title), plainPrefix+title, width)
+	if plainRight == "" {
+		return padStyled(styledPrefix+styleText.Render(title), plainPrefix+title, width)
+	}
+	gap := max(0, width-runeLen(plainPrefix)-runeLen(title)-runeLen(plainRight))
+	return styledPrefix + styleText.Render(title) + strings.Repeat(" ", gap) + styledRight
 }
 
 func priorityMark(priority string) string {

@@ -206,6 +206,86 @@ func TestEditMissingLinkTargetNamesTheTarget(t *testing.T) {
 	}
 }
 
+func TestEditConflictsWithNormalizesSymmetricLinks(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("conflict-app", "CNF", filepath.Join(t.TempDir(), "conflict"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	first, err := st.CreateIssue(project, "First issue", "backlog", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create first issue: %v", err)
+	}
+	second, err := st.CreateIssue(project, "Second issue", "backlog", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create second issue: %v", err)
+	}
+
+	added, err := st.Edit(project, second.ID, EditIssueOptions{
+		LinkOps: []LinkEditOp{{Kind: "conflicts_with", Action: "add", Target: first.ID}},
+	})
+	if err != nil {
+		t.Fatalf("add conflict: %v", err)
+	}
+	if !added.Changed {
+		t.Fatalf("expected first conflict add to change")
+	}
+	firstFound, err := st.FindIssue(project, first.ID)
+	if err != nil {
+		t.Fatalf("find first issue: %v", err)
+	}
+	secondFound, err := st.FindIssue(project, second.ID)
+	if err != nil {
+		t.Fatalf("find second issue: %v", err)
+	}
+	if !slices.Equal(firstFound.ConflictsWith, []string{second.ID}) || !slices.Equal(secondFound.ConflictsWith, []string{first.ID}) {
+		t.Fatalf("expected symmetric conflict, first=%#v second=%#v", firstFound.ConflictsWith, secondFound.ConflictsWith)
+	}
+
+	var rows int
+	if err := db.QueryRow(`SELECT count(*) FROM issue_links WHERE project_id = ? AND kind = 'conflicts_with'`, project.ID).Scan(&rows); err != nil {
+		t.Fatalf("count conflict rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected one normalized conflict row, got %d", rows)
+	}
+
+	redundantAdd, err := st.Edit(project, first.ID, EditIssueOptions{
+		LinkOps: []LinkEditOp{{Kind: "conflicts_with", Action: "add", Target: second.ID}},
+	})
+	if err != nil {
+		t.Fatalf("redundant add conflict: %v", err)
+	}
+	if redundantAdd.Changed || redundantAdd.Issue.Updated != firstFound.Updated {
+		t.Fatalf("redundant conflict add must not stamp updated, before=%q after=%q changed=%v", firstFound.Updated, redundantAdd.Issue.Updated, redundantAdd.Changed)
+	}
+
+	removed, err := st.Edit(project, first.ID, EditIssueOptions{
+		LinkOps: []LinkEditOp{{Kind: "conflicts_with", Action: "remove", Target: second.ID}},
+	})
+	if err != nil {
+		t.Fatalf("remove conflict: %v", err)
+	}
+	if !removed.Changed || len(removed.Issue.ConflictsWith) != 0 {
+		t.Fatalf("expected conflict removal to change and clear links, got %#v", removed)
+	}
+	redundantRemove, err := st.Edit(project, second.ID, EditIssueOptions{
+		LinkOps: []LinkEditOp{{Kind: "conflicts_with", Action: "remove", Target: first.ID}},
+	})
+	if err != nil {
+		t.Fatalf("redundant remove conflict: %v", err)
+	}
+	if redundantRemove.Changed || redundantRemove.Issue.Updated != secondFound.Updated {
+		t.Fatalf("redundant conflict remove must not stamp updated, before=%q after=%q changed=%v", secondFound.Updated, redundantRemove.Issue.Updated, redundantRemove.Changed)
+	}
+}
+
 func TestCreateProjectReturnsTypedUniquenessErrors(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
