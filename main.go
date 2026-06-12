@@ -216,6 +216,7 @@ type issueListItem struct {
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
 	ConflictsWith []string `json:"conflicts_with"`
+	Batch         *string  `json:"batch"`
 	Created       string   `json:"created"`
 	Updated       string   `json:"updated"`
 }
@@ -623,6 +624,7 @@ func runNew(args []string) int {
 	var priority string
 	var labels stringSliceFlag
 	var body string
+	var batchName string
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
 	fs.StringVar(&title, "title", "", "")
@@ -630,6 +632,7 @@ func runNew(args []string) int {
 	fs.StringVar(&priority, "priority", "low", "")
 	fs.Var(&labels, "label", "")
 	fs.StringVar(&body, "body", "", "")
+	fs.StringVar(&batchName, "batch", "", "")
 	if err := fs.Parse(args); err != nil {
 		return fail(wantsJSON(args, commandValueFlags("new")), exitBadUsage, err.Error(), "run 'ito new --help' to see the accepted flags.")
 	}
@@ -657,6 +660,15 @@ func runNew(args []string) int {
 		}
 		body = string(input)
 	}
+	batchSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "batch" {
+			batchSet = true
+		}
+	})
+	if batchSet && batchName == "" {
+		return fail(jsonMode, exitBadUsage, "--batch requires a non-empty Batch name on new.", "omit --batch to create the Issue outside any Batch.")
+	}
 
 	db, st, openFail := openMigratedStore()
 	if openFail != nil {
@@ -668,8 +680,11 @@ func runNew(args []string) int {
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
-	created, err := st.CreateIssue(p, title, status, priority, labels, body)
+	created, err := st.CreateIssueInBatch(p, title, status, priority, labels, body, batchName)
 	if err != nil {
+		if errors.Is(err, itostore.ErrBatchNotFound) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", batchName, p.Name), "run 'ito batch list' to see the Project's Batches.")
+		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not create the Issue: %v", err), "try again or inspect the central store.")
 	}
 	return printIssue(created, jsonMode)
@@ -797,6 +812,7 @@ func runEdit(args []string) int {
 	var title string
 	var priority string
 	var body string
+	var batchName string
 	var labelOps []labelEditOp
 	var linkOps []linkEditOp
 	fs.BoolVar(&jsonMode, "json", false, "")
@@ -804,6 +820,7 @@ func runEdit(args []string) int {
 	fs.StringVar(&title, "title", "", "")
 	fs.StringVar(&priority, "priority", "", "")
 	fs.StringVar(&body, "body", "", "")
+	fs.StringVar(&batchName, "batch", "", "")
 	fs.Var(labelEditFlag{kind: "add", ops: &labelOps}, "add-label", "")
 	fs.Var(labelEditFlag{kind: "remove", ops: &labelOps}, "remove-label", "")
 	fs.Var(linkEditFlag{kind: "blocked_by", action: "add", ops: &linkOps}, "block", "")
@@ -837,10 +854,12 @@ func runEdit(args []string) int {
 			options.PrioritySet = true
 		case "body":
 			options.BodySet = true
+		case "batch":
+			options.BatchSet = true
 		}
 	})
-	if !options.TitleSet && !options.PrioritySet && !options.BodySet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
-		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --add-label, --block, --relate or --conflict.")
+	if !options.TitleSet && !options.PrioritySet && !options.BodySet && !options.BatchSet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
+		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --batch, --add-label, --block, --relate or --conflict.")
 	}
 	if options.TitleSet {
 		if strings.TrimSpace(title) == "" {
@@ -863,6 +882,9 @@ func runEdit(args []string) int {
 			body = string(input)
 		}
 		options.Body = body
+	}
+	if options.BatchSet {
+		options.Batch = batchName
 	}
 	for _, op := range options.LabelOps {
 		if !isValidValue(op.Label, validLabels) {
@@ -891,6 +913,9 @@ func runEdit(args []string) int {
 
 	edited, err := st.Edit(p, issueID, options)
 	if err != nil {
+		if errors.Is(err, itostore.ErrBatchNotFound) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", batchName, p.Name), "run 'ito batch list' to see the Project's Batches.")
+		}
 		var linkTarget *itostore.LinkTargetNotFoundError
 		if errors.As(err, &linkTarget) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Issue %q not found.", linkTarget.TargetID), "check the linked Issue ID.")
@@ -908,7 +933,7 @@ func runEdit(args []string) int {
 		return printIssueDetail(edited.Issue, true)
 	}
 	if !edited.Changed {
-		fmt.Printf("%s did not change; the final state already matched the request.\n", edited.Issue.ID)
+		fmt.Printf("%s unchanged; the final state already matched the request.\n", edited.Issue.ID)
 		return 0
 	}
 	fmt.Printf("%s edited.\n", edited.Issue.ID)
@@ -1035,6 +1060,7 @@ func runList(args []string) int {
 	var status string
 	var priority string
 	var search string
+	var batchName string
 	var ready bool
 	var labels stringSliceFlag
 	fs.BoolVar(&jsonMode, "json", false, "")
@@ -1043,6 +1069,7 @@ func runList(args []string) int {
 	fs.StringVar(&status, "status", "", "")
 	fs.StringVar(&priority, "priority", "", "")
 	fs.StringVar(&search, "search", "", "")
+	fs.StringVar(&batchName, "batch", "", "")
 	fs.BoolVar(&ready, "ready", false, "")
 	fs.Var(&labels, "label", "")
 	if err := fs.Parse(args); err != nil {
@@ -1053,6 +1080,9 @@ func runList(args []string) int {
 	}
 	if projectName != "" && allProjects {
 		return fail(jsonMode, exitBadUsage, "--project and --all-projects cannot be used together.", "choose a scope: an explicit Project or all Projects.")
+	}
+	if batchName != "" && allProjects {
+		return fail(jsonMode, exitBadUsage, "--batch and --all-projects cannot be used together.", "choose a single Project when filtering by Batch.")
 	}
 	if status != "" && !isValidValue(status, validStatuses) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use "+statusList+".")
@@ -1079,6 +1109,7 @@ func runList(args []string) int {
 		Labels:      append([]string{}, labels...),
 		Search:      search,
 		Ready:       ready,
+		Batch:       batchName,
 	}
 	if !allProjects {
 		p, code, message, hint := resolveProject(st, projectName)
@@ -1090,6 +1121,9 @@ func runList(args []string) int {
 
 	issues, err := st.ListIssues(options)
 	if err != nil {
+		if errors.Is(err, itostore.ErrBatchNotFound) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in this Project.", batchName), "run 'ito batch list' to see the Project's Batches.")
+		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not list Issues: %v", err), "try again or inspect the central store.")
 	}
 	return printIssueList(issues, jsonMode, allProjects)
@@ -1167,11 +1201,11 @@ func commandValueFlags(command string) map[string]struct{} {
 	case "rename":
 		return map[string]struct{}{"project": {}}
 	case "new":
-		return map[string]struct{}{"project": {}, "title": {}, "status": {}, "priority": {}, "label": {}, "body": {}}
+		return map[string]struct{}{"project": {}, "title": {}, "status": {}, "priority": {}, "label": {}, "body": {}, "batch": {}}
 	case "show":
 		return map[string]struct{}{"project": {}}
 	case "list":
-		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "search": {}, "label": {}}
+		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "search": {}, "label": {}, "batch": {}}
 	case "batch new":
 		return map[string]struct{}{"project": {}}
 	case "batch list":
@@ -1181,6 +1215,7 @@ func commandValueFlags(command string) map[string]struct{} {
 	case "edit":
 		return map[string]struct{}{
 			"project": {}, "title": {}, "priority": {}, "body": {},
+			"batch":     {},
 			"add-label": {}, "remove-label": {},
 			"block": {}, "unblock": {}, "relate": {}, "unrelate": {}, "conflict": {}, "unconflict": {},
 		}
@@ -1297,7 +1332,7 @@ Flags:
   --project <name>     Target Project when the cwd should not resolve implicitly.
   --json               Prints JSON.`)
 	case "new":
-		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--label <label>] [--body <text>|-] [--project <name>] [--json]
+		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--label <label>] [--body <text>|-] [--batch <name>] [--project <name>] [--json]
 
 Creates an Issue and prints the ID in human mode.
 
@@ -1307,6 +1342,7 @@ Flags:
   --priority <priority>    %s. Default: low.
   --label <label>          Repeatable initial Label: %s.
   --body <text>|-          Markdown body. Use "-" to read stdin.
+  --batch <name>           Assign the Issue to an existing Batch.
   --project <name>         Explicit Project.
   --json                   Prints JSON.
 `, statusList, priorityList, labelList)
@@ -1319,7 +1355,7 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "list":
-		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--project <name>|--all-projects] [--json]
+		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--batch <name>] [--project <name>|--all-projects] [--json]
 
 Lists Issues in the current Project. Issues in done are hidden by default, except with --status done.
 Use --ready to list the backlog/todo frontier whose blockers are all done and conflicts_with partners are not unsafe to start in parallel; an agent can fan out one git worktree per ready Issue.
@@ -1330,6 +1366,7 @@ Flags:
   --priority <priority>    Filter by %s.
   --label <label>          Filter by Label. Repeatable.
   --search <text>          Full-text search in title and body.
+  --batch <name>           Filter to Issues assigned to an existing Batch.
   --project <name>         Explicit Project.
   --all-projects           Lists all Projects.
   --json                   Prints JSON.
@@ -1369,7 +1406,7 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "edit":
-		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--batch <name>|--batch ""] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
 
 Edits an Issue. Requires at least one change.
 
@@ -1377,6 +1414,7 @@ Flags:
   --title <title>          New title.
   --priority <priority>    %s.
   --body <text>|-          New markdown body. Use "-" to read stdin.
+  --batch <name>|""        Move into a Batch, or clear membership with "".
   --add-label <label>      Adds a Label. Repeatable.
   --remove-label <label>   Removes a Label. Repeatable.
   --block <ID>             Adds a blocked_by link.
@@ -1517,6 +1555,7 @@ func printIssueDetail(i issue, jsonMode bool) int {
 	fmt.Printf("Title: %s\n", i.Title)
 	fmt.Printf("Status: %s\n", i.Status)
 	fmt.Printf("Priority: %s\n", i.Priority)
+	fmt.Printf("Batch: %s\n", formatOptionalString(i.Batch))
 	fmt.Printf("Created: %s\n", i.Created)
 	fmt.Printf("Updated: %s\n", i.Updated)
 	fmt.Printf("Labels: %s\n", formatList(i.Labels))
@@ -1546,6 +1585,7 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 				BlockedBy:     i.BlockedBy,
 				RelatesTo:     i.RelatesTo,
 				ConflictsWith: i.ConflictsWith,
+				Batch:         i.Batch,
 				Created:       i.Created,
 				Updated:       i.Updated,
 			})
@@ -1580,6 +1620,13 @@ func formatList(values []string) string {
 		return "[]"
 	}
 	return strings.Join(values, ", ")
+}
+
+func formatOptionalString(value *string) string {
+	if value == nil {
+		return "none"
+	}
+	return *value
 }
 
 func isValidValue(value string, valid map[string]struct{}) bool {
