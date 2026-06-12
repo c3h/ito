@@ -52,6 +52,7 @@ type viewMode string
 const (
 	viewDigest   viewMode = "digest"
 	viewBoard    viewMode = "board"
+	viewBatches  viewMode = "batches"
 	viewIssue    viewMode = "issue"
 	viewLabels   viewMode = "labels"
 	viewProjects viewMode = "projects"
@@ -83,6 +84,7 @@ type model struct {
 	store         *store.Store
 	project       store.Project
 	sections      []digestSection
+	batchSections []batchSection
 	focusIndex    int
 	mode          viewMode
 	returnMode    viewMode
@@ -167,19 +169,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = m.detailReturnMode()
 			}
 		case "1":
-			if m.mode == viewDigest || m.mode == viewBoard {
+			if m.isSurfaceMode() {
 				m.mode = viewDigest
 			}
 		case "2":
-			if m.mode == viewDigest || m.mode == viewBoard {
+			if m.isSurfaceMode() {
 				m.mode = viewBoard
+			}
+		case "3":
+			if m.isSurfaceMode() && m.mode != viewBatches {
+				m.mode = viewBatches
+				m.reloadBatches()
 			}
 		case "/":
 			if m.mode == viewDigest || m.mode == viewBoard {
 				m.filterOpen = true
 			}
 		case ":":
-			if m.mode != viewLabels {
+			// The Batches surface stays read-only in this slice: its focus model
+			// arrives next, so : (acting on the Digest selection) would mutate an
+			// Issue this surface doesn't show.
+			if m.mode != viewLabels && m.mode != viewBatches {
 				m.commandOpen = true
 			}
 		case "enter":
@@ -198,11 +208,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toggleFocusedSection()
 			}
 		case "s":
-			if m.mode != viewLabels {
+			if m.mode != viewLabels && m.mode != viewBatches {
 				m.moveSelectedIssueStatus()
 			}
 		case "r":
-			if m.mode != viewLabels {
+			switch m.mode {
+			case viewLabels:
+			case viewBatches:
+				m.reloadBatches()
+			default:
 				m.reloadDigest()
 			}
 		case "p":
@@ -223,6 +237,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveDetailIssue(-1)
 			case viewLabels:
 				m.moveLabelCursor(-1)
+			case viewBatches: // selection arrives in the next slice
 			default:
 				m.moveSelection(-1)
 			}
@@ -232,6 +247,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveDetailIssue(1)
 			case viewLabels:
 				m.moveLabelCursor(1)
+			case viewBatches: // selection arrives in the next slice
 			default:
 				m.moveSelection(1)
 			}
@@ -257,6 +273,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	}
 	return m, nil
+}
+
+// isSurfaceMode reports whether one of the header-tab surfaces is active — the
+// only modes the 1/2/3 surface keys switch between.
+func (m model) isSurfaceMode() bool {
+	return m.mode == viewDigest || m.mode == viewBoard || m.mode == viewBatches
 }
 
 // editInlineInput applies a key to an open inline input — the / filter or the :
@@ -297,6 +319,9 @@ func (m model) View() string {
 	}
 	if m.mode == viewBoard {
 		return m.boardView()
+	}
+	if m.mode == viewBatches {
+		return m.batchesView()
 	}
 
 	width := m.viewWidth()
@@ -799,66 +824,69 @@ func (m model) digestWindows(sections []digestSection) []issueWindow {
 }
 
 func (m model) digestSectionCapacities(sections []digestSection) []int {
-	capacities := make([]int, len(sections))
-	showAll := func() []int {
-		for i, section := range sections {
-			if section.hidden {
-				continue
-			}
-			capacities[i] = len(section.Issues)
+	counts := make([]int, len(sections))
+	for i, section := range sections {
+		if !section.hidden {
+			counts[i] = len(section.Issues)
 		}
-		return capacities
 	}
-	if m.height <= 0 {
+	return allocateLineBudgets(counts, m.height)
+}
+
+// allocateLineBudgets splits the terminal height across sections wanting
+// counts[i] lines each — shared by the Digest sections and the Batch bodies.
+// Every section spends sectionChromeLines on its heading and trailing blank,
+// including empty and collapsed ones (count 0), so hiding preserves the
+// surface's visual rhythm. When everything fits each section gets its full
+// count; otherwise non-empty sections start at one line and grow round-robin.
+func allocateLineBudgets(counts []int, height int) []int {
+	budgets := make([]int, len(counts))
+	showAll := func() []int {
+		copy(budgets, counts)
+		return budgets
+	}
+	if height <= 0 {
 		return showAll()
 	}
 
 	nonEmptySections := 0
-	totalIssues := 0
-	for _, section := range sections {
-		if section.hidden {
-			continue
-		}
-		if len(section.Issues) == 0 {
+	totalLines := 0
+	for _, count := range counts {
+		if count == 0 {
 			continue
 		}
 		nonEmptySections++
-		totalIssues += len(section.Issues)
+		totalLines += count
 	}
 	if nonEmptySections == 0 {
-		return capacities
+		return budgets
 	}
 
-	// Every section spends sectionChromeLines on its heading and trailing blank,
-	// including collapsed sections, so hiding preserves the Digest's visual rhythm.
-	fixedLines := digestChromeLines + len(sections)*sectionChromeLines
-	available := m.height - fixedLines
-	if available >= totalIssues {
+	fixedLines := digestChromeLines + len(counts)*sectionChromeLines
+	available := height - fixedLines
+	if available >= totalLines {
 		return showAll()
 	}
 	if available < nonEmptySections {
 		available = nonEmptySections
 	}
 
-	for i, section := range sections {
-		if section.hidden {
-			continue
-		}
-		if len(section.Issues) > 0 {
-			capacities[i] = 1
+	for i, count := range counts {
+		if count > 0 {
+			budgets[i] = 1
 		}
 	}
 	remaining := available - nonEmptySections
 	for remaining > 0 {
 		grew := false
-		for i, section := range sections {
+		for i, count := range counts {
 			if remaining == 0 {
 				break
 			}
-			if section.hidden || capacities[i] == 0 || capacities[i] >= len(section.Issues) {
+			if budgets[i] == 0 || budgets[i] >= count {
 				continue
 			}
-			capacities[i]++
+			budgets[i]++
 			remaining--
 			grew = true
 		}
@@ -866,7 +894,7 @@ func (m model) digestSectionCapacities(sections []digestSection) []int {
 			break
 		}
 	}
-	return capacities
+	return budgets
 }
 
 func visibleIssueWindow(total, selected, lineBudget int) issueWindow {
@@ -1441,27 +1469,32 @@ func (m model) projectPickerView() string {
 	return strings.Join(lines, "\n")
 }
 
-func header(projectName string, issueCount, width int, active viewMode) string {
+func header(projectName string, count, width int, active viewMode) string {
 	// Measure the plain text so the gap counts visible runes only, then style
 	// each segment — colouring adds no visible width. The numbers stay in the
 	// default ink; only the active view name takes the accent colour.
 	// Inset by one space on each side so the header aligns with the content rows
 	// below (which all start at column 1) while the rule spans edge to edge.
-	left := " ito · [1] digest · [2] board"
-	right := fmt.Sprintf("%d issues   %s ", issueCount, projectName)
+	left := " ito · [1] digest · [2] board · [3] batches"
+	noun := "issues"
+	if active == viewBatches {
+		noun = "batches"
+	}
+	right := fmt.Sprintf("%d %s   %s ", count, noun, projectName)
 	gap := width - runeLen(left) - runeLen(right)
 	if gap < 1 {
 		gap = 1
 	}
 
-	digestStyle, boardStyle := styleText, styleText
-	if active == viewBoard {
-		boardStyle = styleActive
-	} else {
-		digestStyle = styleActive
+	tab := func(name string, mode viewMode) string {
+		if mode == active {
+			return styleActive.Render(name)
+		}
+		return styleText.Render(name)
 	}
-	styledLeft := styleText.Render(" ito · [1] ") + digestStyle.Render("digest") +
-		styleText.Render(" · [2] ") + boardStyle.Render("board")
+	styledLeft := styleText.Render(" ito · [1] ") + tab("digest", viewDigest) +
+		styleText.Render(" · [2] ") + tab("board", viewBoard) +
+		styleText.Render(" · [3] ") + tab("batches", viewBatches)
 	return styledLeft + strings.Repeat(" ", gap) + styleText.Render(right)
 }
 

@@ -1361,6 +1361,8 @@ func keyMsg(t *testing.T, key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}}
 	case "2":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}}
+	case "3":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}}
 	case "q":
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}
 	case "ctrl+c":
