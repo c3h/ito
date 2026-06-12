@@ -192,6 +192,8 @@ type issue = itostore.Issue
 
 type batch = itostore.Batch
 
+type batchPlan = itostore.BatchPlan
+
 type createdBatch struct {
 	Name    string `json:"name"`
 	Project string `json:"project"`
@@ -209,6 +211,21 @@ type batchListItem struct {
 type deletedBatch struct {
 	Deleted        string `json:"deleted"`
 	MembersCleared int    `json:"members_cleared"`
+}
+
+type batchShowItem struct {
+	Name    string          `json:"name"`
+	Project string          `json:"project"`
+	Created string          `json:"created"`
+	Total   int             `json:"total"`
+	Done    int             `json:"done"`
+	Waves   []batchWaveItem `json:"waves"`
+}
+
+type batchWaveItem struct {
+	Wave   int             `json:"wave"`
+	Ready  bool            `json:"ready"`
+	Issues []issueListItem `json:"issues"`
 }
 
 type issueListItem struct {
@@ -362,6 +379,8 @@ func runBatch(args []string) int {
 		return runBatchRename(args[1:])
 	case "rm":
 		return runBatchRM(args[1:])
+	case "show":
+		return runBatchShow(args[1:])
 	default:
 		return fail(wantsJSON(args[1:], nil), exitBadUsage, "unknown batch command: "+args[0]+".", "Run 'ito batch --help' to see available commands.")
 	}
@@ -529,6 +548,49 @@ func runBatchRM(args []string) int {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete the Batch: %v", err), "try again or inspect the central store.")
 	}
 	return printDeletedBatch(deleted.Name, deleted.MembersCleared, jsonMode)
+}
+
+func runBatchShow(args []string) int {
+	if wantsHelp(args, commandValueFlags("batch show")) {
+		printCommandHelp("batch show")
+		return 0
+	}
+	fs := flag.NewFlagSet("batch show", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, commandValueFlags("batch show")), exitBadUsage, err.Error(), "run 'ito batch show --help' to see the accepted flags.")
+	}
+	if len(positionals) != 1 {
+		return fail(jsonMode, exitBadUsage, "ito batch show takes exactly one name.", "use: ito batch show <name>.")
+	}
+
+	db, st, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+
+	p, code, message, hint := resolveProject(st, projectName)
+	if code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+	plan, err := st.ShowBatch(p, positionals[0])
+	if err != nil {
+		if errors.Is(err, itostore.ErrBatchNotFound) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", positionals[0], p.Name), "run 'ito batch list' to see the Project's Batches.")
+		}
+		var cycle *itostore.BatchCycleError
+		if errors.As(err, &cycle) {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("Batch %q has a blocked_by cycle among: %s.", positionals[0], strings.Join(cycle.Issues, ", ")), "remove or change one blocked_by link before deriving Waves.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not show Batch: %v", err), "try again or inspect the central store.")
+	}
+	return printBatchShow(plan, jsonMode)
 }
 
 func runInit(args []string) int {
@@ -1309,6 +1371,8 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "batch rm":
 		return map[string]struct{}{"project": {}}
+	case "batch show":
+		return map[string]struct{}{"project": {}}
 	case "move":
 		return map[string]struct{}{"project": {}}
 	case "edit":
@@ -1478,6 +1542,7 @@ Manages Batches in the current Project.
 Commands:
   new      Creates a Batch.
   list     Lists Batches newest-first.
+  show     Shows a Batch grouped by derived Waves.
   rename   Renames a Batch.
   rm       Deletes a Batch and releases its members.
 
@@ -1510,6 +1575,14 @@ Flags:
 		fmt.Println(`usage: ito batch rm [--project <name>] [--json] <name>
 
 Deletes a Batch and clears membership from its Issues. Issues are never deleted.
+
+Flags:
+  --project <name>     Explicit Project.
+  --json               Prints JSON.`)
+	case "batch show":
+		fmt.Println(`usage: ito batch show [--project <name>] [--json] <name>
+
+Shows the Batch's non-done members grouped by derived Waves, plus done/total progress.
 
 Flags:
   --project <name>     Explicit Project.
@@ -1671,6 +1744,48 @@ func printDeletedBatch(name string, membersCleared int, jsonMode bool) int {
 	return 0
 }
 
+func printBatchShow(plan batchPlan, jsonMode bool) int {
+	if jsonMode {
+		item := batchShowItem{
+			Name:    plan.Name,
+			Project: plan.Project,
+			Created: plan.Created,
+			Total:   plan.Total,
+			Done:    plan.Done,
+			Waves:   make([]batchWaveItem, 0, len(plan.Waves)),
+		}
+		for _, wave := range plan.Waves {
+			waveItem := batchWaveItem{
+				Wave:   wave.Wave,
+				Ready:  wave.Ready,
+				Issues: make([]issueListItem, 0, len(wave.Issues)),
+			}
+			for _, issue := range wave.Issues {
+				waveItem.Issues = append(waveItem.Issues, issueListJSON(issue))
+			}
+			item.Waves = append(item.Waves, waveItem)
+		}
+		return printJSON(item, "Batch")
+	}
+
+	fmt.Printf("%s %s %d/%d\n", plan.Name, batchCreatedDate(plan.Created), plan.Done, plan.Total)
+	if len(plan.Waves) == 0 {
+		return 0
+	}
+	style := newListStyle()
+	for _, wave := range plan.Waves {
+		state := "waiting"
+		if wave.Ready {
+			state = "ready"
+		}
+		fmt.Printf("\nWave %d · %s\n", wave.Wave, state)
+		for _, issue := range wave.Issues {
+			fmt.Printf("%s [%s %s] %s\n", style.issueID(issue.ID), style.status(issue.Status), style.priority(issue.Priority), issue.Title)
+		}
+	}
+	return 0
+}
+
 func batchCreatedDate(created string) string {
 	parsed, err := time.Parse(time.RFC3339, created)
 	if err != nil {
@@ -1708,20 +1823,7 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 	if jsonMode {
 		items := make([]issueListItem, 0, len(issues))
 		for _, i := range issues {
-			items = append(items, issueListItem{
-				ID:            i.ID,
-				Project:       i.Project,
-				Title:         i.Title,
-				Status:        i.Status,
-				Priority:      i.Priority,
-				Labels:        i.Labels,
-				BlockedBy:     i.BlockedBy,
-				RelatesTo:     i.RelatesTo,
-				ConflictsWith: i.ConflictsWith,
-				Batch:         i.Batch,
-				Created:       i.Created,
-				Updated:       i.Updated,
-			})
+			items = append(items, issueListJSON(i))
 		}
 		return printJSON(items, "Issue list")
 	}
@@ -1746,6 +1848,23 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 		fmt.Printf("%s%s [%s %s] %s\n", prefix, style.issueID(i.ID), style.status(i.Status), style.priority(i.Priority), i.Title)
 	}
 	return 0
+}
+
+func issueListJSON(i issue) issueListItem {
+	return issueListItem{
+		ID:            i.ID,
+		Project:       i.Project,
+		Title:         i.Title,
+		Status:        i.Status,
+		Priority:      i.Priority,
+		Labels:        i.Labels,
+		BlockedBy:     i.BlockedBy,
+		RelatesTo:     i.RelatesTo,
+		ConflictsWith: i.ConflictsWith,
+		Batch:         i.Batch,
+		Created:       i.Created,
+		Updated:       i.Updated,
+	}
 }
 
 func formatList(values []string) string {

@@ -499,11 +499,198 @@ func TestListIssuesReadyHonoursConflictsWith(t *testing.T) {
 	}
 }
 
+func TestShowBatchDerivesWavesWithConflictsAndReadyIdentity(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("wave-app", "WAV", filepath.Join(t.TempDir(), "wave"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "refactor"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	low := createStoreIssueInBatch(t, st, project, "Low loser", "todo", "low", "refactor")
+	high := createStoreIssueInBatch(t, st, project, "High winner", "todo", "high", "refactor")
+	addStoreLink(t, st, project, low.ID, "conflicts_with", high.ID)
+
+	plan, err := st.ShowBatch(project, "refactor")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 2 {
+		t.Fatalf("expected two waves, got %#v", plan.Waves)
+	}
+	if got := storeIssueIDs(plan.Waves[0].Issues); !slices.Equal(got, []string{high.ID}) {
+		t.Fatalf("expected winner in wave 1, got %v", got)
+	}
+	if got := storeIssueIDs(plan.Waves[1].Issues); !slices.Equal(got, []string{low.ID}) {
+		t.Fatalf("expected loser in wave 2, got %v", got)
+	}
+
+	ready, err := st.ListIssues(ListOptions{ProjectID: project.ID, Batch: "refactor", Ready: true})
+	if err != nil {
+		t.Fatalf("list batch ready: %v", err)
+	}
+	if got, want := storeIssueIDs(plan.Waves[0].Issues), storeIssueIDs(ready); !slices.Equal(got, want) {
+		t.Fatalf("wave 1 must equal list --batch --ready, wave=%v ready=%v", got, want)
+	}
+}
+
+func TestShowBatchLetsConflictLoserPrecedeBlockedWinner(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("prototype-app", "PRT", filepath.Join(t.TempDir(), "prototype"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "storage-refactor"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	blocker := createStoreIssueInBatch(t, st, project, "Extract config loader", "todo", "high", "storage-refactor")
+	winner := createStoreIssueInBatch(t, st, project, "Migrate writes", "todo", "high", "storage-refactor")
+	loser := createStoreIssueInBatch(t, st, project, "Port FTS triggers", "todo", "medium", "storage-refactor")
+	addStoreLink(t, st, project, winner.ID, "blocked_by", blocker.ID)
+	addStoreLink(t, st, project, loser.ID, "conflicts_with", winner.ID)
+
+	plan, err := st.ShowBatch(project, "storage-refactor")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 2 {
+		t.Fatalf("expected two waves, got %#v", plan.Waves)
+	}
+	if got := storeIssueIDs(plan.Waves[0].Issues); !slices.Equal(got, []string{blocker.ID, loser.ID}) {
+		t.Fatalf("expected blocker and conflict loser in wave 1, got %v", got)
+	}
+	if got := storeIssueIDs(plan.Waves[1].Issues); !slices.Equal(got, []string{winner.ID}) {
+		t.Fatalf("expected blocked conflict winner in wave 2, got %v", got)
+	}
+}
+
+func TestShowBatchHonoursExternalBlockersAndDoneProgress(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("external-app", "EXT", filepath.Join(t.TempDir(), "external"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	ready := createStoreIssueInBatch(t, st, project, "Ready member", "todo", "medium", "release")
+	blocked := createStoreIssueInBatch(t, st, project, "Externally blocked", "todo", "high", "release")
+	done := createStoreIssueInBatch(t, st, project, "Done member", "done", "urgent", "release")
+	external := createStoreIssue(t, st, project, "External blocker", "todo", "urgent")
+	addStoreLink(t, st, project, blocked.ID, "blocked_by", external.ID)
+
+	plan, err := st.ShowBatch(project, "release")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if plan.Total != 3 || plan.Done != 1 {
+		t.Fatalf("expected progress 1/3, got %d/%d", plan.Done, plan.Total)
+	}
+	if len(plan.Waves) != 1 {
+		t.Fatalf("expected only derivable wave, got %#v", plan.Waves)
+	}
+	if got := storeIssueIDs(plan.Waves[0].Issues); !slices.Equal(got, []string{ready.ID}) {
+		t.Fatalf("expected external blocker to keep %s out of wave 1, got %v", blocked.ID, got)
+	}
+	for _, issue := range plan.Waves[0].Issues {
+		if issue.ID == done.ID {
+			t.Fatalf("done member must not be listed in waves")
+		}
+	}
+}
+
+func TestShowBatchCompleteBatchHasNoWaves(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("complete-app", "CMP", filepath.Join(t.TempDir(), "complete"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "done-work"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	createStoreIssueInBatch(t, st, project, "Done one", "done", "low", "done-work")
+	createStoreIssueInBatch(t, st, project, "Done two", "done", "high", "done-work")
+
+	plan, err := st.ShowBatch(project, "done-work")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if plan.Total != 2 || plan.Done != 2 || len(plan.Waves) != 0 {
+		t.Fatalf("expected complete progress and no waves, got %#v", plan)
+	}
+}
+
+func TestShowBatchReportsBlockedByCycle(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("cycle-app", "CYC", filepath.Join(t.TempDir(), "cycle"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "cycle"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	first := createStoreIssueInBatch(t, st, project, "First", "todo", "medium", "cycle")
+	second := createStoreIssueInBatch(t, st, project, "Second", "todo", "medium", "cycle")
+	third := createStoreIssueInBatch(t, st, project, "Third", "todo", "medium", "cycle")
+	addStoreLink(t, st, project, first.ID, "blocked_by", second.ID)
+	addStoreLink(t, st, project, second.ID, "blocked_by", third.ID)
+	addStoreLink(t, st, project, third.ID, "blocked_by", first.ID)
+
+	_, err = st.ShowBatch(project, "cycle")
+	var cycle *BatchCycleError
+	if !errors.As(err, &cycle) {
+		t.Fatalf("expected BatchCycleError, got %v", err)
+	}
+	if !slices.Equal(cycle.Issues, []string{first.ID, second.ID, third.ID}) {
+		t.Fatalf("expected cycle issues to name every member, got %#v", cycle.Issues)
+	}
+}
+
 func createStoreIssue(t *testing.T, st *Store, project Project, title, status, priority string) Issue {
 	t.Helper()
 	issue, err := st.CreateIssue(project, title, status, priority, nil, "")
 	if err != nil {
 		t.Fatalf("create issue %q: %v", title, err)
+	}
+	return issue
+}
+
+func createStoreIssueInBatch(t *testing.T, st *Store, project Project, title, status, priority, batch string) Issue {
+	t.Helper()
+	issue, err := st.CreateIssueInBatch(project, title, status, priority, nil, "", batch)
+	if err != nil {
+		t.Fatalf("create issue %q in batch %q: %v", title, batch, err)
 	}
 	return issue
 }

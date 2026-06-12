@@ -67,6 +67,7 @@ var (
 	ErrDetached      = errors.New("project detached")
 	ErrNotFound      = errors.New("not found")
 	ErrBatchNotFound = errors.New("batch not found")
+	ErrBatchCycle    = errors.New("batch dependency cycle")
 	ErrCrossProject  = errors.New("cross-project link")
 	ErrNameExists    = errors.New("project name already exists")
 	ErrPrefixExists  = errors.New("project prefix already exists")
@@ -114,6 +115,18 @@ func (e *CrossProjectError) Unwrap() error {
 	return ErrCrossProject
 }
 
+type BatchCycleError struct {
+	Issues []string
+}
+
+func (e *BatchCycleError) Error() string {
+	return fmt.Sprintf("%v: %s", ErrBatchCycle, strings.Join(e.Issues, ", "))
+}
+
+func (e *BatchCycleError) Unwrap() error {
+	return ErrBatchCycle
+}
+
 type Project struct {
 	ID       int64   `json:"id"`
 	Name     string  `json:"name"`
@@ -148,6 +161,17 @@ type Batch struct {
 type DeleteBatchResult struct {
 	Name           string
 	MembersCleared int
+}
+
+type BatchPlan struct {
+	Batch
+	Waves []BatchWave `json:"waves"`
+}
+
+type BatchWave struct {
+	Wave   int     `json:"wave"`
+	Ready  bool    `json:"ready"`
+	Issues []Issue `json:"issues"`
 }
 
 type ListOptions struct {
@@ -339,6 +363,10 @@ func (s *Store) RenameBatch(p Project, oldName, newName string) (Batch, error) {
 
 func (s *Store) DeleteBatch(p Project, name string) (DeleteBatchResult, error) {
 	return deleteBatch(s.db, p, name)
+}
+
+func (s *Store) ShowBatch(p Project, name string) (BatchPlan, error) {
+	return showBatch(s.db, p, name)
 }
 
 func (s *Store) FindIssue(p Project, id string) (Issue, error) {
@@ -1010,6 +1038,219 @@ func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) 
 	return DeleteBatchResult{Name: name, MembersCleared: int(membersCleared)}, nil
 }
 
+func showBatch(db *sql.DB, p Project, name string) (BatchPlan, error) {
+	batch, batchID, err := findBatchWithProgress(db, p, name)
+	if err != nil {
+		return BatchPlan{}, err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return BatchPlan{}, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`CREATE TEMP TABLE IF NOT EXISTS ito_wave_done (issue_id TEXT PRIMARY KEY)`); err != nil {
+		return BatchPlan{}, err
+	}
+	if _, err := tx.Exec(`DELETE FROM ito_wave_done`); err != nil {
+		return BatchPlan{}, err
+	}
+	defer tx.Exec(`DROP TABLE IF EXISTS ito_wave_done`)
+
+	waves := []BatchWave{}
+	for waveNumber := 1; ; waveNumber++ {
+		remaining, err := countRemainingBatchMembers(tx, batchID)
+		if err != nil {
+			return BatchPlan{}, err
+		}
+		if remaining == 0 {
+			break
+		}
+
+		issues, err := readyBatchWave(tx, p, batchID)
+		if err != nil {
+			return BatchPlan{}, err
+		}
+		if len(issues) == 0 {
+			cycle, err := findBatchBlockedByCycle(tx, batchID)
+			if err != nil {
+				return BatchPlan{}, err
+			}
+			if len(cycle) > 0 {
+				return BatchPlan{}, &BatchCycleError{Issues: cycle}
+			}
+			break
+		}
+
+		waves = append(waves, BatchWave{
+			Wave:   waveNumber,
+			Ready:  waveNumber == 1,
+			Issues: issues,
+		})
+		for _, issue := range issues {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO ito_wave_done(issue_id) VALUES (?)`, issue.ID); err != nil {
+				return BatchPlan{}, err
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return BatchPlan{}, err
+	}
+	return BatchPlan{Batch: batch, Waves: waves}, nil
+}
+
+func findBatchWithProgress(db *sql.DB, p Project, name string) (Batch, int64, error) {
+	row := db.QueryRow(`
+SELECT batches.id, batches.name, projects.name, batches.created,
+       count(issues.row_id) AS total,
+       count(CASE WHEN issues.status = 'done' THEN 1 END) AS done
+FROM batches
+JOIN projects ON projects.id = batches.project_id
+LEFT JOIN issues ON issues.batch_id = batches.id
+WHERE batches.project_id = ? AND batches.name = ?
+GROUP BY batches.id, batches.name, projects.name, batches.created`, p.ID, name)
+	var batch Batch
+	var batchID int64
+	if err := row.Scan(&batchID, &batch.Name, &batch.Project, &batch.Created, &batch.Total, &batch.Done); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Batch{}, 0, ErrBatchNotFound
+		}
+		return Batch{}, 0, err
+	}
+	return batch, batchID, nil
+}
+
+func countRemainingBatchMembers(q rowQuerier, batchID int64) (int, error) {
+	var remaining int
+	err := q.QueryRow(`
+SELECT count(*)
+FROM issues
+WHERE batch_id = ?
+  AND status != 'done'
+  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)`, batchID).Scan(&remaining)
+	return remaining, err
+}
+
+func readyBatchWave(q rowQuerier, p Project, batchID int64) ([]Issue, error) {
+	query := `
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, batches.name, issues.body, issues.created, issues.updated
+FROM issues
+JOIN projects ON projects.id = issues.project_id
+LEFT JOIN batches ON batches.id = issues.batch_id
+WHERE issues.batch_id = ?
+  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)
+  AND ` + readyFrontierWhereSQLWithOptions("issues", "ito_wave_done", "issues.status != 'done'") + `
+ORDER BY ` + priorityOrderSQL + `,
+issues.updated DESC,
+issues.id ASC`
+	rows, err := q.Query(query, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	issues := []Issue{}
+	for rows.Next() {
+		found := Issue{
+			Labels:        []string{},
+			BlockedBy:     []string{},
+			RelatesTo:     []string{},
+			ConflictsWith: []string{},
+		}
+		var batch sql.NullString
+		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
+			return nil, err
+		}
+		if batch.Valid {
+			found.Batch = &batch.String
+		}
+		if err := loadIssueRelations(q, p.ID, &found); err != nil {
+			return nil, err
+		}
+		issues = append(issues, found)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return issues, nil
+}
+
+func findBatchBlockedByCycle(q rowQuerier, batchID int64) ([]string, error) {
+	rows, err := q.Query(`
+SELECT source.id, target.id
+FROM issue_links
+JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.kind = 'blocked_by'
+  AND source.batch_id = ?
+  AND target.batch_id = ?
+  AND source.status != 'done'
+  AND target.status != 'done'
+  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = source.id)
+  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = target.id)
+ORDER BY source.id, target.id`, batchID, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	graph := map[string][]string{}
+	nodes := map[string]struct{}{}
+	for rows.Next() {
+		var source, target string
+		if err := rows.Scan(&source, &target); err != nil {
+			return nil, err
+		}
+		graph[source] = append(graph[source], target)
+		nodes[source] = struct{}{}
+		nodes[target] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	visited := map[string]bool{}
+	inStack := map[string]int{}
+	stack := []string{}
+	var visit func(string) []string
+	visit = func(id string) []string {
+		visited[id] = true
+		inStack[id] = len(stack)
+		stack = append(stack, id)
+		for _, next := range graph[id] {
+			if index, ok := inStack[next]; ok {
+				cycle := append([]string{}, stack[index:]...)
+				sortIssueIDs(cycle)
+				return cycle
+			}
+			if !visited[next] {
+				if cycle := visit(next); len(cycle) > 0 {
+					return cycle
+				}
+			}
+		}
+		stack = stack[:len(stack)-1]
+		delete(inStack, id)
+		return nil
+	}
+
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sortIssueIDs(ids)
+	for _, id := range ids {
+		if !visited[id] {
+			if cycle := visit(id); len(cycle) > 0 {
+				return cycle, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
 func updateProjectRoot(db *sql.DB, p Project) (Project, error) {
 	result, err := db.Exec(`UPDATE projects SET root_path = ? WHERE id = ?`, p.RootPath, p.ID)
 	if err != nil {
@@ -1604,7 +1845,11 @@ issues.id ASC`
 }
 
 func readyFrontierWhereSQL(issueAlias string) string {
-	return otherwiseReadyWhereSQL(issueAlias) + `
+	return readyFrontierWhereSQLWithOptions(issueAlias, "", issueAlias+".status IN ('backlog', 'todo')")
+}
+
+func readyFrontierWhereSQLWithOptions(issueAlias, doneTable, statusWhere string) string {
+	return otherwiseReadyWhereSQLWithOptions(issueAlias, doneTable, statusWhere) + `
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS in_flight_conflict
 JOIN issues AS in_flight_partner ON in_flight_partner.project_id = in_flight_conflict.project_id
@@ -1616,6 +1861,7 @@ WHERE in_flight_conflict.project_id = ` + issueAlias + `.project_id
   AND in_flight_conflict.kind = 'conflicts_with'
   AND (in_flight_conflict.source_id = ` + issueAlias + `.id OR in_flight_conflict.target_id = ` + issueAlias + `.id)
   AND in_flight_partner.status IN ('in_progress', 'in_review')
+  AND NOT ` + doneStatusWhereSQL("in_flight_partner", doneTable) + `
 )
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS ready_conflict
@@ -1627,22 +1873,34 @@ JOIN issues AS ready_partner ON ready_partner.project_id = ready_conflict.projec
 WHERE ready_conflict.project_id = ` + issueAlias + `.project_id
   AND ready_conflict.kind = 'conflicts_with'
   AND (ready_conflict.source_id = ` + issueAlias + `.id OR ready_conflict.target_id = ` + issueAlias + `.id)
-  AND ` + otherwiseReadyWhereSQL("ready_partner") + `
+  AND ` + otherwiseReadyWhereSQLWithOptions("ready_partner", doneTable, strings.ReplaceAll(statusWhere, issueAlias+".", "ready_partner.")) + `
   AND ` + readyConflictPartnerBeatsSQL("ready_partner", issueAlias) + `
 )`
 }
 
 func otherwiseReadyWhereSQL(issueAlias string) string {
+	return otherwiseReadyWhereSQLWithOptions(issueAlias, "", issueAlias+".status IN ('backlog', 'todo')")
+}
+
+func otherwiseReadyWhereSQLWithOptions(issueAlias, doneTable, statusWhere string) string {
 	blockerAlias := issueAlias + "_blocker"
-	return issueAlias + `.status IN ('backlog', 'todo')
+	return statusWhere + `
+AND NOT ` + doneStatusWhereSQL(issueAlias, doneTable) + `
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS ` + blockerAlias + `_link
 JOIN issues AS ` + blockerAlias + ` ON ` + blockerAlias + `.project_id = ` + blockerAlias + `_link.project_id AND ` + blockerAlias + `.id = ` + blockerAlias + `_link.target_id
 WHERE ` + blockerAlias + `_link.project_id = ` + issueAlias + `.project_id
   AND ` + blockerAlias + `_link.source_id = ` + issueAlias + `.id
   AND ` + blockerAlias + `_link.kind = 'blocked_by'
-  AND ` + blockerAlias + `.status != 'done'
+  AND NOT ` + doneStatusWhereSQL(blockerAlias, doneTable) + `
 )`
+}
+
+func doneStatusWhereSQL(issueAlias, doneTable string) string {
+	if doneTable == "" {
+		return issueAlias + `.status = 'done'`
+	}
+	return `(` + issueAlias + `.status = 'done' OR EXISTS (SELECT 1 FROM ` + doneTable + ` WHERE ` + doneTable + `.issue_id = ` + issueAlias + `.id))`
 }
 
 func readyConflictPartnerBeatsSQL(partnerAlias, issueAlias string) string {

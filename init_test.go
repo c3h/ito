@@ -53,6 +53,21 @@ type deletedBatchJSON struct {
 	MembersCleared int    `json:"members_cleared"`
 }
 
+type batchShowJSON struct {
+	Name    string          `json:"name"`
+	Project string          `json:"project"`
+	Created string          `json:"created"`
+	Total   int             `json:"total"`
+	Done    int             `json:"done"`
+	Waves   []batchWaveJSON `json:"waves"`
+}
+
+type batchWaveJSON struct {
+	Wave   int         `json:"wave"`
+	Ready  bool        `json:"ready"`
+	Issues []issueJSON `json:"issues"`
+}
+
 func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 	repo := t.TempDir()
 	itoHome := t.TempDir()
@@ -90,7 +105,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "batch help",
 			args:     []string{"batch", "--help"},
-			contains: []string{"usage: ito batch <command>", "new", "list", "rename", "rm"},
+			contains: []string{"usage: ito batch <command>", "new", "list", "show", "rename", "rm"},
 		},
 		{
 			name:     "batch new help",
@@ -111,6 +126,11 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 			name:     "batch rm help",
 			args:     []string{"batch", "rm", "--help"},
 			contains: []string{"usage: ito batch rm", "--project", "--json", "Issues are never deleted"},
+		},
+		{
+			name:     "batch show help",
+			args:     []string{"batch", "show", "--help"},
+			contains: []string{"usage: ito batch show", "--project", "--json", "derived Waves"},
 		},
 		{
 			name:     "edit help",
@@ -1458,6 +1478,190 @@ func TestIssueBatchMembershipValidationAndProjectScope(t *testing.T) {
 				t.Fatalf("unknown Batch errors need batch-list hint, got %#v", envelope)
 			}
 		})
+	}
+}
+
+func TestBatchShowDerivesWavesAndMatchesReadyList(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "batch-show-app", "--prefix", "BSH"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "batch", "new", "refactor", "--json"); result.exitCode != 0 {
+		t.Fatalf("ito batch new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	fixtures := [][]string{
+		{"new", "--json", "--title", "Low loser", "--batch", "refactor", "--status", "todo", "--priority", "low"},
+		{"new", "--json", "--title", "High winner", "--batch", "refactor", "--status", "todo", "--priority", "high"},
+		{"new", "--json", "--title", "Later work", "--batch", "refactor", "--status", "todo", "--priority", "medium"},
+		{"new", "--json", "--title", "Done work", "--batch", "refactor", "--status", "done", "--priority", "urgent"},
+	}
+	for _, args := range fixtures {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "BSH-1", "--conflict", "BSH-2"); result.exitCode != 0 {
+		t.Fatalf("ito edit conflict failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "BSH-3", "--block", "BSH-2"); result.exitCode != 0 {
+		t.Fatalf("ito edit block failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	shown := runITO(t, repo, itoHome, "batch", "show", "refactor", "--json")
+	if shown.exitCode != 0 {
+		t.Fatalf("ito batch show failed with exit %d\nstdout: %s\nstderr: %s", shown.exitCode, shown.stdout, shown.stderr)
+	}
+	plan := decodeBatchShow(t, shown.stdout)
+	if plan.Name != "refactor" || plan.Project != "batch-show-app" || plan.Total != 4 || plan.Done != 1 {
+		t.Fatalf("unexpected batch show identity/progress: %#v", plan)
+	}
+	if len(plan.Waves) != 2 {
+		t.Fatalf("expected two waves, got %#v", plan.Waves)
+	}
+	if !plan.Waves[0].Ready || plan.Waves[1].Ready {
+		t.Fatalf("only wave 1 should be marked ready, got %#v", plan.Waves)
+	}
+	if got := issueIDs(plan.Waves[0].Issues); !stringSlicesEqual(got, []string{"BSH-2"}) {
+		t.Fatalf("expected conflict winner in wave 1, got %v\nstdout: %s", got, shown.stdout)
+	}
+	if got := issueIDs(plan.Waves[1].Issues); !stringSlicesEqual(got, []string{"BSH-3", "BSH-1"}) {
+		t.Fatalf("expected dependent work and conflict loser in wave 2, got %v\nstdout: %s", got, shown.stdout)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(shown.stdout), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"name", "project", "created", "total", "done", "waves"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("batch show JSON missing key %q in %s", key, shown.stdout)
+		}
+	}
+	var rawWaves []map[string]json.RawMessage
+	if err := json.Unmarshal(raw["waves"], &rawWaves); err != nil {
+		t.Fatal(err)
+	}
+	var rawIssues []map[string]json.RawMessage
+	if err := json.Unmarshal(rawWaves[0]["issues"], &rawIssues); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawIssues[0]["body"]; ok {
+		t.Fatalf("batch show issue JSON must omit body, got %s", shown.stdout)
+	}
+
+	ready := runITO(t, repo, itoHome, "list", "--json", "--batch", "refactor", "--ready")
+	if ready.exitCode != 0 {
+		t.Fatalf("ito list --batch --ready failed with exit %d\nstdout: %s\nstderr: %s", ready.exitCode, ready.stdout, ready.stderr)
+	}
+	if got, want := issueIDs(plan.Waves[0].Issues), issueIDs(decodeIssueList(t, ready.stdout)); !stringSlicesEqual(got, want) {
+		t.Fatalf("batch show wave 1 must match list --batch --ready, wave=%v ready=%v", got, want)
+	}
+
+	human := runITO(t, repo, itoHome, "batch", "show", "refactor")
+	if human.exitCode != 0 || human.stderr != "" {
+		t.Fatalf("ito batch show human failed with exit %d\nstdout: %s\nstderr: %s", human.exitCode, human.stdout, human.stderr)
+	}
+	if !strings.Contains(human.stdout, "refactor ") || !strings.Contains(human.stdout, "1/4") || !strings.Contains(human.stdout, "Wave 1") || !strings.Contains(human.stdout, "ready") || !strings.Contains(human.stdout, "Wave 2") || !strings.Contains(human.stdout, "waiting") {
+		t.Fatalf("human batch show must include progress and wave headings, got %q", human.stdout)
+	}
+}
+
+func TestBatchShowPrototypeConflictLoserCanPrecedeBlockedWinner(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "prototype-show", "--prefix", "PSH"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "batch", "new", "storage-refactor", "--json"); result.exitCode != 0 {
+		t.Fatalf("ito batch new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, args := range [][]string{
+		{"new", "--json", "--title", "extract config loader", "--batch", "storage-refactor", "--status", "todo", "--priority", "high"},
+		{"new", "--json", "--title", "migrate writes to new store", "--batch", "storage-refactor", "--status", "todo", "--priority", "high"},
+		{"new", "--json", "--title", "port FTS triggers", "--batch", "storage-refactor", "--status", "todo", "--priority", "medium"},
+	} {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "PSH-2", "--block", "PSH-1"); result.exitCode != 0 {
+		t.Fatalf("ito edit block failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "PSH-3", "--conflict", "PSH-2"); result.exitCode != 0 {
+		t.Fatalf("ito edit conflict failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	plan := decodeBatchShow(t, runITO(t, repo, itoHome, "batch", "show", "storage-refactor", "--json").stdout)
+	if got := issueIDs(plan.Waves[0].Issues); !stringSlicesEqual(got, []string{"PSH-1", "PSH-3"}) {
+		t.Fatalf("expected blocker and conflict loser in wave 1, got %v", got)
+	}
+	if got := issueIDs(plan.Waves[1].Issues); !stringSlicesEqual(got, []string{"PSH-2"}) {
+		t.Fatalf("expected blocked conflict winner in wave 2, got %v", got)
+	}
+}
+
+func TestBatchShowUnknownCompleteAndCycleErrors(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "batch-errors", "--prefix", "BER"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	unknown := runITO(t, repo, itoHome, "batch", "show", "missing", "--json")
+	if unknown.exitCode != exitNotFound || unknown.stdout != "" {
+		t.Fatalf("unknown batch show must fail exit 3 with no stdout, got exit=%d stdout=%q stderr=%q", unknown.exitCode, unknown.stdout, unknown.stderr)
+	}
+	envelope := decodeErrorEnvelope(t, unknown.stderr)
+	if envelope.Code != exitNotFound || !strings.Contains(envelope.Hint, "ito batch list") {
+		t.Fatalf("unexpected unknown batch error: %#v", envelope)
+	}
+
+	if result := runITO(t, repo, itoHome, "batch", "new", "complete", "--json"); result.exitCode != 0 {
+		t.Fatalf("ito batch new complete failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Done", "--batch", "complete", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("ito new done failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	completeResult := runITO(t, repo, itoHome, "batch", "show", "complete", "--json")
+	if completeResult.exitCode != 0 {
+		t.Fatalf("complete batch show failed with exit %d\nstdout: %s\nstderr: %s", completeResult.exitCode, completeResult.stdout, completeResult.stderr)
+	}
+	complete := decodeBatchShow(t, completeResult.stdout)
+	if complete.Total != 1 || complete.Done != 1 || len(complete.Waves) != 0 {
+		t.Fatalf("complete batch must show full progress and no waves, got %#v", complete)
+	}
+
+	if result := runITO(t, repo, itoHome, "batch", "new", "cycle", "--json"); result.exitCode != 0 {
+		t.Fatalf("ito batch new cycle failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, title := range []string{"First", "Second", "Third"} {
+		if result := runITO(t, repo, itoHome, "new", "--json", "--title", title, "--batch", "cycle", "--status", "todo"); result.exitCode != 0 {
+			t.Fatalf("ito new %s failed with exit %d\nstdout: %s\nstderr: %s", title, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	for _, args := range [][]string{
+		{"edit", "--json", "BER-2", "--block", "BER-3"},
+		{"edit", "--json", "BER-3", "--block", "BER-4"},
+		{"edit", "--json", "BER-4", "--block", "BER-2"},
+	} {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	cycle := runITO(t, repo, itoHome, "batch", "show", "cycle", "--json")
+	if cycle.exitCode != exitGeneric || cycle.stdout != "" {
+		t.Fatalf("cycle batch show must fail exit 1 with no stdout, got exit=%d stdout=%q stderr=%q", cycle.exitCode, cycle.stdout, cycle.stderr)
+	}
+	envelope = decodeErrorEnvelope(t, cycle.stderr)
+	for _, id := range []string{"BER-2", "BER-3", "BER-4"} {
+		if !strings.Contains(envelope.Error, id) {
+			t.Fatalf("cycle error must name %s, got %#v", id, envelope)
+		}
 	}
 }
 
@@ -3800,6 +4004,15 @@ func decodeBatchList(t *testing.T, stdout string) []batchJSON {
 		t.Fatalf("stdout is not a JSON Batch array: %v\nstdout: %s", err, stdout)
 	}
 	return batches
+}
+
+func decodeBatchShow(t *testing.T, stdout string) batchShowJSON {
+	t.Helper()
+	var batch batchShowJSON
+	if err := json.Unmarshal([]byte(stdout), &batch); err != nil {
+		t.Fatalf("stdout is not a JSON Batch object: %v\nstdout: %s", err, stdout)
+	}
+	return batch
 }
 
 func issueIDs(issues []issueJSON) []string {
