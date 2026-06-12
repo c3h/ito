@@ -1379,15 +1379,7 @@ WHERE issue_labels.project_id = issues.project_id
 		args = append(args, label)
 	}
 	if options.Ready {
-		where = append(where, `issues.status IN ('backlog', 'todo')`)
-		where = append(where, `NOT EXISTS (
-SELECT 1 FROM issue_links
-JOIN issues AS blocker ON blocker.project_id = issue_links.project_id AND blocker.id = issue_links.target_id
-WHERE issue_links.project_id = issues.project_id
-  AND issue_links.source_id = issues.id
-  AND issue_links.kind = 'blocked_by'
-  AND blocker.status != 'done'
-)`)
+		where = append(where, readyFrontierWhereSQL("issues"))
 	}
 
 	query := `
@@ -1450,6 +1442,62 @@ issues.id ASC`
 		issues = append(issues, rowIssue.Issue)
 	}
 	return issues, nil
+}
+
+func readyFrontierWhereSQL(issueAlias string) string {
+	return otherwiseReadyWhereSQL(issueAlias) + `
+AND NOT EXISTS (
+SELECT 1 FROM issue_links AS in_flight_conflict
+JOIN issues AS in_flight_partner ON in_flight_partner.project_id = in_flight_conflict.project_id
+  AND in_flight_partner.id = CASE
+    WHEN in_flight_conflict.source_id = ` + issueAlias + `.id THEN in_flight_conflict.target_id
+    ELSE in_flight_conflict.source_id
+  END
+WHERE in_flight_conflict.project_id = ` + issueAlias + `.project_id
+  AND in_flight_conflict.kind = 'conflicts_with'
+  AND (in_flight_conflict.source_id = ` + issueAlias + `.id OR in_flight_conflict.target_id = ` + issueAlias + `.id)
+  AND in_flight_partner.status IN ('in_progress', 'in_review')
+)
+AND NOT EXISTS (
+SELECT 1 FROM issue_links AS ready_conflict
+JOIN issues AS ready_partner ON ready_partner.project_id = ready_conflict.project_id
+  AND ready_partner.id = CASE
+    WHEN ready_conflict.source_id = ` + issueAlias + `.id THEN ready_conflict.target_id
+    ELSE ready_conflict.source_id
+  END
+WHERE ready_conflict.project_id = ` + issueAlias + `.project_id
+  AND ready_conflict.kind = 'conflicts_with'
+  AND (ready_conflict.source_id = ` + issueAlias + `.id OR ready_conflict.target_id = ` + issueAlias + `.id)
+  AND ` + otherwiseReadyWhereSQL("ready_partner") + `
+  AND ` + readyConflictPartnerBeatsSQL("ready_partner", issueAlias) + `
+)`
+}
+
+func otherwiseReadyWhereSQL(issueAlias string) string {
+	blockerAlias := issueAlias + "_blocker"
+	return issueAlias + `.status IN ('backlog', 'todo')
+AND NOT EXISTS (
+SELECT 1 FROM issue_links AS ` + blockerAlias + `_link
+JOIN issues AS ` + blockerAlias + ` ON ` + blockerAlias + `.project_id = ` + blockerAlias + `_link.project_id AND ` + blockerAlias + `.id = ` + blockerAlias + `_link.target_id
+WHERE ` + blockerAlias + `_link.project_id = ` + issueAlias + `.project_id
+  AND ` + blockerAlias + `_link.source_id = ` + issueAlias + `.id
+  AND ` + blockerAlias + `_link.kind = 'blocked_by'
+  AND ` + blockerAlias + `.status != 'done'
+)`
+}
+
+func readyConflictPartnerBeatsSQL(partnerAlias, issueAlias string) string {
+	return `(` + priorityRankSQL(partnerAlias) + ` < ` + priorityRankSQL(issueAlias) + `
+  OR (` + priorityRankSQL(partnerAlias) + ` = ` + priorityRankSQL(issueAlias) + ` AND ` + issueNumberSQL(partnerAlias) + ` < ` + issueNumberSQL(issueAlias) + `)
+)`
+}
+
+func priorityRankSQL(issueAlias string) string {
+	return orderCase(issueAlias+".priority", Priorities)
+}
+
+func issueNumberSQL(issueAlias string) string {
+	return `CAST(substr(` + issueAlias + `.id, instr(` + issueAlias + `.id, '-') + 1) AS INTEGER)`
 }
 
 // rowQuerier is the read surface shared by *sql.DB and *sql.Tx, so helpers can

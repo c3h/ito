@@ -79,7 +79,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "list help",
 			args:     []string{"list", "--help"},
-			contains: []string{"usage: ito list", "--ready", "one git worktree per ready Issue"},
+			contains: []string{"usage: ito list", "--ready", "conflicts_with", "one git worktree per ready Issue"},
 		},
 		{
 			name:     "batch help",
@@ -657,6 +657,46 @@ func TestListReadyReturnsOpenIssuesWithOnlyDoneBlockers(t *testing.T) {
 	}
 	if got := issueIDs(decodeIssueList(t, result.stdout)); !stringSlicesEqual(got, []string{"RDY-1", "RDY-2"}) {
 		t.Fatalf("expected ready frontier IDs [RDY-1 RDY-2], got %v\nstdout: %s", got, result.stdout)
+	}
+}
+
+func TestListReadyHonoursConflictsWithInJSONAndHumanOutput(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "conflict-ready-app", "--prefix", "CRD"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	fixtures := [][]string{
+		{"new", "--json", "--title", "Low loser", "--status", "todo", "--priority", "low"},
+		{"new", "--json", "--title", "High winner", "--status", "todo", "--priority", "high"},
+		{"new", "--json", "--title", "Ready unrelated", "--status", "backlog", "--priority", "medium"},
+	}
+	for _, args := range fixtures {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "CRD-1", "--conflict", "CRD-2"); result.exitCode != 0 {
+		t.Fatalf("ito edit conflict failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	jsonResult := runITO(t, repo, itoHome, "list", "--ready", "--json")
+	if jsonResult.exitCode != 0 {
+		t.Fatalf("ito list --ready --json failed with exit %d\nstdout: %s\nstderr: %s", jsonResult.exitCode, jsonResult.stdout, jsonResult.stderr)
+	}
+	jsonIDs := issueIDs(decodeIssueList(t, jsonResult.stdout))
+	if !stringSlicesEqual(jsonIDs, []string{"CRD-3", "CRD-2"}) {
+		t.Fatalf("expected JSON ready IDs [CRD-3 CRD-2], got %v\nstdout: %s", jsonIDs, jsonResult.stdout)
+	}
+
+	humanResult := runITO(t, repo, itoHome, "list", "--ready")
+	if humanResult.exitCode != 0 {
+		t.Fatalf("ito list --ready failed with exit %d\nstdout: %s\nstderr: %s", humanResult.exitCode, humanResult.stdout, humanResult.stderr)
+	}
+	if humanIDs := humanIssueIDs(humanResult.stdout); !stringSlicesEqual(humanIDs, jsonIDs) {
+		t.Fatalf("expected human ready IDs to match JSON %v, got %v\nstdout: %s", jsonIDs, humanIDs, humanResult.stdout)
 	}
 }
 
@@ -3364,6 +3404,18 @@ func issueIDs(issues []issueJSON) []string {
 	ids := make([]string, 0, len(issues))
 	for _, issue := range issues {
 		ids = append(ids, issue.ID)
+	}
+	return ids
+}
+
+func humanIssueIDs(stdout string) []string {
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	ids := make([]string, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && itostore.IssueIDPattern.MatchString(fields[0]) {
+			ids = append(ids, fields[0])
+		}
 	}
 	return ids
 }

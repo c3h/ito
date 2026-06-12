@@ -1322,10 +1322,10 @@ Flags:
 		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--project <name>|--all-projects] [--json]
 
 Lists Issues in the current Project. Issues in done are hidden by default, except with --status done.
-Use --ready to list the backlog/todo frontier whose blockers are all done; an agent can fan out one git worktree per ready Issue.
+Use --ready to list the backlog/todo frontier whose blockers are all done and conflicts_with partners are not unsafe to start in parallel; an agent can fan out one git worktree per ready Issue.
 
 Flags:
-  --ready                  Filter to backlog/todo Issues whose blockers are done.
+  --ready                  Filter to backlog/todo Issues whose blockers are done and conflicts allow parallel work.
   --status <status>        Filter by %s.
   --priority <priority>    Filter by %s.
   --label <label>          Filter by Label. Repeatable.

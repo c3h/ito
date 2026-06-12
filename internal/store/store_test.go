@@ -345,6 +345,135 @@ func TestListIssuesIncludeDoneLiftsTheDefaultFilter(t *testing.T) {
 	}
 }
 
+func TestListIssuesReadyHonoursConflictsWith(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, st *Store, project Project)
+		want  []string
+	}{
+		{
+			name: "higher priority ready conflict wins",
+			setup: func(t *testing.T, st *Store, project Project) {
+				low := createStoreIssue(t, st, project, "Low priority", "todo", "low")
+				high := createStoreIssue(t, st, project, "High priority", "todo", "high")
+				addStoreLink(t, st, project, low.ID, "conflicts_with", high.ID)
+			},
+			want: []string{"RDY-2"},
+		},
+		{
+			name: "equal priority conflict uses smaller issue number",
+			setup: func(t *testing.T, st *Store, project Project) {
+				first := createStoreIssue(t, st, project, "First", "todo", "medium")
+				second := createStoreIssue(t, st, project, "Second", "todo", "medium")
+				addStoreLink(t, st, project, second.ID, "conflicts_with", first.ID)
+			},
+			want: []string{"RDY-1"},
+		},
+		{
+			name: "in progress conflict partner excludes either side",
+			setup: func(t *testing.T, st *Store, project Project) {
+				ready := createStoreIssue(t, st, project, "Ready", "todo", "urgent")
+				inProgress := createStoreIssue(t, st, project, "In progress", "in_progress", "low")
+				addStoreLink(t, st, project, ready.ID, "conflicts_with", inProgress.ID)
+			},
+			want: []string{},
+		},
+		{
+			name: "in review conflict partner excludes either side",
+			setup: func(t *testing.T, st *Store, project Project) {
+				ready := createStoreIssue(t, st, project, "Ready", "todo", "urgent")
+				inReview := createStoreIssue(t, st, project, "In review", "in_review", "low")
+				addStoreLink(t, st, project, ready.ID, "conflicts_with", inReview.ID)
+			},
+			want: []string{},
+		},
+		{
+			name: "done conflict partner does not exclude",
+			setup: func(t *testing.T, st *Store, project Project) {
+				ready := createStoreIssue(t, st, project, "Ready", "todo", "low")
+				done := createStoreIssue(t, st, project, "Done", "done", "urgent")
+				addStoreLink(t, st, project, ready.ID, "conflicts_with", done.ID)
+			},
+			want: []string{"RDY-1"},
+		},
+		{
+			name: "loser remains ready while winner is blocked",
+			setup: func(t *testing.T, st *Store, project Project) {
+				loser := createStoreIssue(t, st, project, "Loser", "todo", "low")
+				winner := createStoreIssue(t, st, project, "Winner but blocked", "todo", "urgent")
+				blocker := createStoreIssue(t, st, project, "Open blocker", "todo", "low")
+				addStoreLink(t, st, project, loser.ID, "conflicts_with", winner.ID)
+				addStoreLink(t, st, project, winner.ID, "blocked_by", blocker.ID)
+			},
+			want: []string{"RDY-1", "RDY-3"},
+		},
+		{
+			name: "conflict chain stays pairwise",
+			setup: func(t *testing.T, st *Store, project Project) {
+				low := createStoreIssue(t, st, project, "Low", "todo", "low")
+				medium := createStoreIssue(t, st, project, "Medium", "todo", "medium")
+				urgent := createStoreIssue(t, st, project, "Urgent", "todo", "urgent")
+				addStoreLink(t, st, project, low.ID, "conflicts_with", medium.ID)
+				addStoreLink(t, st, project, medium.ID, "conflicts_with", urgent.ID)
+			},
+			// RDY-2 is excluded by RDY-3, but RDY-1 is still excluded by RDY-2:
+			// the rule compares each Issue with every otherwise-ready partner.
+			want: []string{"RDY-3"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer db.Close()
+
+			st := New(db)
+			project, err := st.CreateProject("ready-app", "RDY", filepath.Join(t.TempDir(), "ready"))
+			if err != nil {
+				t.Fatalf("create project: %v", err)
+			}
+			tt.setup(t, st, project)
+
+			ready, err := st.ListIssues(ListOptions{ProjectID: project.ID, Ready: true})
+			if err != nil {
+				t.Fatalf("list ready issues: %v", err)
+			}
+			if got := storeIssueIDs(ready); !slices.Equal(got, tt.want) {
+				t.Fatalf("expected ready IDs %v, got %v", tt.want, got)
+			}
+		})
+	}
+}
+
+func createStoreIssue(t *testing.T, st *Store, project Project, title, status, priority string) Issue {
+	t.Helper()
+	issue, err := st.CreateIssue(project, title, status, priority, nil, "")
+	if err != nil {
+		t.Fatalf("create issue %q: %v", title, err)
+	}
+	return issue
+}
+
+func addStoreLink(t *testing.T, st *Store, project Project, sourceID, kind, targetID string) {
+	t.Helper()
+	if _, err := st.Edit(project, sourceID, EditIssueOptions{
+		LinkOps: []LinkEditOp{{Kind: kind, Action: "add", Target: targetID}},
+	}); err != nil {
+		t.Fatalf("add %s link %s -> %s: %v", kind, sourceID, targetID, err)
+	}
+}
+
+func storeIssueIDs(issues []Issue) []string {
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	return ids
+}
+
 func TestListProjectsReturnsProjectsByName(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
