@@ -925,16 +925,31 @@ func insertBatch(db *sql.DB, p Project, name string) (Batch, error) {
 	return Batch{Name: name, Project: p.Name, Created: created, Total: 0, Done: 0}, nil
 }
 
-func listBatches(db *sql.DB, p Project) ([]Batch, error) {
-	rows, err := db.Query(`
-SELECT batches.name, projects.name, batches.created,
+// batchProgressSQL selects a Batch row with its done/total progress; callers
+// slot their WHERE clause between it and batchProgressGroupSQL.
+const batchProgressSQL = `
+SELECT batches.id, batches.name, projects.name, batches.created,
        count(issues.row_id) AS total,
        count(CASE WHEN issues.status = 'done' THEN 1 END) AS done
 FROM batches
 JOIN projects ON projects.id = batches.project_id
 LEFT JOIN issues ON issues.batch_id = batches.id
-WHERE batches.project_id = ?
-GROUP BY batches.id, batches.name, projects.name, batches.created
+`
+
+const batchProgressGroupSQL = `
+GROUP BY batches.id, batches.name, projects.name, batches.created`
+
+// scanBatchProgress reads a batchProgressSQL row from a row or rows cursor.
+func scanBatchProgress(s interface{ Scan(dest ...any) error }) (Batch, int64, error) {
+	var batch Batch
+	var batchID int64
+	err := s.Scan(&batchID, &batch.Name, &batch.Project, &batch.Created, &batch.Total, &batch.Done)
+	return batch, batchID, err
+}
+
+func listBatches(db *sql.DB, p Project) ([]Batch, error) {
+	rows, err := db.Query(batchProgressSQL+
+		`WHERE batches.project_id = ?`+batchProgressGroupSQL+`
 ORDER BY batches.created DESC, batches.id DESC`, p.ID)
 	if err != nil {
 		return nil, err
@@ -943,8 +958,8 @@ ORDER BY batches.created DESC, batches.id DESC`, p.ID)
 
 	batches := []Batch{}
 	for rows.Next() {
-		var batch Batch
-		if err := rows.Scan(&batch.Name, &batch.Project, &batch.Created, &batch.Total, &batch.Done); err != nil {
+		batch, _, err := scanBatchProgress(rows)
+		if err != nil {
 			return nil, err
 		}
 		batches = append(batches, batch)
@@ -962,7 +977,7 @@ func renameBatch(db *sql.DB, p Project, oldName, newName string) (Batch, error) 
 	}
 	defer tx.Rollback()
 
-	id, found, err := findBatchIDTx(tx, p.ID, oldName)
+	id, found, err := findBatchID(tx, p.ID, oldName)
 	if err != nil {
 		return Batch{}, err
 	}
@@ -1005,7 +1020,7 @@ func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) 
 	}
 	defer tx.Rollback()
 
-	id, found, err := findBatchIDTx(tx, p.ID, name)
+	id, found, err := findBatchID(tx, p.ID, name)
 	if err != nil {
 		return DeleteBatchResult{}, err
 	}
@@ -1102,18 +1117,10 @@ func showBatch(db *sql.DB, p Project, name string) (BatchPlan, error) {
 }
 
 func findBatchWithProgress(db *sql.DB, p Project, name string) (Batch, int64, error) {
-	row := db.QueryRow(`
-SELECT batches.id, batches.name, projects.name, batches.created,
-       count(issues.row_id) AS total,
-       count(CASE WHEN issues.status = 'done' THEN 1 END) AS done
-FROM batches
-JOIN projects ON projects.id = batches.project_id
-LEFT JOIN issues ON issues.batch_id = batches.id
-WHERE batches.project_id = ? AND batches.name = ?
-GROUP BY batches.id, batches.name, projects.name, batches.created`, p.ID, name)
-	var batch Batch
-	var batchID int64
-	if err := row.Scan(&batchID, &batch.Name, &batch.Project, &batch.Created, &batch.Total, &batch.Done); err != nil {
+	row := db.QueryRow(batchProgressSQL+
+		`WHERE batches.project_id = ? AND batches.name = ?`+batchProgressGroupSQL, p.ID, name)
+	batch, batchID, err := scanBatchProgress(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Batch{}, 0, ErrBatchNotFound
 		}
@@ -1153,18 +1160,9 @@ issues.id ASC`
 
 	issues := []Issue{}
 	for rows.Next() {
-		found := Issue{
-			Labels:        []string{},
-			BlockedBy:     []string{},
-			RelatesTo:     []string{},
-			ConflictsWith: []string{},
-		}
-		var batch sql.NullString
-		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
+		found, err := scanIssue(rows)
+		if err != nil {
 			return nil, err
-		}
-		if batch.Valid {
-			found.Batch = &batch.String
 		}
 		if err := loadIssueRelations(q, p.ID, &found); err != nil {
 			return nil, err
@@ -1291,7 +1289,7 @@ func insertIssue(db *sql.DB, p Project, title, status, priority string, labels [
 
 	var batchID sql.NullInt64
 	if batch != "" {
-		id, found, err := findBatchIDTx(tx, p.ID, batch)
+		id, found, err := findBatchID(tx, p.ID, batch)
 		if err != nil {
 			return Issue{}, err
 		}
@@ -1487,7 +1485,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 		if options.Batch == "" {
 			nextBatchID = sql.NullInt64{}
 		} else {
-			id, found, err := findBatchIDTx(tx, p.ID, options.Batch)
+			id, found, err := findBatchID(tx, p.ID, options.Batch)
 			if err != nil {
 				return Issue{}, false, err
 			}
@@ -1658,6 +1656,24 @@ FROM issues
 JOIN projects ON projects.id = issues.project_id
 LEFT JOIN batches ON batches.id = issues.batch_id
 WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
+	found, err := scanIssue(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Issue{}, false, nil
+		}
+		return Issue{}, false, err
+	}
+
+	if err := loadIssueRelations(q, p.ID, &found); err != nil {
+		return Issue{}, false, err
+	}
+	return found, true, nil
+}
+
+// scanIssue reads the shared issue column list — id, project name, title,
+// status, priority, batch name, body, created, updated — from a row or rows
+// cursor, leaving relations for loadIssueRelations.
+func scanIssue(s interface{ Scan(dest ...any) error }) (Issue, error) {
 	found := Issue{
 		Labels:        []string{},
 		BlockedBy:     []string{},
@@ -1665,20 +1681,13 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 		ConflictsWith: []string{},
 	}
 	var batch sql.NullString
-	if err := row.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Issue{}, false, nil
-		}
-		return Issue{}, false, err
+	if err := s.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
+		return Issue{}, err
 	}
 	if batch.Valid {
 		found.Batch = &batch.String
 	}
-
-	if err := loadIssueRelations(q, p.ID, &found); err != nil {
-		return Issue{}, false, err
-	}
-	return found, true, nil
+	return found, nil
 }
 
 // loadIssueRelations fills an Issue's Labels and Links from the label and link
@@ -1849,7 +1858,7 @@ func readyFrontierWhereSQL(issueAlias string) string {
 }
 
 func readyFrontierWhereSQLWithOptions(issueAlias, doneTable, statusWhere string) string {
-	return otherwiseReadyWhereSQLWithOptions(issueAlias, doneTable, statusWhere) + `
+	return otherwiseReadyWhereSQL(issueAlias, doneTable, statusWhere) + `
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS in_flight_conflict
 JOIN issues AS in_flight_partner ON in_flight_partner.project_id = in_flight_conflict.project_id
@@ -1873,16 +1882,12 @@ JOIN issues AS ready_partner ON ready_partner.project_id = ready_conflict.projec
 WHERE ready_conflict.project_id = ` + issueAlias + `.project_id
   AND ready_conflict.kind = 'conflicts_with'
   AND (ready_conflict.source_id = ` + issueAlias + `.id OR ready_conflict.target_id = ` + issueAlias + `.id)
-  AND ` + otherwiseReadyWhereSQLWithOptions("ready_partner", doneTable, strings.ReplaceAll(statusWhere, issueAlias+".", "ready_partner.")) + `
+  AND ` + otherwiseReadyWhereSQL("ready_partner", doneTable, strings.ReplaceAll(statusWhere, issueAlias+".", "ready_partner.")) + `
   AND ` + readyConflictPartnerBeatsSQL("ready_partner", issueAlias) + `
 )`
 }
 
-func otherwiseReadyWhereSQL(issueAlias string) string {
-	return otherwiseReadyWhereSQLWithOptions(issueAlias, "", issueAlias+".status IN ('backlog', 'todo')")
-}
-
-func otherwiseReadyWhereSQLWithOptions(issueAlias, doneTable, statusWhere string) string {
+func otherwiseReadyWhereSQL(issueAlias, doneTable, statusWhere string) string {
 	blockerAlias := issueAlias + "_blocker"
 	return statusWhere + `
 AND NOT ` + doneStatusWhereSQL(issueAlias, doneTable) + `
@@ -1952,26 +1957,10 @@ func nullableString(value string) *string {
 	return &value
 }
 
-func findBatchID(db *sql.DB, projectID int64, name string) (int64, bool, error) {
-	return findBatchIDQuery(db, projectID, name)
-}
-
-func findBatchIDTx(tx *sql.Tx, projectID int64, name string) (int64, bool, error) {
-	return findBatchIDQuery(tx, projectID, name)
-}
-
 func findBatchByIDTx(tx *sql.Tx, id int64) (Batch, bool, error) {
-	row := tx.QueryRow(`
-SELECT batches.name, projects.name, batches.created,
-       count(issues.row_id) AS total,
-       count(CASE WHEN issues.status = 'done' THEN 1 END) AS done
-FROM batches
-JOIN projects ON projects.id = batches.project_id
-LEFT JOIN issues ON issues.batch_id = batches.id
-WHERE batches.id = ?
-GROUP BY batches.id, batches.name, projects.name, batches.created`, id)
-	var batch Batch
-	if err := row.Scan(&batch.Name, &batch.Project, &batch.Created, &batch.Total, &batch.Done); err != nil {
+	row := tx.QueryRow(batchProgressSQL+`WHERE batches.id = ?`+batchProgressGroupSQL, id)
+	batch, _, err := scanBatchProgress(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Batch{}, false, nil
 		}
@@ -1980,7 +1969,7 @@ GROUP BY batches.id, batches.name, projects.name, batches.created`, id)
 	return batch, true, nil
 }
 
-func findBatchIDQuery(q rowQuerier, projectID int64, name string) (int64, bool, error) {
+func findBatchID(q rowQuerier, projectID int64, name string) (int64, bool, error) {
 	var id int64
 	if err := q.QueryRow(`SELECT id FROM batches WHERE project_id = ? AND name = ?`, projectID, name).Scan(&id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

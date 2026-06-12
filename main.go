@@ -1373,15 +1373,7 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "list":
 		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "search": {}, "label": {}, "batch": {}}
-	case "batch new":
-		return map[string]struct{}{"project": {}}
-	case "batch list":
-		return map[string]struct{}{"project": {}}
-	case "batch rename":
-		return map[string]struct{}{"project": {}}
-	case "batch rm":
-		return map[string]struct{}{"project": {}}
-	case "batch show":
+	case "batch new", "batch list", "batch rename", "batch rm", "batch show":
 		return map[string]struct{}{"project": {}}
 	case "move":
 		return map[string]struct{}{"project": {}}
@@ -1776,13 +1768,8 @@ func printBatchList(rows []batchListRow, jsonMode bool) int {
 
 func printRenamedBatch(oldName string, b batch, jsonMode bool) int {
 	if jsonMode {
-		return printJSON(struct {
-			Name    string `json:"name"`
-			Project string `json:"project"`
-			Created string `json:"created"`
-			Total   int    `json:"total"`
-			Done    int    `json:"done"`
-		}{Name: b.Name, Project: b.Project, Created: b.Created, Total: b.Total, Done: b.Done}, "Batch")
+		// store.Batch's JSON tags are exactly the rename payload.
+		return printJSON(b, "Batch")
 	}
 	fmt.Printf("%s renamed to %s.\n", oldName, b.Name)
 	return 0
