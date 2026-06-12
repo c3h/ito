@@ -1,6 +1,6 @@
 # `ito` — Spec / PRD
 
-> **Status:** v1 implemented · v2 (TUI) design settled · **Date:** 2026-06-05
+> **Status:** v1 implemented · v2 (TUI) in build · v2 Batch/Wave extension settled · **Date:** 2026-06-12
 > **Name:** **ito** — 糸 (*the thread that links the issues*) · 意図 (*intention/purpose*). "The thread of intentions." Binary: `ito`.
 
 A **local, solo, "full local"** issue tracker, Linear-style, for the terminal — with the twist of being **AI-driven through the command line**.
@@ -71,7 +71,7 @@ The AI is **external**. The tool does **not** expose MCP and does **not** embed 
 
 ### 3.1 Relations (v1 = flat, no hierarchy)
 - **In v1, every issue is flat.** **No `parent`, no `type`, no epic.** (Scope decision: the author doesn't use epics; YAGNI. See §9.)
-- **Flat typed links** (non-hierarchical): `blocked_by`, `relates_to`. These stay. `blocked_by` is directional: the source issue is blocked by the target issue. `relates_to` is symmetric: the CLI normalizes the pair so it doesn't duplicate `A relates_to B` and `B relates_to A`. Links are always intra-Project in v1; links crossing Projects fail write validation. Broken links are **blocked by FK on write**. `blocked_by` does not prevent Status transitions; it is information for reading and traceability, not a workflow rule. It does feed a derived **ready frontier** (`ito list --ready`, §6): the Issues that can be started now — `backlog`/`todo` with every `blocked_by` target `done` (no-blocker Issues included). A useful property: any two Issues in the frontier are mutually independent (if A blocked B, B would not be ready until A is `done`, by which point A has left the frontier), so the frontier is exactly the set safe to fan out across git worktrees *logically* — physical file overlap is the agent's call, not ito's. This stays a read-time view, not a transition rule (`move` still accepts any target), and ito never creates or manages the worktrees (it informs the frontier; git + the AI act on it — the "not an orchestrator" non-goal holds).
+- **Flat typed links** (non-hierarchical): `blocked_by`, `relates_to`. These stay. `blocked_by` is directional: the source issue is blocked by the target issue. `relates_to` is symmetric: the CLI normalizes the pair so it doesn't duplicate `A relates_to B` and `B relates_to A`. **`conflicts_with` (v2)** is symmetric like `relates_to` (same pair normalization): the two Issues must not be worked **in parallel** — mutual exclusion for scheduling, not order; neither blocks the other. Links are always intra-Project in v1; links crossing Projects fail write validation. Broken links are **blocked by FK on write**. `blocked_by` does not prevent Status transitions; it is information for reading and traceability, not a workflow rule. It does feed a derived **ready frontier** (`ito list --ready`, §6): the Issues that can be started now — `backlog`/`todo` with every `blocked_by` target `done` (no-blocker Issues included). From v2 the frontier also honours `conflicts_with`: an Issue leaves the frontier while a conflict partner is in-flight, and between two otherwise-ready conflicting Issues only the deterministic winner (Priority, then ID) stays — so the independence property below survives. A useful property: any two Issues in the frontier are mutually independent (if A blocked B, B would not be ready until A is `done`, by which point A has left the frontier), so the frontier is exactly the set safe to fan out across git worktrees *logically* — physical file overlap is the agent's call, not ito's. This stays a read-time view, not a transition rule (`move` still accepts any target), and ito never creates or manages the worktrees (it informs the frontier; git + the AI act on it — the "not an orchestrator" non-goal holds).
 - **Traceability (v1)** = following the links. The `parent`/epic tree is left for a future evolution.
 - **Evolution is cheap (the SQLite dividend):** adding hierarchy later is a non-destructive migration (`ALTER TABLE issues ADD COLUMN parent …`); old issues become `parent = NULL`. That's why the **v1 core already embeds a migration mechanism** (`schema_version` + ordered migrations) — it's what makes that evolution a versioned, clean step. It **does not become an ADR** because it's trivial to revert (the opposite of "hard to revert").
 
@@ -103,6 +103,8 @@ Semantics of the early stages: `backlog` = work that's mapped or still subject t
 | `priority`   | enum            | default `low`; `low\|medium\|high\|urgent`       |
 | `blocked_by` | refs            | typed links                                      |
 | `relates_to` | refs            | typed links                                      |
+| `conflicts_with` | refs        | typed links (v2): mutual exclusion, "not in parallel" |
+| `batch`      | text \| null    | slug of the owning Batch (v2); `null` = no Batch |
 | `labels`     | list of enum    | zero or many; `feature\|bug\|docs\|tests\|refactor\|chore\|research\|infra` |
 | `body`       | TEXT            | free-form **markdown** body; optional             |
 | `created`    | timestamp       | UTC/RFC3339; immutable, written once at `new`    |
@@ -116,6 +118,14 @@ Semantics of the early stages: `backlog` = work that's mapped or still subject t
 - Removal is **destructive** and has no trash. `rm` deletes the Issue and its Links/Labels in the same transaction; links from other Issues that point to the removed Issue are also deleted. No other Issue is removed by cascade. `prune` requires an explicit filter (e.g. `--status done`) and explicit confirmation by flag (`--yes`); without both, it fails with exit `2`. There is no interactive prompt.
 - Removed IDs are **never reused**; the Project counter stays monotonic.
 - Active views filter out `done` by default.
+
+### 3.5 Batches & Waves (v2)
+- A **Batch** is a named set of Issues planned together as one coherent effort (a feature, a refactor, a fix). Identity follows the Project pattern: a unique lowercase slug `name` (same format as a Project name, renameable) plus an immutable `created` timestamp. Listings order Batches by creation date, newest first — **date is chronology, never identity** (two efforts born the same day stay separate and nameable).
+- **Membership is at most one Batch per Issue** (a nullable column, §4); `NULL` = outside any Batch. Work shared across efforts is expressed through Links (`blocked_by` pointing at the common Issue), never double membership — progress and ownership stay unambiguous.
+- A **Wave** is **derived, never stored**: the topological generations of the Batch's members under the Link graph. Wave 1 = members with no pending blockers; Wave 2 = the ones unblocked once Wave 1 is `done`; and so on. `conflicts_with` pushes mutually exclusive members into different Waves (tie-break: Priority, then ID). Blockers **outside the Batch count** — one definition of "ready", shared with the frontier (§3.1). Issues in the same Wave are mutually independent: the set safe to fan out across git worktrees in parallel. `ito list --batch <name> --ready` is the current Wave.
+- **Why derived:** a stored plan can contradict the graph the moment a link changes — the desync class of bug again (§2.4). Recomputing at read time makes the contradiction impossible and keeps the Links the single source of truth. See [`docs/adr/0003`](./docs/adr/0003-derived-waves-not-stored-cycles.md) for the rejected alternatives. A dependency **cycle** among members makes wave derivation fail with a clear read-time error naming the Issues involved (a cycle is a graph error, never a wave — see `CONTEXT.md`).
+- **Batch completion is derived too:** a Batch is complete when every member Issue is `done`; adding open work reopens it by definition. No stored batch status, no close command; abandoning an effort is expressed by the member Issues' fate (`rm`, `done`, or leaving the Batch).
+- ito still **never creates or manages worktrees** — Batches and Waves inform the fan-out; git + the AI act on it (the "not an orchestrator" non-goal holds).
 
 ---
 
@@ -148,10 +158,20 @@ CREATE TABLE issues (              -- v1: flat issue (parent/type arrive via a f
   status     TEXT NOT NULL,
   priority   TEXT NOT NULL,
   body       TEXT NOT NULL DEFAULT '',
+  batch_id   INTEGER REFERENCES batches(id) ON DELETE SET NULL,  -- v2; NULL = no Batch
   created    TEXT NOT NULL,
   updated    TEXT NOT NULL,
   UNIQUE (project_id, id)
 );
+
+CREATE TABLE batches (             -- v2
+  id         INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id),
+  name       TEXT NOT NULL,         -- lowercase slug, renameable
+  created    TEXT NOT NULL,         -- immutable; listings group by this date
+  UNIQUE (project_id, name)
+);
+-- No status column: Batch completion and Waves are derived at read time (§3.5).
 
 CREATE VIRTUAL TABLE issues_fts USING fts5(
   title,
@@ -167,14 +187,14 @@ CREATE TABLE issue_links (
   project_id INTEGER NOT NULL,
   source_id  TEXT NOT NULL,
   target_id  TEXT NOT NULL,
-  kind       TEXT NOT NULL,          -- blocked_by | relates_to
+  kind       TEXT NOT NULL,          -- blocked_by | relates_to | conflicts_with (v2)
   PRIMARY KEY (project_id, source_id, target_id, kind),
   FOREIGN KEY (project_id, source_id) REFERENCES issues(project_id, id) ON DELETE CASCADE,
   FOREIGN KEY (project_id, target_id) REFERENCES issues(project_id, id) ON DELETE CASCADE,
   CHECK (source_id != target_id)
 );
 -- Links are intra-Project by design: source_id and target_id use the same project_id.
--- For relates_to, the CLI orders source_id/target_id before writing.
+-- For relates_to and conflicts_with, the CLI orders source_id/target_id before writing.
 
 CREATE TABLE issue_labels (
   project_id INTEGER NOT NULL,
@@ -256,6 +276,19 @@ Philosophy: **the actionable sentence is the product; the exit code is the bonus
 
 - **Shape rules:** `snake_case` keys; **stable shape** (empty arrays always present, never omitted → no null-check for the agent); timestamps in **ISO 8601 UTC**; **`body` is dropped from `list`** (token-lean) and **kept in `show`**; when empty, `body` is an empty string (`""`), never `null`; **`project` always present** (identical shape with/without `--all-projects`).
 
+### 6.3 Batch surface (v2)
+The Batch CRUD is the CLI's **first noun namespace** — the top level stays Issue verbs; `ito batch <verb>` administers the container.
+
+| Command                      | Does                                                          |
+|------------------------------|---------------------------------------------------------------|
+| `ito batch new <name>`       | Creates a Batch in the current Project. The slug is validated like a Project name; a collision fails with exit `2`. |
+| `ito batch list`             | Lists the Project's Batches newest-first, each with its `created` date and derived progress (members `done`/total, current Wave). |
+| `ito batch show <name>`      | The Batch's members grouped by **derived Waves**, plus progress. A dependency cycle among members is a clear error naming the Issues involved. |
+| `ito batch rename <old> <new>` | Renames the Batch; membership and `created` stay intact.    |
+| `ito batch rm <name>`        | Deletes the Batch and clears membership — **never deletes Issues**. |
+
+Membership travels on the existing Issue commands: `ito new --batch <name>`, `ito edit <ID> --batch <name>` (and `--batch ""` to leave), `ito list --batch <name>` (AND-combines with the other filters; `--batch <name> --ready` = the current Wave). `--block`/`--unblock`/`--relate`/`--unrelate` gain `--conflict`/`--unconflict` siblings for the new link type. Everything keeps `--json`; the canonical issue object (§6.2) gains `"conflicts_with": []` and `"batch": "<name>" | null` (the stable-shape rule holds: always present, never omitted).
+
 ---
 
 ## 7. Build phases
@@ -274,13 +307,14 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 - **Edit (minimal):** Status (move), Priority (cycle), Labels (toggle). Nothing else. Reached through the always-visible keys (`s`) and, for the rarer edits (`p`, `l`), the issue view and the `:` command line.
 - **Filter & command line (inline, no separate screen):** `/` narrows the current surface to matching Issues live as you type (read-only); `:` is a closed launcher over the **v2 action set only** — Status/Priority/Labels, switch Project, refresh, quit — never create or edit title/body/links (those are v3). Both turn the bottom shortcut bar into a text input; `esc` leaves the field.
 - **Refresh:** manual, via a key (`r`). The TUI's own edits reload immediately; `r` pulls in what the agent wrote from another process. No polling, no file-watching.
+- **Batches `[3]` (extension, settled 2026-06-12):** a third surface joins the header tabs — **one screen, no drill-in**. Each Batch renders as a Digest-style section (focus bar, name, derived progress, its `created` date dim at the right end of the rule), ordered newest-first; its open members group under quiet **Wave** sub-headings (`WAVE n · READY/WAITING`), done members live in the heading's progress count, and a fully-done Batch starts collapsed. Rows are Digest rows (priority mark, id, title, `⊘` group and labels right-aligned); a `conflicts_with` partner shows as a second `⊘` in its own colour next to the blocked marker. Same selection/focus model as the Digest (`tab` focuses a Batch, `↑↓` selects, `h` hides the focused Batch), same minimal edits (`s`, `p`, `l`), same `/` filter; `enter` opens the Issue detail. It reuses the section machinery the Digest already pays for; the genuinely new cost is the wave derivation, which lives in the core and also feeds the CLI (§6.3). Assigning Issues to Batches stays **out of the v2 TUI** (CLI only) — membership editing joins title/body/links in v3. (Static mock: `batches-prototype.html` at the repo root.)
 - **Build order & escape hatch:** the **Digest ships first** (it is the default and pays for the shared core); the **Board follows within v2** as the second renderer. Its only genuinely new cost is the responsive horizontal layout (budgeting column widths to the terminal, sliding across columns when the five don't fit). If that layout proves costly, the **Board slips to v3** — the shared core is already built either way.
 
 > "Column", "row" and "section" are UI rendering vocabulary, never a synonym for **Status** in the domain (see `CONTEXT.md`); the surfaces render **Issues**, not "cards".
 
 **v3 — traceability + export + (maybe) hierarchy + richer TUI editing**
 - Traceability views over the links: `blocked_by` graph, and the **visual ready frontier** (ready vs. blocked) in the TUI. The CLI primitive that feeds it — `ito list --ready` (§3.1/§6) — is a standalone query over existing data and ships ahead of the visual, independent of the v2 TUI work.
-- TUI editing deferred from v2: title, body, links, create (`new`) and delete (`rm`/`prune`). Links land naturally alongside the traceability views.
+- TUI editing deferred from v2: title, body, links, Batch membership, create (`new`) and delete (`rm`/`prune`). Links land naturally alongside the traceability views.
 - TUI state deferred from v2: persisting which Digest sections are hidden, and hiding columns on the Board.
 - **Hierarchy (`parent`/epic)** — if missed — arrives here via migration.
 - `ito export` to markdown (snapshot).
@@ -307,6 +341,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 - [x] ~~Final schema of the labels table~~ → global, fixed Labels in v1: `feature`, `bug`, `docs`, `tests`, `refactor`, `chore`, `research`, `infra`. (See §3.3/§4.)
 - [x] ~~Project resolution outside git / moved repo~~ → durable identity (`id`+unique `name`), `root_path` = mutable pointer; moved → re-point via `ito init --reattach <name>` with no prompt. (See §2.3.)
 - [x] ~~Per-project status customization~~ → out of v1; fixed statuses are enough.
+- [x] ~~Grouping work for parallel agent fan-out (sprint-like cycles?)~~ → **Batch + derived Waves** (v2, settled 2026-06-12): a Batch is a named set of Issues (slug + immutable `created`; date = chronology, never identity; ≤1 Batch per Issue; completion derived). Waves are the topological generations of the Link graph — **never stored**, so they can't contradict the links. Mutual exclusion gets its own link type, `conflicts_with`. (See §3.5, §6.3.)
 
 ---
 
@@ -331,3 +366,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 | 14 | Build order | Vertical slices: usable commands (v1) → TUI (v2) → traceability+export (v3). |
 | 15 | Recency | `created`/`updated` = reliable timestamp columns (the mtime hack dropped along with double writing). |
 | 16 | Result contract | Success: exit 0 + raw data (`--json`). Failure: exit ≠ 0 + an actionable sentence on stderr (+ an error object in `--json`). Fixed taxonomy of exit codes. |
+| 17 | Parallel fan-out grouping | **Batch** (named set of Issues; slug + immutable `created`; ≤1 per Issue; completion derived) + **Wave** (derived topological generations of the Link graph; never stored). v2 extension. |
+| 18 | Mutual exclusion | Third link type **`conflicts_with`** (symmetric): "not in parallel". Honoured by Waves and by `--ready` (deterministic winner — Priority, then ID — preserves the frontier's independence property). |
+| 19 | Batch CLI | First noun namespace: `ito batch new/list/show/rename/rm`; membership via `--batch` on `new`/`edit`/`list`; `batch rm` never deletes Issues. |
+| 20 | Batch TUI | Third surface `[3]`, one screen: each Batch a Digest-style section (newest first, `created` at the rule's right end), members grouped by Wave sub-headings; no drill-in. Membership editing deferred to v3. |
