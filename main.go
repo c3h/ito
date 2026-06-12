@@ -206,6 +206,12 @@ type batchListItem struct {
 	Created string `json:"created"`
 	Total   int    `json:"total"`
 	Done    int    `json:"done"`
+	Waves   *int   `json:"waves"`
+}
+
+type batchListRow struct {
+	Batch batch
+	Waves *int
 }
 
 type deletedBatch struct {
@@ -461,7 +467,11 @@ func runBatchList(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not list Batches: %v", err), "try again or inspect the central store.")
 	}
-	return printBatchList(batches, jsonMode)
+	rows, err := batchListRows(st, p, batches)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not derive Batch Waves: %v", err), "try again or inspect the central store.")
+	}
+	return printBatchList(rows, jsonMode)
 }
 
 func runBatchRename(args []string) int {
@@ -1558,7 +1568,7 @@ Flags:
 	case "batch list":
 		fmt.Println(`usage: ito batch list [--project <name>] [--json]
 
-Lists Batches newest-first with created date and done/total progress.
+Lists Batches newest-first with created date, progress, and derived Wave count.
 
 Flags:
   --project <name>     Explicit Project.
@@ -1704,33 +1714,75 @@ func printCreatedBatch(b batch, jsonMode bool) int {
 	return 0
 }
 
-func printBatchList(batches []batch, jsonMode bool) int {
+func batchListRows(st *itostore.Store, p project, batches []batch) ([]batchListRow, error) {
+	rows := make([]batchListRow, 0, len(batches))
+	for _, b := range batches {
+		plan, err := st.ShowBatch(p, b.Name)
+		if err != nil {
+			var cycle *itostore.BatchCycleError
+			if errors.As(err, &cycle) {
+				rows = append(rows, batchListRow{Batch: b})
+				continue
+			}
+			return nil, err
+		}
+		waves := len(plan.Waves)
+		rows = append(rows, batchListRow{
+			Batch: plan.Batch,
+			Waves: &waves,
+		})
+	}
+	return rows, nil
+}
+
+func printBatchList(rows []batchListRow, jsonMode bool) int {
 	if jsonMode {
-		items := make([]batchListItem, 0, len(batches))
-		for _, b := range batches {
+		items := make([]batchListItem, 0, len(rows))
+		for _, row := range rows {
+			b := row.Batch
 			items = append(items, batchListItem{
 				Name:    b.Name,
 				Project: b.Project,
 				Created: b.Created,
 				Total:   b.Total,
 				Done:    b.Done,
+				Waves:   row.Waves,
 			})
 		}
 		return printJSON(items, "Batch list")
 	}
-	if len(batches) == 0 {
+	if len(rows) == 0 {
 		fmt.Println("no batches. create one with 'ito batch new <name>'.")
 		return 0
 	}
-	for _, b := range batches {
-		fmt.Printf("%s %s %d/%d\n", b.Name, batchCreatedDate(b.Created), b.Done, b.Total)
+	for _, row := range rows {
+		b := row.Batch
+		progress := "done"
+		if b.Total == 0 || b.Done != b.Total {
+			progress = fmt.Sprintf("%d/%d done", b.Done, b.Total)
+		}
+		if row.Waves == nil {
+			fmt.Printf("%s %s %s · cycle\n", b.Name, batchCreatedDate(b.Created), progress)
+			continue
+		}
+		if *row.Waves > 0 {
+			fmt.Printf("%s %s %s · wave 1/%d\n", b.Name, batchCreatedDate(b.Created), progress, *row.Waves)
+			continue
+		}
+		fmt.Printf("%s %s %s\n", b.Name, batchCreatedDate(b.Created), progress)
 	}
 	return 0
 }
 
 func printRenamedBatch(oldName string, b batch, jsonMode bool) int {
 	if jsonMode {
-		return printJSON(batchListItem{Name: b.Name, Project: b.Project, Created: b.Created, Total: b.Total, Done: b.Done}, "Batch")
+		return printJSON(struct {
+			Name    string `json:"name"`
+			Project string `json:"project"`
+			Created string `json:"created"`
+			Total   int    `json:"total"`
+			Done    int    `json:"done"`
+		}{Name: b.Name, Project: b.Project, Created: b.Created, Total: b.Total, Done: b.Done}, "Batch")
 	}
 	fmt.Printf("%s renamed to %s.\n", oldName, b.Name)
 	return 0

@@ -46,6 +46,7 @@ type batchJSON struct {
 	Created string `json:"created"`
 	Total   int    `json:"total"`
 	Done    int    `json:"done"`
+	Waves   *int   `json:"waves"`
 }
 
 type deletedBatchJSON struct {
@@ -1035,12 +1036,15 @@ UPDATE batches SET created = '2026-06-12T11:00:00Z' WHERE name = 'refactor' AND 
 		if batch.Project != "batch-alpha" || batch.Total != 0 || batch.Done != 0 {
 			t.Fatalf("expected alpha batch with 0/0 progress, got %#v", batch)
 		}
+		if batch.Waves == nil || *batch.Waves != 0 {
+			t.Fatalf("empty batch must report waves=0, got %#v", batch)
+		}
 	}
 	var raw []map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(listed.stdout), &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"name", "project", "created", "total", "done"} {
+	for _, key := range []string{"name", "project", "created", "total", "done", "waves"} {
 		if _, ok := raw[0][key]; !ok {
 			t.Fatalf("batch list JSON missing key %q in %s", key, listed.stdout)
 		}
@@ -1063,6 +1067,108 @@ UPDATE batches SET created = '2026-06-12T11:00:00Z' WHERE name = 'refactor' AND 
 	}
 	if got := batchNames(decodeBatchList(t, explicit.stdout)); !stringSlicesEqual(got, []string{"refactor"}) {
 		t.Fatalf("expected beta to own its own refactor batch, got %v", got)
+	}
+}
+
+func TestBatchListShowsWaveProgressAndDegradesCyclicBatches(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "batch-list-waves", "--prefix", "BLW"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, name := range []string{"empty", "complete", "refactor", "cycle"} {
+		if result := runITO(t, repo, itoHome, "batch", "new", name, "--json"); result.exitCode != 0 {
+			t.Fatalf("ito batch new %s failed with exit %d\nstdout: %s\nstderr: %s", name, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	for _, args := range [][]string{
+		{"new", "--json", "--title", "Done work", "--batch", "complete", "--status", "done"},
+		{"new", "--json", "--title", "First wave", "--batch", "refactor", "--status", "todo"},
+		{"new", "--json", "--title", "Second wave", "--batch", "refactor", "--status", "todo"},
+		{"new", "--json", "--title", "Cycle one", "--batch", "cycle", "--status", "todo"},
+		{"new", "--json", "--title", "Cycle two", "--batch", "cycle", "--status", "todo"},
+		{"new", "--json", "--title", "Cycle three", "--batch", "cycle", "--status", "todo"},
+	} {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	for _, args := range [][]string{
+		{"edit", "--json", "BLW-3", "--block", "BLW-2"},
+		{"edit", "--json", "BLW-4", "--block", "BLW-5"},
+		{"edit", "--json", "BLW-5", "--block", "BLW-6"},
+		{"edit", "--json", "BLW-6", "--block", "BLW-4"},
+	} {
+		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+
+	listed := runITO(t, repo, itoHome, "batch", "list", "--json")
+	if listed.exitCode != 0 {
+		t.Fatalf("ito batch list --json failed with exit %d\nstdout: %s\nstderr: %s", listed.exitCode, listed.stdout, listed.stderr)
+	}
+	batches := decodeBatchList(t, listed.stdout)
+	for _, tt := range []struct {
+		name  string
+		total int
+		done  int
+		waves *int
+	}{
+		{name: "empty", total: 0, done: 0, waves: intPtr(0)},
+		{name: "complete", total: 1, done: 1, waves: intPtr(0)},
+		{name: "refactor", total: 2, done: 0, waves: intPtr(2)},
+		{name: "cycle", total: 3, done: 0, waves: nil},
+	} {
+		batch, ok := findBatchJSON(batches, tt.name)
+		if !ok {
+			t.Fatalf("missing batch %q in %s", tt.name, listed.stdout)
+		}
+		if batch.Total != tt.total || batch.Done != tt.done {
+			t.Fatalf("unexpected progress for %s: %#v", tt.name, batch)
+		}
+		if tt.waves == nil {
+			if batch.Waves != nil {
+				t.Fatalf("cyclic batch %s must report waves=null, got %#v", tt.name, batch)
+			}
+			continue
+		}
+		if batch.Waves == nil || *batch.Waves != *tt.waves {
+			t.Fatalf("batch %s must report waves=%d, got %#v", tt.name, *tt.waves, batch)
+		}
+	}
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(listed.stdout), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range raw {
+		if _, ok := item["waves"]; !ok {
+			t.Fatalf("batch list JSON missing waves key in %s", listed.stdout)
+		}
+		var name string
+		if err := json.Unmarshal(item["name"], &name); err != nil {
+			t.Fatal(err)
+		}
+		if name == "cycle" && string(item["waves"]) != "null" {
+			t.Fatalf("cyclic batch must encode waves as null, got %s", item["waves"])
+		}
+	}
+
+	human := runITO(t, repo, itoHome, "batch", "list")
+	if human.exitCode != 0 || human.stderr != "" {
+		t.Fatalf("ito batch list human failed with exit %d\nstdout: %s\nstderr: %s", human.exitCode, human.stdout, human.stderr)
+	}
+	for _, want := range []string{
+		"0/0 done",
+		"done",
+		"0/2 done · wave 1/2",
+		"0/3 done · cycle",
+	} {
+		if !strings.Contains(human.stdout, want) {
+			t.Fatalf("human batch list missing %q in %q", want, human.stdout)
+		}
 	}
 }
 
@@ -3986,6 +4092,10 @@ func stringSlicesEqual(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+func intPtr(value int) *int {
+	return &value
 }
 
 func decodeIssueList(t *testing.T, stdout string) []issueJSON {
