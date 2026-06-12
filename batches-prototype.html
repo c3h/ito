@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ito · batches prototype</title>
+<style>
+  /* Static mock of the v2 "[3] batches" surface. Colours and geometry mirror
+     internal/tui/theme.go and the Digest renderer in internal/tui/tui.go. */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #16161e; }
+  body {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #c0caf5;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px;
+  }
+  .term { width: 88ch; }
+  .ln { white-space: pre; }
+  .ln.row { cursor: pointer; border-radius: 2px; }
+  .ln.row:hover, .ln.head:hover { background: #1d1e2b; }
+  .ln.head { cursor: pointer; }
+
+  .dim    { color: #565f89; }
+  .rule   { color: #2c3047; }
+  .sel    { color: #bb9af7; }
+  .key    { color: #bb9af7; font-weight: 700; }
+  .cyan   { color: #7dcfff; }
+  .label  { color: #9aa5ce; }
+  .block  { color: #f7768e; }
+  .conf   { color: #ff9e64; }
+  .pri-u  { color: #f7768e; }
+  .pri-h  { color: #ff9e64; }
+  .pri-m  { color: #7aa2f7; }
+
+  #toast {
+    position: fixed;
+    right: 24px;
+    bottom: 20px;
+    color: #565f89;
+    font-family: inherit;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.5s ease;
+    pointer-events: none;
+    white-space: pre;
+  }
+  #toast.show { opacity: 1; transition: opacity 0.1s ease; }
+</style>
+</head>
+<body>
+<div class="term" id="app"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- data
+// Waves are derived from the link graph (SPEC §3.5); here they are hand-derived
+// for the mock. ITO-47 conflicts_with ITO-45, whose blocker keeps it out of the
+// frontier — so ITO-47 may run first; the pair never shares a Wave.
+
+const batches = [
+  {
+    name: "storage-refactor", created: "2026-06-12",
+    total: 7, meta: "2/7 done · wave 1/3",
+    collapsed: false, selected: 0,
+    waves: [
+      { name: "WAVE 1", state: "READY", issues: [
+        { id: "ITO-44", title: "extract config loader",       pri: "high",   labels: ["refactor"] },
+        { id: "ITO-46", title: "introduce store interface",   pri: "medium", labels: ["refactor"] },
+        { id: "ITO-47", title: "port FTS triggers",           pri: "medium", labels: ["refactor"], conflictsWith: ["ITO-45"] },
+      ]},
+      { name: "WAVE 2", state: "WAITING", issues: [
+        { id: "ITO-45", title: "migrate writes to new store", pri: "high",   labels: ["feature"], blockedBy: ["ITO-44"], conflictsWith: ["ITO-47"] },
+      ]},
+      { name: "WAVE 3", state: "WAITING", issues: [
+        { id: "ITO-48", title: "drop legacy tables",          pri: "low",    labels: ["chore"],   blockedBy: ["ITO-45"] },
+      ]},
+    ],
+  },
+  {
+    name: "tui-filter-fix", created: "2026-06-12",
+    total: 3, meta: "0/3 done · wave 1/2",
+    collapsed: false, selected: 0,
+    waves: [
+      { name: "WAVE 1", state: "READY", issues: [
+        { id: "ITO-51", title: "filter drops done issues on refresh", pri: "high",   labels: ["bug"] },
+        { id: "ITO-52", title: "debounce filter input",               pri: "medium", labels: ["feature"] },
+      ]},
+      { name: "WAVE 2", state: "WAITING", issues: [
+        { id: "ITO-53", title: "persist filter across tabs",          pri: "low",    labels: ["feature"], blockedBy: ["ITO-51"] },
+      ]},
+    ],
+  },
+  {
+    name: "auth-hardening", created: "2026-06-09",
+    total: 4, meta: "done",
+    collapsed: true, selected: 0,
+    waves: [
+      { name: "WAVE 1", state: "READY", issues: [
+        { id: "ITO-30", title: "rotate session tokens",      pri: "high",   labels: ["feature"], done: true },
+        { id: "ITO-31", title: "rate-limit login attempts",  pri: "high",   labels: ["feature"], done: true },
+        { id: "ITO-32", title: "upgrade hashes to argon2id", pri: "medium", labels: ["chore"],   done: true },
+        { id: "ITO-33", title: "audit log for auth events",  pri: "low",    labels: ["feature"], done: true },
+      ]},
+    ],
+  },
+];
+
+const state = { focusIndex: 0 };
+
+// ---------------------------------------------------------------- line builder
+// The real TUI composes plain strings padded to the surface width and styles
+// them inline (tui.go padStyled/sectionHeading). Same approach here: each
+// segment carries its text and class; padding is computed on the plain text.
+
+const W = 88;
+
+function escapeHTML(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+
+function seg(text, cls) { return { text, cls }; }
+
+function lineHTML(segs, attrs) {
+  const html = segs.map((s) =>
+    s.cls ? '<span class="' + s.cls + '">' + escapeHTML(s.text) + "</span>" : escapeHTML(s.text)
+  ).join("");
+  return '<div class="ln' + (attrs && attrs.cls ? " " + attrs.cls : "") + '"' +
+    (attrs && attrs.data ? attrs.data : "") + ">" + (html || " ") + "</div>";
+}
+
+function plainLen(segs) {
+  return segs.reduce((n, s) => n + [...s.text].length, 0);
+}
+
+function blank() { return lineHTML([]); }
+
+function fullRule() { return lineHTML([seg("─".repeat(W), "rule")]); }
+
+// ---------------------------------------------------------------- chrome
+
+function header() {
+  const left = [
+    seg(" ito · [1] digest · [2] board · [3] "),
+    seg("batches", "sel"),
+  ];
+  const right = [seg(batches.length + " batches   ito ")];
+  const gap = Math.max(1, W - plainLen(left) - plainLen(right));
+  return lineHTML([...left, seg(" ".repeat(gap)), ...right]);
+}
+
+function bottomBar() {
+  const pairs = [
+    ["tab", "focus"], ["↑↓", "select"], ["⏎", "open"], ["s", "status"],
+    ["h", "hide"], ["/", "filter"], [":", "cmd"], ["q", "quit"],
+  ];
+  const segs = [seg(" ")];
+  pairs.forEach(([k, label], i) => {
+    if (i > 0) segs.push(seg("   "));
+    segs.push(seg(k, "key"), seg(" "), seg(label, "dim"));
+  });
+  return lineHTML(segs);
+}
+
+// ---------------------------------------------------------------- sections
+// Batch heading = Digest sectionHeading (focus bar, accent triangle, cyan
+// name, ink count, dim rule) plus the created date at the right end of the rule.
+
+function batchHeading(b, bi, focused) {
+  const segs = [
+    seg(" "),
+    focused ? seg("▌", "sel") : seg(" "),
+    seg(b.collapsed ? "▸" : "▾", "sel"),
+    seg(" "),
+    seg(b.name, "cyan"),
+    seg("  (" + b.total + ")"),
+    seg(" · " + b.meta + (b.collapsed ? " · h to show" : ""), "dim"),
+    seg("  "),
+  ];
+  const date = [seg("  "), seg(b.created, "dim"), seg(" ")];
+  const ruleLen = Math.max(0, W - plainLen(segs) - plainLen(date));
+  segs.push(seg("─".repeat(ruleLen), "rule"), ...date);
+  return lineHTML(segs, { cls: "head", data: ' data-batch="' + bi + '"' });
+}
+
+function waveHeading(w) {
+  return lineHTML([
+    seg("    "),
+    seg(w.name, "label"),
+    seg(" · ", "dim"),
+    seg(w.state, w.state === "READY" ? "cyan" : "dim"),
+    seg("  (" + w.issues.length + ")", "dim"),
+  ]);
+}
+
+function priorityMark(pri) {
+  if (pri === "urgent") return seg("●", "pri-u");
+  if (pri === "high")   return seg("▲", "pri-h");
+  if (pri === "medium") return seg("◆", "pri-m");
+  return seg("·");
+}
+
+// Issue row = Digest renderIssueRow shifted two columns right (rows sit under
+// their wave heading): pointer at col 4, mark at col 6; the ⊘ group and labels
+// right-aligned, the title absorbing the slack.
+function issueRow(iss, bi, idx, selected) {
+  const left = [
+    selected ? seg("    ") : seg("      "),
+  ];
+  if (selected) left.push(seg("▸", "sel"), seg(" "));
+  left.push(priorityMark(iss.pri), seg(" "), seg(iss.id, "cyan"), seg(" "), seg(iss.title));
+
+  const right = [];
+  if (iss.blockedBy) right.push(seg("⊘ ", "block"), seg(iss.blockedBy.join(","), "cyan"), seg("   "));
+  if (iss.conflictsWith) right.push(seg("⊘ ", "conf"), seg(iss.conflictsWith.join(","), "cyan"), seg("   "));
+  if (iss.labels) right.push(seg(iss.labels.join(" "), "label"), seg(" "));
+
+  const gap = Math.max(1, W - plainLen(left) - plainLen(right));
+  return lineHTML([...left, seg(" ".repeat(gap)), ...right],
+    { cls: "row", data: ' data-batch="' + bi + '" data-issue="' + idx + '"' });
+}
+
+// ---------------------------------------------------------------- view
+
+function openIssues(b) {
+  return b.waves.flatMap((w) => w.issues);
+}
+
+function render() {
+  let html = header() + fullRule() + blank();
+  batches.forEach((b, bi) => {
+    const focused = bi === state.focusIndex;
+    html += batchHeading(b, bi, focused);
+    if (!b.collapsed) {
+      let idx = 0;
+      b.waves.forEach((w) => {
+        html += waveHeading(w);
+        w.issues.forEach((iss) => {
+          html += issueRow(iss, bi, idx, focused && idx === b.selected);
+          idx++;
+        });
+      });
+    }
+    html += blank();
+  });
+  html += fullRule() + bottomBar();
+  document.getElementById("app").innerHTML = html;
+}
+
+// ---------------------------------------------------------------- input
+// Same model as the Digest: tab cycles section focus, ↑↓ moves the selection
+// inside the focused section (clamped), h collapses the focused section.
+
+const toastEl = document.getElementById("toast");
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1500);
+}
+
+function moveFocus(delta) {
+  state.focusIndex = (state.focusIndex + delta + batches.length) % batches.length;
+  render();
+}
+
+function moveSelection(delta) {
+  const b = batches[state.focusIndex];
+  if (b.collapsed) return;
+  const n = openIssues(b).length;
+  if (n === 0) return;
+  b.selected = Math.min(n - 1, Math.max(0, b.selected + delta));
+  render();
+}
+
+function toggleFocusedBatch() {
+  const b = batches[state.focusIndex];
+  b.collapsed = !b.collapsed;
+  render();
+}
+
+document.addEventListener("keydown", (e) => {
+  switch (e.key) {
+    case "Tab":
+      moveFocus(e.shiftKey ? -1 : 1);
+      e.preventDefault();
+      break;
+    case "ArrowDown": moveSelection(1);  e.preventDefault(); break;
+    case "ArrowUp":   moveSelection(-1); e.preventDefault(); break;
+    case "Enter": toast("issue detail not in this prototype"); break;
+    case "h": toggleFocusedBatch(); break;
+    case "s": toast("status move not in this prototype"); break;
+    case "/": toast("filter not in this prototype"); break;
+    case ":": toast("cmd not in this prototype"); break;
+    case "1": case "2": toast("digest/board not in this prototype"); break;
+    case "q": toast("this is a web page :)"); break;
+  }
+});
+
+document.getElementById("app").addEventListener("click", (e) => {
+  const head = e.target.closest(".ln.head");
+  if (head) {
+    state.focusIndex = parseInt(head.dataset.batch, 10);
+    toggleFocusedBatch();
+    return;
+  }
+  const row = e.target.closest(".ln.row");
+  if (!row) return;
+  state.focusIndex = parseInt(row.dataset.batch, 10);
+  batches[state.focusIndex].selected = parseInt(row.dataset.issue, 10);
+  render();
+});
+
+render();
+</script>
+</body>
+</html>
