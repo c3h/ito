@@ -57,7 +57,7 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 
 	view := newModel(st, project).View()
 	for _, want := range []string{
-		"ito · [1] digest · [2] board",
+		"ito · [1] digest · [2] batches",
 		"4 issues   digest-app",
 		"BACKLOG  (1)",
 		"TODO  (1)",
@@ -101,7 +101,7 @@ func TestBoardIssueRowShowsBlockedAndConflictMarkers(t *testing.T) {
 	}
 }
 
-func TestNumberKeysSwitchBetweenDigestAndBoard(t *testing.T) {
+func TestBoardOpensFromCommandLineAndEscReturns(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -117,19 +117,22 @@ func TestNumberKeysSwitchBetweenDigestAndBoard(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current := openBoard(t, newModel(st, project))
 	board := current.View()
-	if !strings.Contains(board, "ito · [1] digest · [2] board") || !strings.Contains(board, "TODO  (1)") {
-		t.Fatalf("expected [2] to switch to the Board, got:\n%s", board)
+	if !strings.Contains(board, "ito · board") || !strings.Contains(board, "TODO  (1)") {
+		t.Fatalf("expected :board to open the Board, got:\n%s", board)
 	}
-	if strings.Contains(board, "h hide") {
-		t.Fatalf("expected Board shortcuts to omit Digest-only hide action, got:\n%s", board)
+	if strings.Contains(board, "[1] digest") {
+		t.Fatalf("expected the Board crumb header instead of the tab set, got:\n%s", board)
+	}
+	if !strings.Contains(board, "esc back") || strings.Contains(board, "h hide") {
+		t.Fatalf("expected Board shortcuts to lead with esc back and omit hide, got:\n%s", board)
 	}
 
-	current, _ = current.Update(keyMsg(t, "1"))
+	current, _ = current.Update(keyMsg(t, "esc"))
 	digest := current.View()
-	if !strings.Contains(digest, "ito · [1] digest · [2] board") || !strings.Contains(digest, "h hide") {
-		t.Fatalf("expected [1] to switch back to the Digest, got:\n%s", digest)
+	if !strings.Contains(digest, "ito · [1] digest · [2] batches") || !strings.Contains(digest, "h hide") {
+		t.Fatalf("expected Esc to return to the Digest, got:\n%s", digest)
 	}
 }
 
@@ -159,7 +162,7 @@ func TestBoardRenderDoesNotRevealHiddenDigestSections(t *testing.T) {
 		t.Fatalf("expected Digest setup to have hidden BACKLOG and DONE, got:\n%s", hiddenDigest)
 	}
 
-	current, _ = current.Update(keyMsg(t, "2"))
+	current = openBoard(t, current)
 	board := current.View()
 	if !strings.Contains(board, "BACKLOG  (1)") || !strings.Contains(board, "DONE  (1)") {
 		t.Fatalf("expected Board to render all statuses, got:\n%s", board)
@@ -202,7 +205,7 @@ func TestBoardRendersAllStatusesAsColumns(t *testing.T) {
 	}
 
 	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 140, Height: 24})
-	current, _ = current.Update(keyMsg(t, "2"))
+	current = openBoard(t, current)
 	board := current.View()
 
 	for _, want := range []string{
@@ -245,7 +248,7 @@ func TestBoardSlidesHorizontallyToKeepFocusedStatusVisible(t *testing.T) {
 	}
 
 	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 20})
-	current, _ = current.Update(keyMsg(t, "2"))
+	current = openBoard(t, current)
 	firstWindow := current.View()
 	if !strings.Contains(firstWindow, "BACKLOG  (1)") || !strings.Contains(firstWindow, "TODO  (1)") || !strings.Contains(firstWindow, "IN PROGRESS  (1)") {
 		t.Fatalf("expected narrow Board to start on the first visible statuses, got:\n%s", firstWindow)
@@ -293,7 +296,7 @@ func TestBoardSharesInlineFilterAndStatusEditWithDigestState(t *testing.T) {
 	}
 
 	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 120, Height: 20})
-	current, _ = current.Update(keyMsg(t, "2"))
+	current = openBoard(t, current)
 	current, _ = current.Update(keyMsg(t, "/"))
 	for _, r := range "docs" {
 		current, _ = current.Update(runeMsg(r))
@@ -341,7 +344,7 @@ func TestIssueDetailReturnsToBoardWhenOpenedFromBoard(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current := openBoard(t, newModel(st, project))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	if view := current.View(); !strings.Contains(view, "ito · "+issue.ID+" · Open detail from Board") {
 		t.Fatalf("expected Board selection to open Issue detail, got:\n%s", view)
@@ -417,6 +420,91 @@ func TestDigestNavigationMovesFocusAndSelection(t *testing.T) {
 	}
 	if !strings.Contains(view, " ▸ · NAV-3 Second todo") {
 		t.Fatalf("expected second TODO Issue to be selected after Down, got:\n%s", view)
+	}
+}
+
+func TestDigestSelectionFlowsAcrossStatusBoundaries(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("flow-app", "FLW", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	// BACKLOG holds two Issues, TODO is empty, IN PROGRESS holds one, and DONE
+	// starts hidden with one. Down stops at every section in turn — the empty
+	// TODO heading, then IN PROGRESS, then the hidden DONE heading where h
+	// reveals it.
+	if _, err := st.CreateIssue(project, "Backlog first", "backlog", "medium", nil, ""); err != nil {
+		t.Fatalf("create backlog first: %v", err)
+	}
+	second, err := st.CreateIssue(project, "Backlog second", "backlog", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create backlog second: %v", err)
+	}
+	active, err := st.CreateIssue(project, "Active refactor", "in_progress", "medium", nil, "")
+	if err != nil {
+		t.Fatalf("create in progress issue: %v", err)
+	}
+	done, err := st.CreateIssue(project, "Done stays hidden", "done", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create done issue: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, " ▸ · "+second.ID) {
+		t.Fatalf("expected Down to select the second BACKLOG Issue, got:\n%s", view)
+	}
+
+	// Down steps onto the empty TODO heading — focused, no row to select.
+	current, _ = current.Update(keyMsg(t, "down"))
+	view := current.View()
+	if !strings.Contains(view, " ▌▾ TODO  (0)") {
+		t.Fatalf("expected Down to land focus on the empty TODO heading, got:\n%s", view)
+	}
+	if strings.Contains(view, " ▸ · "+second.ID) {
+		t.Fatalf("expected the BACKLOG cursor to move off with the focus, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, " ▸ ◆ "+active.ID) || !strings.Contains(view, " ▌▾ IN PROGRESS  (1)") {
+		t.Fatalf("expected Down to select the IN PROGRESS Issue, got:\n%s", view)
+	}
+
+	// IN REVIEW (empty) then the hidden DONE heading — focused, ready for h.
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, " ▌▾ IN REVIEW  (0)") {
+		t.Fatalf("expected Down to land focus on the empty IN REVIEW heading, got:\n%s", view)
+	}
+	current, _ = current.Update(keyMsg(t, "down"))
+	view = current.View()
+	if !strings.Contains(view, " ▌▸ DONE  (1) · h to show") {
+		t.Fatalf("expected Down to land focus on the hidden DONE heading, got:\n%s", view)
+	}
+	if strings.Contains(view, done.ID) {
+		t.Fatalf("expected the hidden DONE rows to stay off-screen, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "h"))
+	view = current.View()
+	if !strings.Contains(view, " ▌▾ DONE  (1)") || !strings.Contains(view, " ▸ · "+done.ID) {
+		t.Fatalf("expected h to reveal DONE with the cursor on its Issue, got:\n%s", view)
+	}
+
+	// Down at the surface's end stays put; Up flows back to IN PROGRESS.
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, " ▸ · "+done.ID) {
+		t.Fatalf("expected Down at the surface's end to stay put, got:\n%s", view)
+	}
+	current, _ = current.Update(keyMsg(t, "up"))
+	current, _ = current.Update(keyMsg(t, "up"))
+	view = current.View()
+	if !strings.Contains(view, " ▸ ◆ "+active.ID) || !strings.Contains(view, " ▌▾ IN PROGRESS  (1)") {
+		t.Fatalf("expected Up to flow back onto IN PROGRESS, got:\n%s", view)
 	}
 }
 
@@ -716,6 +804,7 @@ func TestCommandLineFiltersClosedV2ActionSet(t *testing.T) {
 		"s  status",
 		"p  priority",
 		"l  labels",
+		"board",
 		"switch project",
 		"r  refresh",
 		"q  quit",
@@ -1413,6 +1502,18 @@ func runeMsg(r rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
 }
 
+// openBoard reaches the Board the way a user does now: through the : command
+// line.
+func openBoard(t *testing.T, current tea.Model) tea.Model {
+	t.Helper()
+	current, _ = current.Update(keyMsg(t, ":"))
+	for _, r := range "board" {
+		current, _ = current.Update(runeMsg(r))
+	}
+	current, _ = current.Update(keyMsg(t, "enter"))
+	return current
+}
+
 func TestIssueDetailScrollsLongBodyWithinHeight(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -1582,7 +1683,7 @@ func TestBoardDetailNavigatesWithinDoneIssues(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current := openBoard(t, newModel(st, project))
 	for i := 0; i < 4; i++ { // focus the DONE column
 		current, _ = current.Update(keyMsg(t, "tab"))
 	}

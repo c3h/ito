@@ -70,6 +70,7 @@ var commandActions = []commandAction{
 	{Shortcut: "s", Name: "status"},
 	{Shortcut: "p", Name: "priority"},
 	{Shortcut: "l", Name: "labels"},
+	{Name: "board"},
 	{Name: "switch project"},
 	{Shortcut: "r", Name: "refresh"},
 	{Shortcut: "q", Name: "quit"},
@@ -168,16 +169,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = viewIssue
 			case viewIssue:
 				m.mode = m.detailReturnMode()
+			case viewBoard:
+				m.mode = viewDigest
 			}
 		case "1":
 			if m.isSurfaceMode() {
 				m.mode = viewDigest
 			}
 		case "2":
-			if m.isSurfaceMode() {
-				m.mode = viewBoard
-			}
-		case "3":
 			if m.isSurfaceMode() && m.mode != viewBatches {
 				m.mode = viewBatches
 				m.reloadBatches()
@@ -315,7 +314,7 @@ func editInlineInput(open *bool, query *string, msg tea.KeyMsg) tea.Cmd {
 
 func (m model) View() string {
 	if m.loadErr != nil {
-		return fmt.Sprintf("ito · [1] digest · [2] board\n\ncould not load Issues: %v\n\nq quit", m.loadErr)
+		return fmt.Sprintf("ito · [1] digest · [2] batches\n\ncould not load Issues: %v\n\nq quit", m.loadErr)
 	}
 	if m.mode == viewLabels {
 		return m.labelPickerView()
@@ -381,7 +380,7 @@ func (m model) boardView() string {
 	width := m.boardViewWidth(len(sections))
 	visible := m.visibleBoardSections(sections, width)
 	lines := []string{
-		header(m.project.Name, activeIssueCount(sections), width, viewBoard),
+		boardHeader(m.project.Name, activeIssueCount(sections), width),
 		fullRule(width),
 		"",
 	}
@@ -551,7 +550,10 @@ func (m model) boardViewWidth(columns int) int {
 	return max(surfaceMinWidth, min(m.width, maxWidth))
 }
 
-func (m model) boardBottomBar(matched, total int) string {
+// surfaceBottomBar is the row surfaces' shared footer: the inline filter input
+// with its matched/total hint while a filter is open, the : command line while
+// a command is open, otherwise the surface's own key set.
+func (m model) surfaceBottomBar(matched, total int, keys ...[2]string) string {
 	if m.filterOpen {
 		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
 		return inputBar("/", m.filterQuery, hint)
@@ -559,21 +561,18 @@ func (m model) boardBottomBar(matched, total int) string {
 	if m.commandOpen {
 		return m.commandBottomBar()
 	}
-	return statusBar(
-		[2]string{"tab", "focus"}, [2]string{"↑↓", "select"}, [2]string{"⏎", "open"},
+	return statusBar(keys...)
+}
+
+func (m model) boardBottomBar(matched, total int) string {
+	return m.surfaceBottomBar(matched, total,
+		[2]string{"esc", "back"}, [2]string{"tab", "focus"}, [2]string{"↑↓", "select"}, [2]string{"⏎", "open"},
 		[2]string{"s", "status"}, [2]string{"/", "filter"}, [2]string{":", "cmd"}, [2]string{"q", "quit"},
 	)
 }
 
 func (m model) digestBottomBar(matched, total int) string {
-	if m.filterOpen {
-		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
-		return inputBar("/", m.filterQuery, hint)
-	}
-	if m.commandOpen {
-		return m.commandBottomBar()
-	}
-	return statusBar(
+	return m.surfaceBottomBar(matched, total,
 		[2]string{"tab", "focus"}, [2]string{"↑↓", "select"}, [2]string{"⏎", "open"},
 		[2]string{"s", "status"}, [2]string{"h", "hide"}, [2]string{"/", "filter"},
 		[2]string{":", "cmd"}, [2]string{"q", "quit"},
@@ -617,6 +616,17 @@ func sectionHeading(label string, count int, focused, collapsed bool, width int)
 	plain := " " + bar + triangle + " " + label + suffix + "  "
 	ruleLen := max(0, width-runeLen(plain))
 	return " " + styledBar + styledBody + styleText.Render("  ") + styleLine.Render(strings.Repeat("─", ruleLen))
+}
+
+// emptyState renders a surface's empty placeholder: the fact in the ink, then
+// a dim hint with the actionable command back in the ink — quiet chrome with
+// the next step as the only thing that pops.
+func emptyState(fact, command, rest string) []string {
+	return []string{
+		" " + styleText.Render(fact),
+		"",
+		" " + styleDim.Render("run ") + styleText.Render(command) + styleDim.Render(" "+rest),
+	}
 }
 
 // statusBar renders the always-visible shortcut bar: each key in the accent
@@ -673,6 +683,8 @@ func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
 		m.cycleDetailIssuePriority()
 	case "labels":
 		m.openLabelPicker()
+	case "board":
+		m.mode = viewBoard
 	case "switch project":
 		m.openProjectPicker()
 	case "refresh":
@@ -1027,15 +1039,47 @@ func (m *model) moveFocus(delta int) {
 	m.focusIndex = (m.focusIndex + delta + len(m.sections)) % len(m.sections)
 }
 
+// moveSelection moves the Digest cursor, flowing across section boundaries:
+// past a section's last row it steps to the adjacent section (and symmetrically
+// upward), stopping at the surface's ends. Every section is a stop — an empty
+// or hidden one takes the focus on its heading with no row selected, so h
+// reveals a hidden one from here the way Tab already reaches it. The Board
+// keeps the clamped per-column cursor — its sections sit side by side, so
+// vertical flow would jump columns.
 func (m *model) moveSelection(delta int) {
 	if len(m.sections) == 0 {
 		return
 	}
 	section := &m.sections[m.focusIndex]
-	if (section.hidden && m.mode != viewBoard) || len(section.Issues) == 0 {
+	if m.mode == viewBoard {
+		if len(section.Issues) == 0 {
+			return
+		}
+		section.selected = min(max(section.selected+delta, 0), len(section.Issues)-1)
 		return
 	}
-	section.selected = min(max(section.selected+delta, 0), len(section.Issues)-1)
+	next := section.selected + delta
+	if !section.hidden && next >= 0 && next < len(section.Issues) {
+		section.selected = next
+		return
+	}
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	i := m.focusIndex + step
+	if i < 0 || i >= len(m.sections) {
+		return // at the surface's ends
+	}
+	m.focusIndex = i
+	// Seed the edge row so revealing a hidden section lands the cursor where it
+	// arrived; an empty section has none and shows no cursor until it fills.
+	target := &m.sections[i]
+	if step > 0 {
+		target.selected = 0
+	} else {
+		target.selected = max(0, len(target.Issues)-1)
+	}
 }
 
 func (m *model) toggleFocusedSection() {
@@ -1484,7 +1528,8 @@ func (m model) projectPickerView() string {
 		"",
 	}
 	if len(m.projects) == 0 {
-		lines = append(lines, " no Projects yet", "", " run ito init to get started", "", statusBar([2]string{"q", "quit"}))
+		lines = append(lines, emptyState("no Projects yet", "ito init", "to get started")...)
+		lines = append(lines, "", statusBar([2]string{"q", "quit"}))
 		return strings.Join(lines, "\n")
 	}
 
@@ -1513,7 +1558,7 @@ func header(projectName string, count, width int, active viewMode) string {
 	// default ink; only the active view name takes the accent colour.
 	// Inset by one space on each side so the header aligns with the content rows
 	// below (which all start at column 1) while the rule spans edge to edge.
-	left := " ito · [1] digest · [2] board · [3] batches"
+	left := " ito · [1] digest · [2] batches"
 	noun := "issues"
 	if active == viewBatches {
 		noun = "batches"
@@ -1531,9 +1576,22 @@ func header(projectName string, count, width int, active viewMode) string {
 		return styleText.Render(name)
 	}
 	styledLeft := styleText.Render(" ito · [1] ") + tab("digest", viewDigest) +
-		styleText.Render(" · [2] ") + tab("board", viewBoard) +
-		styleText.Render(" · [3] ") + tab("batches", viewBatches)
+		styleText.Render(" · [2] ") + tab("batches", viewBatches)
 	return styledLeft + strings.Repeat(" ", gap) + styleText.Render(right)
+}
+
+// boardHeader is the Board's crumb header. The Board lives behind the :
+// command line, not the header tabs, so its name sits where the tab set
+// would — in the accent, like any active view name.
+func boardHeader(projectName string, count, width int) string {
+	left := " ito · board"
+	right := fmt.Sprintf("%d issues   %s ", count, projectName)
+	gap := width - runeLen(left) - runeLen(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return styleText.Render(" ito · ") + styleActive.Render("board") +
+		strings.Repeat(" ", gap) + styleText.Render(right)
 }
 
 func issueHeader(projectName string, issue store.Issue, width int) string {

@@ -27,16 +27,16 @@ func TestBatchesKeySwitchesSurfaceAndHeaderTabs(t *testing.T) {
 		t.Fatalf("create member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	batches := current.View()
-	if !strings.Contains(batches, "ito · [1] digest · [2] board · [3] batches") {
+	if !strings.Contains(batches, "ito · [1] digest · [2] batches") {
 		t.Fatalf("expected batches header tab set, got:\n%s", batches)
 	}
 	if !strings.Contains(batches, "1 batches   batch-switch-app") {
 		t.Fatalf("expected header right end to show Batch count and Project name, got:\n%s", batches)
 	}
 	if !strings.Contains(batches, "first-effort  (1)") {
-		t.Fatalf("expected 3 to open the Batches surface, got:\n%s", batches)
+		t.Fatalf("expected 2 to open the Batches surface, got:\n%s", batches)
 	}
 
 	current, _ = current.Update(keyMsg(t, "1"))
@@ -45,16 +45,16 @@ func TestBatchesKeySwitchesSurfaceAndHeaderTabs(t *testing.T) {
 		t.Fatalf("expected 1 to leave Batches for the Digest, got:\n%s", digest)
 	}
 
-	current, _ = current.Update(keyMsg(t, "3"))
-	current, _ = current.Update(keyMsg(t, "2"))
+	// The Board lives behind the : command line now; 2 still leaves it for the
+	// Batches surface.
+	current = openBoard(t, current)
 	board := current.View()
-	if !strings.Contains(board, "IN PROGRESS  (0)") || strings.Contains(board, "WAVE 1") {
-		t.Fatalf("expected 2 to leave Batches for the Board, got:\n%s", board)
+	if !strings.Contains(board, "ito · board") || strings.Contains(board, "WAVE 1") {
+		t.Fatalf("expected :board to open the Board, got:\n%s", board)
 	}
-
-	current, _ = current.Update(keyMsg(t, "3"))
+	current, _ = current.Update(keyMsg(t, "2"))
 	if view := current.View(); !strings.Contains(view, "first-effort  (1)") {
-		t.Fatalf("expected 3 to open the Batches surface from the Board, got:\n%s", view)
+		t.Fatalf("expected 2 to open the Batches surface from the Board, got:\n%s", view)
 	}
 }
 
@@ -96,7 +96,7 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 		t.Fatalf("block member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	newerAt := strings.Index(view, "newer-effort  (3)")
@@ -124,7 +124,7 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list batches: %v", err)
 	}
-	date := batchCreatedDate(batches[0].Created)
+	date := batches[0].Date()
 	headingLine := ""
 	for _, line := range strings.Split(view, "\n") {
 		if strings.Contains(line, "newer-effort") {
@@ -165,7 +165,7 @@ func TestBatchesCountsDoneInHeadingAndCollapsesFullyDoneBatch(t *testing.T) {
 		t.Fatalf("create shipped member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "mixed-effort  (2) · 1/2 done · wave 1/1") {
@@ -211,7 +211,7 @@ func TestBatchesRowsShowConflictPartnerAsSecondMarker(t *testing.T) {
 		t.Fatalf("link conflict: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "WAVE 1 · READY  (1)") || !strings.Contains(view, "WAVE 2 · WAITING  (1)") {
@@ -256,7 +256,7 @@ func TestBatchesCyclicBatchRendersCycleLineInsteadOfWaves(t *testing.T) {
 		t.Fatalf("link second: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "cyclic-effort  (2) · 0/2 done") {
@@ -283,7 +283,7 @@ func TestBatchesEmptyProjectShowsActionableHint(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "0 batches   batch-empty-app") {
@@ -291,6 +291,12 @@ func TestBatchesEmptyProjectShowsActionableHint(t *testing.T) {
 	}
 	if !strings.Contains(view, "no Batches yet") || !strings.Contains(view, "run ito batch new <name> to plan one") {
 		t.Fatalf("expected an actionable ito batch new hint, got:\n%s", view)
+	}
+	if !strings.Contains(view, "r refresh   : cmd   q quit") {
+		t.Fatalf("expected the empty state to trim the bottom bar to live keys, got:\n%s", view)
+	}
+	if strings.Contains(view, "tab focus") || strings.Contains(view, "⏎ open") {
+		t.Fatalf("expected no row-bound shortcuts on the empty surface, got:\n%s", view)
 	}
 }
 
@@ -316,7 +322,7 @@ func TestBatchesWindowsRowsToTerminalHeight(t *testing.T) {
 	}
 
 	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 12})
-	current, _ = current.Update(keyMsg(t, "3"))
+	current, _ = current.Update(keyMsg(t, "2"))
 	small := current.View()
 	if !strings.Contains(small, "↓ ") || !strings.Contains(small, " more") {
 		t.Fatalf("expected small Batches viewport to window rows with an overflow indicator, got:\n%s", small)
@@ -353,7 +359,7 @@ func TestBatchesTabCyclesFocusAcrossBatches(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	view := current.View()
 	if !strings.Contains(view, " ▌▾ newer-effort") || strings.Contains(view, " ▌▾ older-effort") {
 		t.Fatalf("expected the newest Batch to wear the initial focus bar, got:\n%s", view)
@@ -411,7 +417,7 @@ func TestBatchesUpDownMovesSelectionAcrossWavesClamped(t *testing.T) {
 		t.Fatalf("block tail: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
 		t.Fatalf("expected the selection cursor on the first listed row, got:\n%s", view)
 	}
@@ -439,6 +445,141 @@ func TestBatchesUpDownMovesSelectionAcrossWavesClamped(t *testing.T) {
 	}
 }
 
+func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-flow-app", "BFW", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	// Surface order is newest-first: open-head, shipped-middle (done, collapsed,
+	// rowless), open-tail. The cursor flows head → tail and stops on every Batch
+	// in turn, including the collapsed one, so h can reveal it from there.
+	if _, err := st.CreateBatch(project, "open-tail"); err != nil {
+		t.Fatalf("create tail batch: %v", err)
+	}
+	tail, err := st.CreateIssueInBatch(project, "Tail member", "todo", "low", nil, "", "open-tail")
+	if err != nil {
+		t.Fatalf("create tail member: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "shipped-middle"); err != nil {
+		t.Fatalf("create middle batch: %v", err)
+	}
+	shipped, err := st.CreateIssueInBatch(project, "Shipped member", "done", "low", nil, "", "shipped-middle")
+	if err != nil {
+		t.Fatalf("create shipped member: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "open-head"); err != nil {
+		t.Fatalf("create head batch: %v", err)
+	}
+	first, err := st.CreateIssueInBatch(project, "Head first", "todo", "high", nil, "", "open-head")
+	if err != nil {
+		t.Fatalf("create head first: %v", err)
+	}
+	second, err := st.CreateIssueInBatch(project, "Head second", "todo", "medium", nil, "", "open-head")
+	if err != nil {
+		t.Fatalf("create head second: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
+		t.Fatalf("expected the cursor on the newest Batch's first row, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "▸ ◆ "+second.ID) {
+		t.Fatalf("expected Down to select the next row, got:\n%s", view)
+	}
+
+	// Down past the head's last row stops on the collapsed shipped-middle
+	// heading — focused, no row selected, its done member off-screen.
+	current, _ = current.Update(keyMsg(t, "down"))
+	view := current.View()
+	if !strings.Contains(view, " ▌▸ shipped-middle") || !strings.Contains(view, "h to show") {
+		t.Fatalf("expected Down to land focus on the collapsed Batch, got:\n%s", view)
+	}
+	if strings.Contains(view, "▸ ◆ "+second.ID) || strings.Contains(view, shipped.ID) {
+		t.Fatalf("expected no row cursor on a collapsed Batch, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	view = current.View()
+	if !strings.Contains(view, "▸ · "+tail.ID) || !strings.Contains(view, " ▌▾ open-tail") {
+		t.Fatalf("expected Down to flow into the last open Batch, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	if view := current.View(); !strings.Contains(view, "▸ · "+tail.ID) {
+		t.Fatalf("expected Down at the surface's end to stay put, got:\n%s", view)
+	}
+
+	// Up retraces the same stops: the collapsed Batch, then the head's last row.
+	current, _ = current.Update(keyMsg(t, "up"))
+	if view := current.View(); !strings.Contains(view, " ▌▸ shipped-middle") {
+		t.Fatalf("expected Up to land back on the collapsed Batch, got:\n%s", view)
+	}
+	current, _ = current.Update(keyMsg(t, "up"))
+	view = current.View()
+	if !strings.Contains(view, "▸ ◆ "+second.ID) || !strings.Contains(view, " ▌▾ open-head") {
+		t.Fatalf("expected Up to flow back onto the newest Batch's last row, got:\n%s", view)
+	}
+}
+
+func TestBatchesSelectionLandsOnCollapsedBatchToReveal(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-land-app", "BLD", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "older-effort"); err != nil {
+		t.Fatalf("create older batch: %v", err)
+	}
+	older, err := st.CreateIssueInBatch(project, "Older member", "todo", "low", nil, "", "older-effort")
+	if err != nil {
+		t.Fatalf("create older member: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "newer-effort"); err != nil {
+		t.Fatalf("create newer batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Newer member", "todo", "high", nil, "", "newer-effort"); err != nil {
+		t.Fatalf("create newer member: %v", err)
+	}
+
+	// Collapse the older Batch, then return focus to the newer one.
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "h"))
+	current, _ = current.Update(keyMsg(t, "tab"))
+
+	// Down past the newer Batch's last row lands focus on the collapsed older
+	// Batch's heading — no row selected, ready for h to reveal it.
+	current, _ = current.Update(keyMsg(t, "down"))
+	view := current.View()
+	if !strings.Contains(view, " ▌▸ older-effort") || !strings.Contains(view, "h to show") {
+		t.Fatalf("expected Down to land focus on the collapsed Batch, got:\n%s", view)
+	}
+	if strings.Contains(view, older.ID) {
+		t.Fatalf("expected the collapsed Batch's rows to stay off-screen, got:\n%s", view)
+	}
+
+	current, _ = current.Update(keyMsg(t, "h"))
+	view = current.View()
+	if !strings.Contains(view, " ▌▾ older-effort") || !strings.Contains(view, "▸ · "+older.ID) {
+		t.Fatalf("expected h to reveal the Batch with the cursor on its member, got:\n%s", view)
+	}
+}
+
 func TestBatchesSelectionSurvivesRefreshWhenIssueStillRenders(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -463,7 +604,7 @@ func TestBatchesSelectionSurvivesRefreshWhenIssueStillRenders(t *testing.T) {
 		t.Fatalf("create beta: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "down"))
 	if view := current.View(); !strings.Contains(view, "▸ ◆ "+beta.ID) {
 		t.Fatalf("expected the selection on beta before the refresh, got:\n%s", view)
@@ -511,7 +652,7 @@ func TestBatchesHideTogglesFocusedBatchAndInteropsWithDefaultCollapse(t *testing
 		t.Fatalf("create open member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "h"))
 	view := current.View()
 	if !strings.Contains(view, "▸ open-effort  (1)") || !strings.Contains(view, "h to show") {
@@ -562,7 +703,7 @@ func TestBatchesEnterOpensIssueDetailAndEscReturnsInPlace(t *testing.T) {
 		t.Fatalf("create second member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "down"))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	if view := current.View(); !strings.Contains(view, "ito · "+second.ID+" · Open me second") {
@@ -617,7 +758,7 @@ func TestBatchesStatusKeyRederivesWavesAndCollapsesCompletedBatch(t *testing.T) 
 		t.Fatalf("block docs: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	if view := current.View(); !strings.Contains(view, "WAVE 2 · WAITING") {
 		t.Fatalf("expected the blocked member on Wave 2 before the edit, got:\n%s", view)
 	}
@@ -672,7 +813,7 @@ func TestBatchesCommandLineRunsPriorityAndLabelsOnSelectedMember(t *testing.T) {
 		t.Fatalf("create member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, ":"))
 	for _, r := range "priority" {
 		current, _ = current.Update(runeMsg(r))
@@ -742,7 +883,7 @@ func TestBatchesInlineFilterNarrowsRowsWithCounts(t *testing.T) {
 		t.Fatalf("create other member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "3"))
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "/"))
 	for _, r := range "bug" {
 		current, _ = current.Update(runeMsg(r))

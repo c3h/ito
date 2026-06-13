@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/c3h/ito/internal/store"
 )
@@ -131,16 +130,39 @@ func (m *model) moveBatchFocus(delta int) {
 	m.batchFocus = (m.batchFocus + delta + len(m.batchSections)) % len(m.batchSections)
 }
 
+// moveBatchSelection moves the Batches cursor, flowing across Batch
+// boundaries the way the Digest cursor flows across sections: past a Batch's
+// last row it steps to the adjacent Batch, stopping at the surface's ends.
+// Every Batch is a stop — a collapsed or rowless one takes the focus on its
+// heading with no row selected, so h reveals a collapsed one from here.
 func (m *model) moveBatchSelection(delta int) {
 	if m.batchFocus < 0 || m.batchFocus >= len(m.batchSections) {
 		return
 	}
 	section := &m.batchSections[m.batchFocus]
 	issues := batchIssues(*section)
-	if section.collapsed || len(issues) == 0 {
+	next := section.selected + delta
+	if !section.collapsed && next >= 0 && next < len(issues) {
+		section.selected = next
 		return
 	}
-	section.selected = min(max(section.selected+delta, 0), len(issues)-1)
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	i := m.batchFocus + step
+	if i < 0 || i >= len(m.batchSections) {
+		return // at the surface's ends
+	}
+	m.batchFocus = i
+	// Seed the edge row so revealing a collapsed Batch lands the cursor where
+	// it arrived; a rowless Batch has none and shows no cursor.
+	target := &m.batchSections[i]
+	if step > 0 {
+		target.selected = 0
+	} else {
+		target.selected = max(0, len(batchIssues(*target))-1)
+	}
 }
 
 func (m *model) toggleFocusedBatch() {
@@ -235,14 +257,14 @@ func (m model) batchesView() string {
 		"",
 	}
 	if len(m.batchSections) == 0 {
-		lines = append(lines,
-			" no Batches yet",
-			"",
-			" run ito batch new <name> to plan one",
-			"",
-			fullRule(width),
-			m.batchesBottomBar(0, 0),
-		)
+		// The surface keys all act on Batch rows, so the empty state trims the
+		// bottom bar to the keys that still do something.
+		bar := m.batchesBottomBar(0, 0)
+		if !m.filterOpen && !m.commandOpen {
+			bar = statusBar([2]string{"r", "refresh"}, [2]string{":", "cmd"}, [2]string{"q", "quit"})
+		}
+		lines = append(lines, emptyState("no Batches yet", "ito batch new <name>", "to plan one")...)
+		lines = append(lines, "", fullRule(width), bar)
 		return strings.Join(lines, "\n")
 	}
 
@@ -326,7 +348,7 @@ func batchHeading(section batchSection, focused bool, width int) string {
 	if section.collapsed {
 		meta += " · h to show"
 	}
-	date := batchCreatedDate(section.batch.Created)
+	date := section.batch.Date()
 
 	plain := " " + bar + triangle + " " + section.batch.Name + count + meta + "  " + "  " + date + " "
 	ruleLen := max(0, width-runeLen(plain))
@@ -360,27 +382,10 @@ func waveHeading(wave store.BatchWave) string {
 		styleDim.Render(" · ") + state + styleDim.Render(fmt.Sprintf("  (%d)", len(wave.Issues)))
 }
 
-// batchCreatedDate shows the Batch's created timestamp as its calendar date —
-// chronology, never identity — matching the CLI's batch list rendering.
-func batchCreatedDate(created string) string {
-	parsed, err := time.Parse(time.RFC3339, created)
-	if err != nil {
-		return created
-	}
-	return parsed.UTC().Format("2006-01-02")
-}
-
-// batchesBottomBar mirrors the Digest's bar: the inline filter input with its
-// matched/total hint, the : command line, or the surface's key set.
+// batchesBottomBar shows the same footer and key set as the Digest — the
+// Batches surface shares the Digest's row interactions.
 func (m model) batchesBottomBar(matched, total int) string {
-	if m.filterOpen {
-		hint := fmt.Sprintf("%d of %d issues · esc to clear", matched, total)
-		return inputBar("/", m.filterQuery, hint)
-	}
-	if m.commandOpen {
-		return m.commandBottomBar()
-	}
-	return statusBar(
+	return m.surfaceBottomBar(matched, total,
 		[2]string{"tab", "focus"}, [2]string{"↑↓", "select"}, [2]string{"⏎", "open"},
 		[2]string{"s", "status"}, [2]string{"h", "hide"}, [2]string{"/", "filter"},
 		[2]string{":", "cmd"}, [2]string{"q", "quit"},
