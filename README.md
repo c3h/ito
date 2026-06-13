@@ -4,7 +4,7 @@ A local, solo issue tracker for the terminal — built to be driven by an AI age
 
 **ito** — 糸 (*the thread that links the issues*) · 意図 (*intention*). The thread of intentions.
 
-![The ito TUI: digest, issue detail and board views](./docs/demo.gif)
+![The ito TUI: digest, issue detail and batches with derived waves](./docs/demo.gif)
 
 ## Why
 
@@ -40,7 +40,8 @@ The AI is external: `ito` does not expose MCP and does not embed an LLM. The age
 - A small, stable exit-code taxonomy (`0` ok, `2` usage, `3` not found, `4` project not initialized).
 - No interactive prompts anywhere, so an agent never stalls.
 - Errors are actionable sentences on stderr (`no Project registered for the current directory. run 'ito init' in this Project or use --project <name>.`) — the message is what makes the agent take the right next action.
-- `ito list --ready` computes the frontier of issues whose blockers are all done — the set an agent can safely fan out, one git worktree per issue.
+- `ito list --ready` computes the frontier of issues whose blockers are all done (and whose `conflicts_with` partners are idle) — the set an agent can safely fan out, one git worktree per issue.
+- `ito batch` groups a coherent effort as a named set of issues; `ito batch show` slices it into **Waves** — the link-graph generations safe to run in parallel, derived at read time so they never contradict the links.
 - `--help` is the guide: the root help orients to the non-obvious model so a first run explains itself.
 
 ## How it works
@@ -48,9 +49,9 @@ The AI is external: `ito` does not expose MCP and does not embed an LLM. The age
 - **Central store, zero repo footprint.** One SQLite database in `~/.ito/` (overridable with `ITO_HOME`). The CLI never writes inside the repository — there is not a single `ito` file to configure or ignore.
 - **Project identity comes from the git root.** Every `git worktree` shares the same project; moving or renaming the repo never loses issues (`ito init --reattach <name>` re-points it).
 - **The CLI is the only writer.** Every mutation is a transaction; IDs (`PROJ-12`) are minted from a monotonic per-project counter and never reused.
-- **The TUI calls the core in-process.** Running bare `ito` opens a digest/board view over the same store — no daemon.
+- **The TUI calls the core in-process.** Running bare `ito` opens the digest and batches surfaces over the same store — no daemon.
 
-Issues are flat in v1: statuses `backlog → todo → in_progress → in_review → done`, priorities, a fixed label vocabulary, and typed links (`blocked_by`, `relates_to`).
+Issues are flat in v1: statuses `backlog → todo → in_progress → in_review → done`, priorities, a fixed label vocabulary, and typed links (`blocked_by`, `relates_to`, `conflicts_with`). A **Batch** groups issues planned together as one effort; its **Waves** are derived from the link graph at read time, never stored.
 
 ## Documentation
 

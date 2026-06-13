@@ -1,7 +1,9 @@
 # vhs script for docs/demo.gif (https://github.com/charmbracelet/vhs).
-# Expects a seeded demo store: an ITO_HOME with an "atlas" project whose
-# issues span every status, plus bodies and links — see the repo history
-# for the seeding commands. Run with: vhs docs/demo.tape
+# Build the binary and seed the store first, then render from the repo root
+# (the tape puts $PWD on PATH, so "ito" resolves to the freshly built binary):
+#   go build -o ito . && ./docs/demo-seed.sh && vhs docs/demo.tape
+# The seed builds an "atlas" project spanning every status — with bodies,
+# links, and two Batches whose members form derived Waves.
 
 Output docs/demo.gif
 
@@ -12,7 +14,7 @@ Set Padding 16
 Set TypingSpeed 80ms
 
 Hide
-Type "cd /tmp/atlas && export ITO_HOME=/tmp/ito-demo-home && export PATH=/Users/gimigliano/Documents/ito:$PATH && clear"
+Type "export PATH=$PWD:$PATH && cd /tmp/atlas && export ITO_HOME=/tmp/ito-demo-home && clear"
 Enter
 Sleep 1s
 Show

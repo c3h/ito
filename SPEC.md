@@ -1,6 +1,6 @@
 # `ito` — Spec / PRD
 
-> **Status:** v1 implemented · v2 (TUI) in build · v2 Batch/Wave extension settled · **Date:** 2026-06-12
+> **Status:** v1 implemented · v2 (TUI) implemented · v2 Batch/Wave extension settled · **Date:** 2026-06-13
 > **Name:** **ito** — 糸 (*the thread that links the issues*) · 意図 (*intention/purpose*). "The thread of intentions." Binary: `ito`.
 
 A **local, solo, "full local"** issue tracker, Linear-style, for the terminal — with the twist of being **AI-driven through the command line**.
@@ -370,4 +370,4 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 | 17 | Parallel fan-out grouping | **Batch** (named set of Issues; slug + immutable `created`; ≤1 per Issue; completion derived) + **Wave** (derived topological generations of the Link graph; never stored). v2 extension. |
 | 18 | Mutual exclusion | Third link type **`conflicts_with`** (symmetric): "not in parallel". Honoured by Waves and by `--ready` (deterministic winner — Priority, then ID — preserves the frontier's independence property). |
 | 19 | Batch CLI | First noun namespace: `ito batch new/list/show/rename/rm`; membership via `--batch` on `new`/`edit`/`list`; `batch rm` never deletes Issues. |
-| 20 | Batch TUI | Third surface `[3]`, one screen: each Batch a Digest-style section (newest first, `created` at the rule's right end), members grouped by Wave sub-headings; no drill-in. Membership editing deferred to v3. |
+| 20 | Batch TUI | Second tab `[2]`, one screen: each Batch a Digest-style section (newest first, `created` at the rule's right end), members grouped by Wave sub-headings; no drill-in. Membership editing deferred to v3. |
