@@ -1450,7 +1450,9 @@ func isHelpArg(arg string) bool {
 func printRootHelp(w io.Writer) {
 	fmt.Fprintln(w, `usage: ito <command> [flags]
 
-Local issue tracker with a central SQLite store at ~/.ito/ito.db.
+Local, agent-driven issue tracker. Issues are rows in a central SQLite store at ~/.ito/ito.db — never inside your repo.
+
+A Project is resolved from the git root, so every worktree shares it: run "ito init" once per repo, then address another Project from any cwd with --project <name> (or --all-projects to span all). An Issue's full ID is <PREFIX>-<n> such as AUTH-12; the Prefix is chosen per Project at init. A Batch is a named set of Issues planned together, and its Waves ("ito batch show") are the link-graph generations safe to run in parallel.
 
 Commands:
   init     Registers or re-points the Project for the current directory.
@@ -1463,6 +1465,8 @@ Commands:
   rm       Deletes an Issue.
   prune    Deletes Issues in bulk with an explicit filter.
   rename   Renames the current Project.
+
+Every command takes --json and never prompts; failures exit non-zero (2 usage, 3 not found, 4 no Project here) with an actionable sentence on stderr. Bare "ito" in a TTY opens the TUI.
 
 Use "ito <command> --help" to see the command's flags.`)
 }
