@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	itostore "github.com/c3h/ito/internal/store"
 	"github.com/c3h/ito/internal/tui"
@@ -201,12 +200,8 @@ type createdBatch struct {
 }
 
 type batchListItem struct {
-	Name    string `json:"name"`
-	Project string `json:"project"`
-	Created string `json:"created"`
-	Total   int    `json:"total"`
-	Done    int    `json:"done"`
-	Waves   *int   `json:"waves"`
+	batch
+	Waves *int `json:"waves"`
 }
 
 type batchListRow struct {
@@ -220,12 +215,8 @@ type deletedBatch struct {
 }
 
 type batchShowItem struct {
-	Name    string          `json:"name"`
-	Project string          `json:"project"`
-	Created string          `json:"created"`
-	Total   int             `json:"total"`
-	Done    int             `json:"done"`
-	Waves   []batchWaveItem `json:"waves"`
+	batch
+	Waves []batchWaveItem `json:"waves"`
 }
 
 type batchWaveItem struct {
@@ -1732,14 +1723,7 @@ func printBatchList(rows []batchListRow, jsonMode bool) int {
 		items := make([]batchListItem, 0, len(rows))
 		for _, row := range rows {
 			b := row.Batch
-			items = append(items, batchListItem{
-				Name:    b.Name,
-				Project: b.Project,
-				Created: b.Created,
-				Total:   b.Total,
-				Done:    b.Done,
-				Waves:   row.Waves,
-			})
+			items = append(items, batchListItem{batch: b, Waves: row.Waves})
 		}
 		return printJSON(items, "Batch list")
 	}
@@ -1754,14 +1738,14 @@ func printBatchList(rows []batchListRow, jsonMode bool) int {
 			progress = fmt.Sprintf("%d/%d done", b.Done, b.Total)
 		}
 		if row.Waves == nil {
-			fmt.Printf("%s %s %s · cycle\n", b.Name, batchCreatedDate(b.Created), progress)
+			fmt.Printf("%s %s %s · cycle\n", b.Name, b.Date(), progress)
 			continue
 		}
 		if *row.Waves > 0 {
-			fmt.Printf("%s %s %s · wave 1/%d\n", b.Name, batchCreatedDate(b.Created), progress, *row.Waves)
+			fmt.Printf("%s %s %s · wave 1/%d\n", b.Name, b.Date(), progress, *row.Waves)
 			continue
 		}
-		fmt.Printf("%s %s %s\n", b.Name, batchCreatedDate(b.Created), progress)
+		fmt.Printf("%s %s %s\n", b.Name, b.Date(), progress)
 	}
 	return 0
 }
@@ -1786,12 +1770,8 @@ func printDeletedBatch(name string, membersCleared int, jsonMode bool) int {
 func printBatchShow(plan batchPlan, jsonMode bool) int {
 	if jsonMode {
 		item := batchShowItem{
-			Name:    plan.Name,
-			Project: plan.Project,
-			Created: plan.Created,
-			Total:   plan.Total,
-			Done:    plan.Done,
-			Waves:   make([]batchWaveItem, 0, len(plan.Waves)),
+			batch: plan.Batch,
+			Waves: make([]batchWaveItem, 0, len(plan.Waves)),
 		}
 		for _, wave := range plan.Waves {
 			waveItem := batchWaveItem{
@@ -1807,7 +1787,7 @@ func printBatchShow(plan batchPlan, jsonMode bool) int {
 		return printJSON(item, "Batch")
 	}
 
-	fmt.Printf("%s %s %d/%d\n", plan.Name, batchCreatedDate(plan.Created), plan.Done, plan.Total)
+	fmt.Printf("%s %s %d/%d\n", plan.Name, plan.Date(), plan.Done, plan.Total)
 	if len(plan.Waves) == 0 {
 		return 0
 	}
@@ -1823,14 +1803,6 @@ func printBatchShow(plan batchPlan, jsonMode bool) int {
 		}
 	}
 	return 0
-}
-
-func batchCreatedDate(created string) string {
-	parsed, err := time.Parse(time.RFC3339, created)
-	if err != nil {
-		return created
-	}
-	return parsed.UTC().Format("2006-01-02")
 }
 
 func printIssueDetail(i issue, jsonMode bool) int {

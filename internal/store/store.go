@@ -158,6 +158,18 @@ type Batch struct {
 	Done    int    `json:"done"`
 }
 
+// Date renders the Batch's created timestamp as its calendar date (UTC) —
+// chronology, never identity. It lives here so the CLI and the TUI show the
+// same date from the same RFC3339 string; a timestamp that won't parse is
+// returned unchanged.
+func (b Batch) Date() string {
+	parsed, err := time.Parse(time.RFC3339, b.Created)
+	if err != nil {
+		return b.Created
+	}
+	return parsed.UTC().Format("2006-01-02")
+}
+
 type DeleteBatchResult struct {
 	Name           string
 	MembersCleared int
