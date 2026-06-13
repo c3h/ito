@@ -197,11 +197,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toggleFocusedLabel()
 			}
 		case "tab":
-			switch m.mode {
-			case viewDigest, viewBoard:
-				m.moveFocus(1)
-			case viewBatches:
-				m.moveBatchFocus(1)
+			if m.isSurfaceMode() {
+				m.cursor().moveFocus(1)
 			}
 		case "h":
 			switch m.mode {
@@ -231,11 +228,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.openLabelPicker()
 			}
 		case "shift+tab":
-			switch m.mode {
-			case viewDigest, viewBoard:
-				m.moveFocus(-1)
-			case viewBatches:
-				m.moveBatchFocus(-1)
+			if m.isSurfaceMode() {
+				m.cursor().moveFocus(-1)
 			}
 		case "up":
 			switch m.mode {
@@ -243,10 +237,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveDetailIssue(-1)
 			case viewLabels:
 				m.moveLabelCursor(-1)
-			case viewBatches:
-				m.moveBatchSelection(-1)
 			default:
-				m.moveSelection(-1)
+				m.cursor().moveSelection(-1)
 			}
 		case "down":
 			switch m.mode {
@@ -254,10 +246,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveDetailIssue(1)
 			case viewLabels:
 				m.moveLabelCursor(1)
-			case viewBatches:
-				m.moveBatchSelection(1)
 			default:
-				m.moveSelection(1)
+				m.cursor().moveSelection(1)
 			}
 		case "pgdown":
 			if m.mode == viewIssue {
@@ -1032,54 +1022,142 @@ func issueMatchesFilter(issue store.Issue, query string) bool {
 	return false
 }
 
-func (m *model) moveFocus(delta int) {
-	if len(m.sections) == 0 {
-		return
-	}
-	m.focusIndex = (m.focusIndex + delta + len(m.sections)) % len(m.sections)
+// rowStop is one section a cursor can rest on: its listed rows, whether it is
+// folded away (a hidden Digest section or a collapsed Batch lists no rows), and
+// a pointer to the section's own selection field so the cursor writes the
+// selection back through it.
+type rowStop struct {
+	rows      []store.Issue
+	collapsed bool
+	selected  *int
 }
 
-// moveSelection moves the Digest cursor, flowing across section boundaries:
-// past a section's last row it steps to the adjacent section (and symmetrically
-// upward), stopping at the surface's ends. Every section is a stop — an empty
-// or hidden one takes the focus on its heading with no row selected, so h
-// reveals a hidden one from here the way Tab already reaches it. The Board
-// keeps the clamped per-column cursor — its sections sit side by side, so
-// vertical flow would jump columns.
-func (m *model) moveSelection(delta int) {
-	if len(m.sections) == 0 {
+// rowCursor is the selection state machine the Digest, Board, and Batches
+// surfaces all drive. The stops are the surface's sections in order, focus
+// points at the focused section's index, and flows says whether the selection
+// crosses section boundaries: the Digest and Batches flow — past a section's
+// last row the cursor steps to the next section — while the Board clamps per
+// column, since its sections sit side by side and vertical flow would jump
+// columns. A folded section is still a stop: the focus rests on its heading
+// with no row selected, so h reveals it from there.
+type rowCursor struct {
+	stops []rowStop
+	focus *int
+	flows bool
+}
+
+func (c rowCursor) moveFocus(delta int) {
+	if len(c.stops) == 0 {
 		return
 	}
-	section := &m.sections[m.focusIndex]
-	if m.mode == viewBoard {
-		if len(section.Issues) == 0 {
+	*c.focus = (*c.focus + delta + len(c.stops)) % len(c.stops)
+}
+
+// moveSelection moves the cursor one row. A flowing cursor steps to the
+// adjacent section past a section's ends — stopping at the surface's ends —
+// and seeds the edge row so revealing a folded section lands the cursor where
+// it arrived; an empty section has none and shows no cursor until it fills. A
+// clamped cursor keeps the selection inside the focused section.
+func (c rowCursor) moveSelection(delta int) {
+	if *c.focus < 0 || *c.focus >= len(c.stops) {
+		return
+	}
+	stop := c.stops[*c.focus]
+	if !c.flows {
+		if len(stop.rows) == 0 {
 			return
 		}
-		section.selected = min(max(section.selected+delta, 0), len(section.Issues)-1)
+		*stop.selected = min(max(*stop.selected+delta, 0), len(stop.rows)-1)
 		return
 	}
-	next := section.selected + delta
-	if !section.hidden && next >= 0 && next < len(section.Issues) {
-		section.selected = next
+	next := *stop.selected + delta
+	if !stop.collapsed && next >= 0 && next < len(stop.rows) {
+		*stop.selected = next
 		return
 	}
 	step := 1
 	if delta < 0 {
 		step = -1
 	}
-	i := m.focusIndex + step
-	if i < 0 || i >= len(m.sections) {
+	i := *c.focus + step
+	if i < 0 || i >= len(c.stops) {
 		return // at the surface's ends
 	}
-	m.focusIndex = i
-	// Seed the edge row so revealing a hidden section lands the cursor where it
-	// arrived; an empty section has none and shows no cursor until it fills.
-	target := &m.sections[i]
+	*c.focus = i
+	target := c.stops[i]
 	if step > 0 {
-		target.selected = 0
+		*target.selected = 0
 	} else {
-		target.selected = max(0, len(target.Issues)-1)
+		*target.selected = max(0, len(target.rows)-1)
 	}
+}
+
+// selected is the row the surface's actions apply to: the focused section's
+// selected row, or none when that section is folded or lists no rows.
+func (c rowCursor) selected() (store.Issue, bool) {
+	if *c.focus < 0 || *c.focus >= len(c.stops) {
+		return store.Issue{}, false
+	}
+	stop := c.stops[*c.focus]
+	if stop.collapsed || *stop.selected < 0 || *stop.selected >= len(stop.rows) {
+		return store.Issue{}, false
+	}
+	return stop.rows[*stop.selected], true
+}
+
+// focusRow points the focus and selection at an Issue when it still lists on an
+// unfolded section, leaving the cursor untouched when the Issue does not render.
+func (c rowCursor) focusRow(id string) {
+	for i := range c.stops {
+		if c.stops[i].collapsed {
+			continue
+		}
+		for j, issue := range c.stops[i].rows {
+			if issue.ID == id {
+				*c.focus = i
+				*c.stops[i].selected = j
+				return
+			}
+		}
+	}
+}
+
+// digestCursor builds the cursor over the Digest sections. A hidden section
+// folds away — except on the Board, which shows every column — and only the
+// Digest flows; the Board clamps.
+func (m *model) digestCursor() rowCursor {
+	stops := make([]rowStop, len(m.sections))
+	for i := range m.sections {
+		stops[i] = rowStop{
+			rows:      m.sections[i].Issues,
+			collapsed: m.sections[i].hidden && m.mode != viewBoard,
+			selected:  &m.sections[i].selected,
+		}
+	}
+	return rowCursor{stops: stops, focus: &m.focusIndex, flows: m.mode != viewBoard}
+}
+
+// batchCursor builds the cursor over the Batch sections: a collapsed Batch
+// folds away and the surface flows across Batch boundaries like the Digest.
+func (m *model) batchCursor() rowCursor {
+	stops := make([]rowStop, len(m.batchSections))
+	for i := range m.batchSections {
+		stops[i] = rowStop{
+			rows:      batchIssues(m.batchSections[i]),
+			collapsed: m.batchSections[i].collapsed,
+			selected:  &m.batchSections[i].selected,
+		}
+	}
+	return rowCursor{stops: stops, focus: &m.batchFocus, flows: true}
+}
+
+// cursor returns the active surface's cursor — the Batches surface drives its
+// own sections, every other surface drives the Digest's.
+func (m *model) cursor() rowCursor {
+	if m.mode == viewBatches {
+		return m.batchCursor()
+	}
+	return m.digestCursor()
 }
 
 func (m *model) toggleFocusedSection() {
@@ -1224,17 +1302,7 @@ func (m model) detailReturnMode() viewMode {
 }
 
 func (m model) selectedIssue() (store.Issue, bool) {
-	if m.mode == viewBatches {
-		return m.selectedBatchIssue()
-	}
-	if len(m.sections) == 0 || m.focusIndex < 0 || m.focusIndex >= len(m.sections) {
-		return store.Issue{}, false
-	}
-	section := m.sections[m.focusIndex]
-	if (section.hidden && m.mode != viewBoard) || len(section.Issues) == 0 || section.selected < 0 || section.selected >= len(section.Issues) {
-		return store.Issue{}, false
-	}
-	return section.Issues[section.selected], true
+	return m.cursor().selected()
 }
 
 // currentIssue resolves the Issue an action applies to: the detail Issue while
@@ -1294,19 +1362,9 @@ func (m model) allIssues() []store.Issue {
 	return issues
 }
 
+// focusIssue points the Digest cursor at an Issue when it still renders.
 func (m *model) focusIssue(id string) {
-	for i := range m.sections {
-		if m.sections[i].hidden && m.mode != viewBoard {
-			continue
-		}
-		for j := range m.sections[i].Issues {
-			if m.sections[i].Issues[j].ID == id {
-				m.focusIndex = i
-				m.sections[i].selected = j
-				return
-			}
-		}
-	}
+	m.digestCursor().focusRow(id)
 }
 
 func (m model) issueInSections(id string) (store.Issue, bool) {

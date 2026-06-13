@@ -123,48 +123,6 @@ func batchIssueCount(sections []batchSection) int {
 	return total
 }
 
-func (m *model) moveBatchFocus(delta int) {
-	if len(m.batchSections) == 0 {
-		return
-	}
-	m.batchFocus = (m.batchFocus + delta + len(m.batchSections)) % len(m.batchSections)
-}
-
-// moveBatchSelection moves the Batches cursor, flowing across Batch
-// boundaries the way the Digest cursor flows across sections: past a Batch's
-// last row it steps to the adjacent Batch, stopping at the surface's ends.
-// Every Batch is a stop — a collapsed or rowless one takes the focus on its
-// heading with no row selected, so h reveals a collapsed one from here.
-func (m *model) moveBatchSelection(delta int) {
-	if m.batchFocus < 0 || m.batchFocus >= len(m.batchSections) {
-		return
-	}
-	section := &m.batchSections[m.batchFocus]
-	issues := batchIssues(*section)
-	next := section.selected + delta
-	if !section.collapsed && next >= 0 && next < len(issues) {
-		section.selected = next
-		return
-	}
-	step := 1
-	if delta < 0 {
-		step = -1
-	}
-	i := m.batchFocus + step
-	if i < 0 || i >= len(m.batchSections) {
-		return // at the surface's ends
-	}
-	m.batchFocus = i
-	// Seed the edge row so revealing a collapsed Batch lands the cursor where
-	// it arrived; a rowless Batch has none and shows no cursor.
-	target := &m.batchSections[i]
-	if step > 0 {
-		target.selected = 0
-	} else {
-		target.selected = max(0, len(batchIssues(*target))-1)
-	}
-}
-
 func (m *model) toggleFocusedBatch() {
 	if m.batchFocus < 0 || m.batchFocus >= len(m.batchSections) {
 		return
@@ -172,40 +130,9 @@ func (m *model) toggleFocusedBatch() {
 	m.batchSections[m.batchFocus].collapsed = !m.batchSections[m.batchFocus].collapsed
 }
 
-// selectedBatchIssue is the member the surface's actions apply to: the focused
-// Batch's selected row. A collapsed Batch exposes no rows, so it never yields
-// a selection — mirroring a hidden Digest section.
-func (m model) selectedBatchIssue() (store.Issue, bool) {
-	if m.batchFocus < 0 || m.batchFocus >= len(m.batchSections) {
-		return store.Issue{}, false
-	}
-	section := m.batchSections[m.batchFocus]
-	if section.collapsed {
-		return store.Issue{}, false
-	}
-	issues := batchIssues(section)
-	if section.selected < 0 || section.selected >= len(issues) {
-		return store.Issue{}, false
-	}
-	return issues[section.selected], true
-}
-
-// focusBatchIssue points the Batch focus and selection at an Issue when it
-// still renders on the surface — collapsed Batches are skipped, like hidden
-// Digest sections in focusIssue.
+// focusBatchIssue points the Batches cursor at an Issue when it still renders.
 func (m *model) focusBatchIssue(id string) {
-	for i := range m.batchSections {
-		if m.batchSections[i].collapsed {
-			continue
-		}
-		for j, issue := range batchIssues(m.batchSections[i]) {
-			if issue.ID == id {
-				m.batchFocus = i
-				m.batchSections[i].selected = j
-				return
-			}
-		}
-	}
+	m.batchCursor().focusRow(id)
 }
 
 // displayBatchSections applies the live / filter to the Batch rows with the
