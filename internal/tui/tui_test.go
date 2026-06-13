@@ -1319,8 +1319,9 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 	}
 	view := current.View()
 
-	// The window centers on the selection, so the picked Issue keeps a neighbour
-	// above and below it inside the viewport, with the overflow split either side.
+	// Four rows down with this short window, the cursor has reached the bottom
+	// visible row: the selection sits on the last row before the "↓ more" rule,
+	// with the rows it scrolled past indicated above.
 	for _, want := range []string{
 		"↑ 3 more",
 		"OVR-4 Scrollable issue 4",
@@ -1336,6 +1337,62 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 	}
 	if lines := strings.Count(view, "\n") + 1; lines > 23 {
 		t.Fatalf("expected Digest viewport to fit the terminal height, got %d lines:\n%s", lines, view)
+	}
+}
+
+func TestDigestScrollKeepsCursorAtEdgeNotCentre(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("scroll-app", "SCR", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	for i := 1; i <= 9; i++ {
+		if _, err := st.CreateIssue(project, fmt.Sprintf("Row %d", i), "todo", "medium", nil, ""); err != nil {
+			t.Fatalf("create issue %d: %v", i, err)
+		}
+	}
+
+	// This window fits five issue rows. Moving the cursor down inside it must not
+	// scroll until the cursor would leave the bottom edge — so four steps down
+	// land on the fifth, last visible row with the first row still on screen.
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 21})
+	current, _ = current.Update(keyMsg(t, "tab"))
+	for i := 0; i < 4; i++ {
+		current, _ = current.Update(keyMsg(t, "down"))
+	}
+	down := current.View()
+	for _, want := range []string{"SCR-1 Row 1", " ▸ ◆ SCR-5 Row 5", "↓ 4 more"} {
+		if !strings.Contains(down, want) {
+			t.Fatalf("expected the cursor to reach the bottom row before scrolling, missing %q:\n%s", want, down)
+		}
+	}
+	if strings.Contains(down, "↑ ") {
+		t.Fatalf("expected no upward scroll while the cursor walks to the bottom edge, got:\n%s", down)
+	}
+
+	// Drive the cursor to the last row, then climb back: the window must hold
+	// still while the cursor walks up through it, rather than sticking to the
+	// bottom edge — the symmetric counterpart to the descent above.
+	for i := 0; i < 4; i++ {
+		current, _ = current.Update(keyMsg(t, "down"))
+	}
+	for i := 0; i < 3; i++ {
+		current, _ = current.Update(keyMsg(t, "up"))
+	}
+	up := current.View()
+	for _, want := range []string{"↑ 4 more", " ▸ ◆ SCR-6 Row 6", "SCR-9 Row 9"} {
+		if !strings.Contains(up, want) {
+			t.Fatalf("expected the window to hold while the cursor climbs, missing %q:\n%s", want, up)
+		}
+	}
+	if strings.Contains(up, "SCR-4 Row 4") {
+		t.Fatalf("expected climbing inside the window not to scroll rows back into view, got:\n%s", up)
 	}
 }
 

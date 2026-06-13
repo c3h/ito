@@ -109,7 +109,11 @@ type digestSection struct {
 	Label    string
 	Issues   []store.Issue
 	selected int
-	hidden   bool
+	// top is the first visible row — the scroll offset the cursor walks within
+	// before the list slides, persisted so scrolling sticks to an edge rather
+	// than riding the centre.
+	top    int
+	hidden bool
 }
 
 // statusLabel renders a store status as its Digest section heading
@@ -270,7 +274,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	}
+	m.syncScroll()
 	return m, nil
+}
+
+// syncScroll advances each section's scroll offset to the window the View is
+// about to render, so the offset persists across moves. The window math keeps
+// the selected row visible on its own — persisting the offset is what makes the
+// cursor walk to an edge and stick there instead of snapping back to centre.
+// While a filter narrows the list the rendered copies derive their own offset
+// (reset to the top), so there is nothing to persist.
+func (m *model) syncScroll() {
+	if strings.TrimSpace(m.filterQuery) != "" {
+		return
+	}
+	switch m.mode {
+	case viewDigest:
+		caps := m.digestSectionCapacities(m.sections)
+		for i := range m.sections {
+			m.sections[i].top = visibleIssueWindow(len(m.sections[i].Issues), m.sections[i].selected, m.sections[i].top, caps[i]).start
+		}
+	case viewBoard:
+		budget := m.boardIssueLineBudget()
+		for i := range m.sections {
+			m.sections[i].top = visibleIssueWindow(len(m.sections[i].Issues), m.sections[i].selected, m.sections[i].top, budget).start
+		}
+	case viewBatches:
+		width := m.viewWidth()
+		counts := make([]int, len(m.batchSections))
+		selectedLines := make([]int, len(m.batchSections))
+		for i := range m.batchSections {
+			body, line := batchBody(m.batchSections[i], i == m.batchFocus, width)
+			counts[i] = len(body)
+			selectedLines[i] = line
+		}
+		budgets := allocateLineBudgets(counts, m.height)
+		for i := range m.batchSections {
+			m.batchSections[i].top = visibleIssueWindow(counts[i], selectedLines[i], m.batchSections[i].top, budgets[i]).start
+		}
+	}
 }
 
 // isSurfaceMode reports whether one of the header-tab surfaces is active — the
@@ -462,7 +504,7 @@ func (m model) boardColumn(section digestSection, sectionIndex int, width int) [
 	// Each cell builder pads itself to exactly width in plain runes and styles
 	// the content inline — so column alignment never miscounts ANSI escapes.
 	lines := []string{boardColumnHeading(section.Label, len(section.Issues), focused, width)}
-	window := visibleIssueWindow(len(section.Issues), section.selected, m.boardIssueLineBudget())
+	window := visibleIssueWindow(len(section.Issues), section.selected, section.top, m.boardIssueLineBudget())
 	if window.showAbove {
 		lines = append(lines, boardMoreLine("↑", window.start, width))
 	}
@@ -835,7 +877,7 @@ func (m model) digestWindows(sections []digestSection) []issueWindow {
 		if section.hidden {
 			continue
 		}
-		windows[i] = visibleIssueWindow(len(section.Issues), section.selected, capacities[i])
+		windows[i] = visibleIssueWindow(len(section.Issues), section.selected, section.top, capacities[i])
 	}
 	return windows
 }
@@ -914,7 +956,11 @@ func allocateLineBudgets(counts []int, height int) []int {
 	return budgets
 }
 
-func visibleIssueWindow(total, selected, lineBudget int) issueWindow {
+// visibleIssueWindow places a capacity-sized window over total rows at the
+// stored scroll offset top, shrinking the row capacity to make room for the
+// "↑/↓ N more" overflow indicators when they apply. selected is kept inside
+// the window so the surfaces never lose the cursor.
+func visibleIssueWindow(total, selected, top, lineBudget int) issueWindow {
 	if total <= 0 || lineBudget <= 0 {
 		return issueWindow{}
 	}
@@ -925,7 +971,7 @@ func visibleIssueWindow(total, selected, lineBudget int) issueWindow {
 
 	issueCapacity := min(lineBudget, total)
 	for {
-		window := issueRange(total, selected, issueCapacity)
+		window := issueRange(total, selected, top, issueCapacity)
 		indicatorLines := 0
 		if window.start > 0 {
 			indicatorLines++
@@ -946,9 +992,28 @@ func visibleIssueWindow(total, selected, lineBudget int) issueWindow {
 	}
 }
 
-func issueRange(total, selected, capacity int) issueWindow {
-	start := min(max(selected-capacity/2, 0), total-capacity)
+func issueRange(total, selected, top, capacity int) issueWindow {
+	start := scrollTop(top, selected, total, capacity)
 	return issueWindow{start: start, end: start + capacity}
+}
+
+// scrollTop resolves a window's first visible row: it keeps the stored offset
+// put while the cursor stays inside the window — so the cursor walks all the
+// way to an edge before anything scrolls — and shifts the offset by just enough
+// to reveal the cursor when it would fall off either edge, sticking there.
+func scrollTop(top, selected, total, capacity int) int {
+	if capacity >= total {
+		return 0
+	}
+	top = min(max(top, 0), total-capacity)
+	switch {
+	case selected < top:
+		return selected
+	case selected >= top+capacity:
+		return selected - capacity + 1
+	default:
+		return top
+	}
 }
 
 func issueCount(sections []digestSection) int {
@@ -985,6 +1050,7 @@ func (m model) digestSections() []digestSection {
 		filtered := section
 		filtered.Issues = nil
 		filtered.selected = 0
+		filtered.top = 0
 		for _, issue := range section.Issues {
 			if !issueMatchesFilter(issue, query) {
 				continue

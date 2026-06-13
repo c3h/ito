@@ -19,6 +19,9 @@ type batchSection struct {
 	cycle     []string
 	collapsed bool
 	selected  int
+	// top is the scroll offset into the rendered body lines (batchBody), kept so
+	// the cursor walks to an edge before the body slides, like the Digest.
+	top int
 }
 
 // reloadBatches snapshots the Project's Batches newest-first, deriving each
@@ -150,6 +153,7 @@ func (m model) displayBatchSections() []batchSection {
 		filtered := section
 		filtered.waves = nil
 		filtered.selected = 0
+		filtered.top = 0
 		row := 0
 		for _, wave := range section.waves {
 			match := wave
@@ -213,7 +217,7 @@ func (m model) batchesView() string {
 			continue
 		}
 		lines = append(lines, batchHeading(section, i == m.batchFocus, width))
-		window := visibleIssueWindow(len(bodies[i]), selectedLines[i], budgets[i])
+		window := visibleIssueWindow(len(bodies[i]), selectedLines[i], section.top, budgets[i])
 		if window.showAbove {
 			lines = append(lines, styleDim.Render(fmt.Sprintf("    ↑ %d more", window.start)))
 		}
