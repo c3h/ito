@@ -971,7 +971,8 @@ func visibleIssueWindow(total, selected, top, lineBudget int) issueWindow {
 
 	issueCapacity := min(lineBudget, total)
 	for {
-		window := issueRange(total, selected, top, issueCapacity)
+		start := scrollTop(top, selected, total, issueCapacity)
+		window := issueWindow{start: start, end: start + issueCapacity}
 		indicatorLines := 0
 		if window.start > 0 {
 			indicatorLines++
@@ -990,11 +991,6 @@ func visibleIssueWindow(total, selected, top, lineBudget int) issueWindow {
 		}
 		issueCapacity = nextIssueCapacity
 	}
-}
-
-func issueRange(total, selected, top, capacity int) issueWindow {
-	start := scrollTop(top, selected, total, capacity)
-	return issueWindow{start: start, end: start + capacity}
 }
 
 // scrollTop resolves a window's first visible row: it keeps the stored offset
