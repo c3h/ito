@@ -183,7 +183,12 @@ type BatchPlan struct {
 type BatchWave struct {
 	Wave   int     `json:"wave"`
 	Ready  bool    `json:"ready"`
+	Done   bool    `json:"done"`
 	Issues []Issue `json:"issues"`
+}
+
+type ShowBatchOptions struct {
+	IncludeDone bool
 }
 
 type ListOptions struct {
@@ -386,7 +391,11 @@ func (s *Store) DeleteBatch(p Project, name string) (DeleteBatchResult, error) {
 }
 
 func (s *Store) ShowBatch(p Project, name string) (BatchPlan, error) {
-	return showBatch(s.db, p, name)
+	return showBatch(s.db, p, name, ShowBatchOptions{})
+}
+
+func (s *Store) ShowBatchWithOptions(p Project, name string, opts ShowBatchOptions) (BatchPlan, error) {
+	return showBatch(s.db, p, name, opts)
 }
 
 func (s *Store) FindIssue(p Project, id string) (Issue, error) {
@@ -1077,7 +1086,7 @@ func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) 
 	return DeleteBatchResult{Name: name, MembersCleared: int(membersCleared)}, nil
 }
 
-func showBatch(db *sql.DB, p Project, name string) (BatchPlan, error) {
+func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (BatchPlan, error) {
 	batch, batchID, err := findBatchWithProgress(db, p, name)
 	if err != nil {
 		return BatchPlan{}, err
@@ -1097,9 +1106,10 @@ func showBatch(db *sql.DB, p Project, name string) (BatchPlan, error) {
 	}
 	defer tx.Exec(`DROP TABLE IF EXISTS ito_wave_done`)
 
+	waveQuery := batchWaveQuery(batchID, opts.IncludeDone)
 	waves := []BatchWave{}
 	for waveNumber := 1; ; waveNumber++ {
-		remaining, err := countRemainingBatchMembers(tx, batchID)
+		remaining, err := countRemainingBatchMembers(tx, batchID, opts.IncludeDone)
 		if err != nil {
 			return BatchPlan{}, err
 		}
@@ -1107,12 +1117,12 @@ func showBatch(db *sql.DB, p Project, name string) (BatchPlan, error) {
 			break
 		}
 
-		issues, err := readyBatchWave(tx, p, batchID)
+		issues, err := readyBatchWave(tx, p, batchID, waveQuery)
 		if err != nil {
 			return BatchPlan{}, err
 		}
 		if len(issues) == 0 {
-			cycle, err := findBatchBlockedByCycle(tx, batchID)
+			cycle, err := findBatchBlockedByCycle(tx, batchID, opts.IncludeDone)
 			if err != nil {
 				return BatchPlan{}, err
 			}
@@ -1124,7 +1134,7 @@ func showBatch(db *sql.DB, p Project, name string) (BatchPlan, error) {
 
 		waves = append(waves, BatchWave{
 			Wave:   waveNumber,
-			Ready:  waveNumber == 1,
+			Done:   batchWaveDone(issues),
 			Issues: issues,
 		})
 		for _, issue := range issues {
@@ -1137,7 +1147,30 @@ func showBatch(db *sql.DB, p Project, name string) (BatchPlan, error) {
 	if err := tx.Commit(); err != nil {
 		return BatchPlan{}, err
 	}
+	markBatchWaveReadiness(waves)
 	return BatchPlan{Batch: batch, Waves: waves}, nil
+}
+
+func batchWaveDone(issues []Issue) bool {
+	if len(issues) == 0 {
+		return false
+	}
+	for _, issue := range issues {
+		if issue.Status != "done" {
+			return false
+		}
+	}
+	return true
+}
+
+func markBatchWaveReadiness(waves []BatchWave) {
+	for i := range waves {
+		waves[i].Ready = false
+		if !waves[i].Done {
+			waves[i].Ready = true
+			return
+		}
+	}
 }
 
 func findBatchWithProgress(db *sql.DB, p Project, name string) (Batch, int64, error) {
@@ -1153,29 +1186,45 @@ func findBatchWithProgress(db *sql.DB, p Project, name string) (Batch, int64, er
 	return batch, batchID, nil
 }
 
-func countRemainingBatchMembers(q rowQuerier, batchID int64) (int, error) {
+func countRemainingBatchMembers(q rowQuerier, batchID int64, includeDone bool) (int, error) {
+	statusFilter := `
+  AND status != 'done'`
+	if includeDone {
+		statusFilter = ""
+	}
 	var remaining int
 	err := q.QueryRow(`
 SELECT count(*)
 FROM issues
 WHERE batch_id = ?
-  AND status != 'done'
+`+statusFilter+`
   AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)`, batchID).Scan(&remaining)
 	return remaining, err
 }
 
-func readyBatchWave(q rowQuerier, p Project, batchID int64) ([]Issue, error) {
-	query := `
+// batchWaveQuery builds the per-wave readiness query once; it is identical
+// across every wave of a single ShowBatch, so showBatch builds it before the
+// loop. includeDone widens "ready" to the historical, batch-aware done
+// predicate so completed Waves still derive.
+func batchWaveQuery(batchID int64, includeDone bool) string {
+	readyWhere := readyFrontierWhereSQLWithOptions("issues", "issues.status != 'done'", tableDonePredicate("ito_wave_done"))
+	if includeDone {
+		readyWhere = readyFrontierWhereSQLWithOptions("issues", historicalBatchCandidateWhereSQL("issues", batchID), batchDonePredicate(batchID))
+	}
+	return `
 SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, batches.name, issues.body, issues.created, issues.updated
 FROM issues
 JOIN projects ON projects.id = issues.project_id
 LEFT JOIN batches ON batches.id = issues.batch_id
 WHERE issues.batch_id = ?
   AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)
-  AND ` + readyFrontierWhereSQLWithOptions("issues", "ito_wave_done", "issues.status != 'done'") + `
+  AND ` + readyWhere + `
 ORDER BY ` + priorityOrderSQL + `,
 issues.updated DESC,
 issues.id ASC`
+}
+
+func readyBatchWave(q rowQuerier, p Project, batchID int64, query string) ([]Issue, error) {
 	rows, err := q.Query(query, batchID)
 	if err != nil {
 		return nil, err
@@ -1199,7 +1248,13 @@ issues.id ASC`
 	return issues, nil
 }
 
-func findBatchBlockedByCycle(q rowQuerier, batchID int64) ([]string, error) {
+func findBatchBlockedByCycle(q rowQuerier, batchID int64, includeDone bool) ([]string, error) {
+	statusFilter := `
+  AND source.status != 'done'
+  AND target.status != 'done'`
+	if includeDone {
+		statusFilter = ""
+	}
 	rows, err := q.Query(`
 SELECT source.id, target.id
 FROM issue_links
@@ -1208,8 +1263,7 @@ JOIN issues AS target ON target.project_id = issue_links.project_id AND target.i
 WHERE issue_links.kind = 'blocked_by'
   AND source.batch_id = ?
   AND target.batch_id = ?
-  AND source.status != 'done'
-  AND target.status != 'done'
+`+statusFilter+`
   AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = source.id)
   AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = target.id)
 ORDER BY source.id, target.id`, batchID, batchID)
@@ -1953,11 +2007,26 @@ issues.id ASC`
 }
 
 func readyFrontierWhereSQL(issueAlias string) string {
-	return readyFrontierWhereSQLWithOptions(issueAlias, "", issueAlias+".status IN ('backlog', 'todo')")
+	return readyFrontierWhereSQLWithOptions(issueAlias, issueAlias+".status IN ('backlog', 'todo')", tableDonePredicate(""))
 }
 
-func readyFrontierWhereSQLWithOptions(issueAlias, doneTable, statusWhere string) string {
-	return otherwiseReadyWhereSQL(issueAlias, doneTable, statusWhere) + `
+// donePredicate builds the SQL that decides whether the issue at issueAlias
+// counts as "done". The non-historical path keys off the status column (and an
+// optional wave-done temp table); the historical batch path keys off batch
+// membership instead, so threading it as a function lets one set of frontier
+// builders serve both.
+type donePredicate func(issueAlias string) string
+
+func tableDonePredicate(doneTable string) donePredicate {
+	return func(issueAlias string) string { return doneStatusWhereSQL(issueAlias, doneTable) }
+}
+
+func batchDonePredicate(batchID int64) donePredicate {
+	return func(issueAlias string) string { return historicalBatchDoneStatusWhereSQL(issueAlias, batchID) }
+}
+
+func readyFrontierWhereSQLWithOptions(issueAlias, statusWhere string, isDone donePredicate) string {
+	return otherwiseReadyWhereSQL(issueAlias, statusWhere, isDone) + `
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS in_flight_conflict
 JOIN issues AS in_flight_partner ON in_flight_partner.project_id = in_flight_conflict.project_id
@@ -1969,7 +2038,7 @@ WHERE in_flight_conflict.project_id = ` + issueAlias + `.project_id
   AND in_flight_conflict.kind = 'conflicts_with'
   AND (in_flight_conflict.source_id = ` + issueAlias + `.id OR in_flight_conflict.target_id = ` + issueAlias + `.id)
   AND in_flight_partner.status IN ('in_progress', 'in_review')
-  AND NOT ` + doneStatusWhereSQL("in_flight_partner", doneTable) + `
+  AND NOT ` + isDone("in_flight_partner") + `
 )
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS ready_conflict
@@ -1981,22 +2050,34 @@ JOIN issues AS ready_partner ON ready_partner.project_id = ready_conflict.projec
 WHERE ready_conflict.project_id = ` + issueAlias + `.project_id
   AND ready_conflict.kind = 'conflicts_with'
   AND (ready_conflict.source_id = ` + issueAlias + `.id OR ready_conflict.target_id = ` + issueAlias + `.id)
-  AND ` + otherwiseReadyWhereSQL("ready_partner", doneTable, strings.ReplaceAll(statusWhere, issueAlias+".", "ready_partner.")) + `
+  AND ` + otherwiseReadyWhereSQL("ready_partner", strings.ReplaceAll(statusWhere, issueAlias+".", "ready_partner."), isDone) + `
   AND ` + readyConflictPartnerBeatsSQL("ready_partner", issueAlias) + `
 )`
 }
 
-func otherwiseReadyWhereSQL(issueAlias, doneTable, statusWhere string) string {
+func historicalBatchCandidateWhereSQL(issueAlias string, batchID int64) string {
+	id := strconv.FormatInt(batchID, 10)
+	return `((` + issueAlias + `.batch_id = ` + id + ` AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = ` + issueAlias + `.id))
+  OR (COALESCE(` + issueAlias + `.batch_id, -1) != ` + id + ` AND ` + issueAlias + `.status != 'done'))`
+}
+
+func historicalBatchDoneStatusWhereSQL(issueAlias string, batchID int64) string {
+	id := strconv.FormatInt(batchID, 10)
+	return `((` + issueAlias + `.batch_id = ` + id + ` AND EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = ` + issueAlias + `.id))
+  OR (COALESCE(` + issueAlias + `.batch_id, -1) != ` + id + ` AND ` + issueAlias + `.status = 'done'))`
+}
+
+func otherwiseReadyWhereSQL(issueAlias, statusWhere string, isDone donePredicate) string {
 	blockerAlias := issueAlias + "_blocker"
 	return statusWhere + `
-AND NOT ` + doneStatusWhereSQL(issueAlias, doneTable) + `
+AND NOT ` + isDone(issueAlias) + `
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS ` + blockerAlias + `_link
 JOIN issues AS ` + blockerAlias + ` ON ` + blockerAlias + `.project_id = ` + blockerAlias + `_link.project_id AND ` + blockerAlias + `.id = ` + blockerAlias + `_link.target_id
 WHERE ` + blockerAlias + `_link.project_id = ` + issueAlias + `.project_id
   AND ` + blockerAlias + `_link.source_id = ` + issueAlias + `.id
   AND ` + blockerAlias + `_link.kind = 'blocked_by'
-  AND NOT ` + doneStatusWhereSQL(blockerAlias, doneTable) + `
+  AND NOT ` + isDone(blockerAlias) + `
 )`
 }
 

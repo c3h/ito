@@ -41,7 +41,7 @@ The AI is external: `ito` does not expose MCP and does not embed an LLM. The age
 - No interactive prompts anywhere, so an agent never stalls.
 - Errors are actionable sentences on stderr (`no Project registered for the current directory. run 'ito init' in this Project or use --project <name>.`) — the message is what makes the agent take the right next action.
 - `ito list --ready` computes the frontier of issues whose blockers are all done (and whose `conflicts_with` partners are idle) — the set an agent can safely fan out, one git worktree per issue.
-- `ito batch` groups a coherent effort as a named set of issues; `ito batch show` slices it into **Waves** — the link-graph generations safe to run in parallel, derived at read time so they never contradict the links — and `ito batch move` moves the whole set to a status when the effort lands together.
+- `ito batch` groups a coherent effort as a named set of issues; `ito batch show` slices open work into **Waves** — the link-graph generations safe to run in parallel, derived at read time so they never contradict the links — `ito batch show --include-done` exposes the historical Waves after work lands, and `ito batch move` moves the whole set to a status when the effort lands together.
 - `--help` is the guide: the root help orients to the non-obvious model so a first run explains itself.
 
 ## How it works

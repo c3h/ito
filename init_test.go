@@ -74,6 +74,7 @@ type batchShowJSON struct {
 type batchWaveJSON struct {
 	Wave   int         `json:"wave"`
 	Ready  bool        `json:"ready"`
+	Done   bool        `json:"done"`
 	Issues []issueJSON `json:"issues"`
 }
 
@@ -1877,16 +1878,48 @@ func TestBatchShowUnknownCompleteAndCycleErrors(t *testing.T) {
 	if result := runITO(t, repo, itoHome, "batch", "new", "complete", "--json"); result.exitCode != 0 {
 		t.Fatalf("ito batch new complete failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
-	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Done", "--batch", "complete", "--status", "done"); result.exitCode != 0 {
-		t.Fatalf("ito new done failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Done first", "--batch", "complete", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("ito new done first failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Done second", "--batch", "complete", "--status", "done"); result.exitCode != 0 {
+		t.Fatalf("ito new done second failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "BER-2", "--block", "BER-1"); result.exitCode != 0 {
+		t.Fatalf("ito edit complete block failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
 	completeResult := runITO(t, repo, itoHome, "batch", "show", "complete", "--json")
 	if completeResult.exitCode != 0 {
 		t.Fatalf("complete batch show failed with exit %d\nstdout: %s\nstderr: %s", completeResult.exitCode, completeResult.stdout, completeResult.stderr)
 	}
 	complete := decodeBatchShow(t, completeResult.stdout)
-	if complete.Total != 1 || complete.Done != 1 || len(complete.Waves) != 0 {
+	if complete.Total != 2 || complete.Done != 2 || len(complete.Waves) != 0 {
 		t.Fatalf("complete batch must show full progress and no waves, got %#v", complete)
+	}
+	completeHistoryResult := runITO(t, repo, itoHome, "batch", "show", "complete", "--include-done", "--json")
+	if completeHistoryResult.exitCode != 0 {
+		t.Fatalf("complete batch show --include-done failed with exit %d\nstdout: %s\nstderr: %s", completeHistoryResult.exitCode, completeHistoryResult.stdout, completeHistoryResult.stderr)
+	}
+	completeHistory := decodeBatchShow(t, completeHistoryResult.stdout)
+	if len(completeHistory.Waves) != 2 {
+		t.Fatalf("complete batch history must show completed waves, got %#v", completeHistory)
+	}
+	if got := issueIDs(completeHistory.Waves[0].Issues); !stringSlicesEqual(got, []string{"BER-1"}) {
+		t.Fatalf("expected completed blocker in wave 1, got %v\nstdout: %s", got, completeHistoryResult.stdout)
+	}
+	if got := issueIDs(completeHistory.Waves[1].Issues); !stringSlicesEqual(got, []string{"BER-2"}) {
+		t.Fatalf("expected completed dependent in wave 2, got %v\nstdout: %s", got, completeHistoryResult.stdout)
+	}
+	for _, wave := range completeHistory.Waves {
+		if !wave.Done || wave.Ready {
+			t.Fatalf("completed historical waves must be done and not ready, got %#v", completeHistory.Waves)
+		}
+	}
+	completeHuman := runITO(t, repo, itoHome, "batch", "show", "complete", "--include-done")
+	if completeHuman.exitCode != 0 || completeHuman.stderr != "" {
+		t.Fatalf("complete batch show --include-done human failed with exit %d\nstdout: %s\nstderr: %s", completeHuman.exitCode, completeHuman.stdout, completeHuman.stderr)
+	}
+	if !strings.Contains(completeHuman.stdout, "Wave 1 · done") || !strings.Contains(completeHuman.stdout, "Wave 2 · done") {
+		t.Fatalf("human complete batch history must mark waves done, got %q", completeHuman.stdout)
 	}
 
 	if result := runITO(t, repo, itoHome, "batch", "new", "cycle", "--json"); result.exitCode != 0 {
@@ -1898,9 +1931,9 @@ func TestBatchShowUnknownCompleteAndCycleErrors(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{
-		{"edit", "--json", "BER-2", "--block", "BER-3"},
 		{"edit", "--json", "BER-3", "--block", "BER-4"},
-		{"edit", "--json", "BER-4", "--block", "BER-2"},
+		{"edit", "--json", "BER-4", "--block", "BER-5"},
+		{"edit", "--json", "BER-5", "--block", "BER-3"},
 	} {
 		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
 			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
@@ -1911,7 +1944,7 @@ func TestBatchShowUnknownCompleteAndCycleErrors(t *testing.T) {
 		t.Fatalf("cycle batch show must fail exit 1 with no stdout, got exit=%d stdout=%q stderr=%q", cycle.exitCode, cycle.stdout, cycle.stderr)
 	}
 	envelope = decodeErrorEnvelope(t, cycle.stderr)
-	for _, id := range []string{"BER-2", "BER-3", "BER-4"} {
+	for _, id := range []string{"BER-3", "BER-4", "BER-5"} {
 		if !strings.Contains(envelope.Error, id) {
 			t.Fatalf("cycle error must name %s, got %#v", id, envelope)
 		}

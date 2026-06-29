@@ -645,6 +645,110 @@ func TestShowBatchCompleteBatchHasNoWaves(t *testing.T) {
 	}
 }
 
+func TestShowBatchIncludeDoneKeepsEmptyBatchEmpty(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("empty-history-app", "EHI", filepath.Join(t.TempDir(), "empty-history"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "empty-work"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+
+	plan, err := st.ShowBatchWithOptions(project, "empty-work", ShowBatchOptions{IncludeDone: true})
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if plan.Total != 0 || plan.Done != 0 || len(plan.Waves) != 0 {
+		t.Fatalf("expected empty progress and no waves, got %#v", plan)
+	}
+}
+
+func TestShowBatchCanIncludeCompletedWaves(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("history-app", "HIS", filepath.Join(t.TempDir(), "history"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "done-work"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	first := createStoreIssueInBatch(t, st, project, "Done first", "done", "high", "done-work")
+	second := createStoreIssueInBatch(t, st, project, "Done second", "done", "medium", "done-work")
+	addStoreLink(t, st, project, second.ID, "blocked_by", first.ID)
+
+	plan, err := st.ShowBatchWithOptions(project, "done-work", ShowBatchOptions{IncludeDone: true})
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if plan.Total != 2 || plan.Done != 2 {
+		t.Fatalf("expected complete progress, got %d/%d", plan.Done, plan.Total)
+	}
+	if len(plan.Waves) != 2 {
+		t.Fatalf("expected completed waves, got %#v", plan.Waves)
+	}
+	if got := storeIssueIDs(plan.Waves[0].Issues); !slices.Equal(got, []string{first.ID}) {
+		t.Fatalf("expected first completed blocker in wave 1, got %v", got)
+	}
+	if got := storeIssueIDs(plan.Waves[1].Issues); !slices.Equal(got, []string{second.ID}) {
+		t.Fatalf("expected dependent completed member in wave 2, got %v", got)
+	}
+	for _, wave := range plan.Waves {
+		if !wave.Done || wave.Ready {
+			t.Fatalf("completed historical waves must be done and not ready, got %#v", plan.Waves)
+		}
+	}
+}
+
+func TestShowBatchIncludeCompletedWavesMarksFirstOpenWaveReady(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("mixed-history-app", "MIX", filepath.Join(t.TempDir(), "mixed-history"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "mixed-work"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	done := createStoreIssueInBatch(t, st, project, "Done blocker", "done", "high", "mixed-work")
+	open := createStoreIssueInBatch(t, st, project, "Open dependent", "todo", "medium", "mixed-work")
+	addStoreLink(t, st, project, open.ID, "blocked_by", done.ID)
+
+	plan, err := st.ShowBatchWithOptions(project, "mixed-work", ShowBatchOptions{IncludeDone: true})
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 2 {
+		t.Fatalf("expected historical and active waves, got %#v", plan.Waves)
+	}
+	if !plan.Waves[0].Done || plan.Waves[0].Ready {
+		t.Fatalf("wave 1 should be historical done, got %#v", plan.Waves[0])
+	}
+	if plan.Waves[1].Done || !plan.Waves[1].Ready {
+		t.Fatalf("wave 2 should be the first active ready wave, got %#v", plan.Waves[1])
+	}
+	if got := storeIssueIDs(plan.Waves[1].Issues); !slices.Equal(got, []string{open.ID}) {
+		t.Fatalf("expected open dependent in active wave, got %v", got)
+	}
+}
+
 func TestShowBatchReportsBlockedByCycle(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {

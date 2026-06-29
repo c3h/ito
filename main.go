@@ -230,6 +230,7 @@ type batchShowItem struct {
 type batchWaveItem struct {
 	Wave   int             `json:"wave"`
 	Ready  bool            `json:"ready"`
+	Done   bool            `json:"done"`
 	Issues []issueListItem `json:"issues"`
 }
 
@@ -616,8 +617,10 @@ func runBatchShow(args []string) int {
 	fs.SetOutput(io.Discard)
 	var jsonMode bool
 	var projectName string
+	var includeDone bool
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
+	fs.BoolVar(&includeDone, "include-done", false, "")
 	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
 	if err := fs.Parse(flagArgs); err != nil {
 		return fail(wantsJSON(args, commandValueFlags("batch show")), exitBadUsage, err.Error(), "run 'ito batch show --help' to see the accepted flags.")
@@ -636,7 +639,7 @@ func runBatchShow(args []string) int {
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
-	plan, err := st.ShowBatch(p, positionals[0])
+	plan, err := st.ShowBatchWithOptions(p, positionals[0], itostore.ShowBatchOptions{IncludeDone: includeDone})
 	if err != nil {
 		if errors.Is(err, itostore.ErrBatchNotFound) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", positionals[0], p.Name), "run 'ito batch list' to see the Project's Batches.")
@@ -1644,12 +1647,14 @@ Flags:
   --project <name>     Explicit Project.
   --json               Prints JSON.`)
 	case "batch show":
-		fmt.Println(`usage: ito batch show [--project <name>] [--json] <name>
+		fmt.Println(`usage: ito batch show [--project <name>] [--include-done] [--json] <name>
 
-Shows the Batch's non-done members grouped by derived Waves, plus done/total progress.
+Shows the Batch's open members grouped by derived Waves, plus done/total progress.
+Use --include-done to include historical completed Waves.
 
 Flags:
   --project <name>     Explicit Project.
+  --include-done       Includes completed members in historical Waves.
   --json               Prints JSON.`)
 	case "move":
 		fmt.Println(`usage: ito move [--project <name>] [--json] <PREFIX>-<n> <status>
@@ -1863,6 +1868,7 @@ func printBatchShow(plan batchPlan, jsonMode bool) int {
 			waveItem := batchWaveItem{
 				Wave:   wave.Wave,
 				Ready:  wave.Ready,
+				Done:   wave.Done,
 				Issues: make([]issueListItem, 0, len(wave.Issues)),
 			}
 			for _, issue := range wave.Issues {
@@ -1880,7 +1886,9 @@ func printBatchShow(plan batchPlan, jsonMode bool) int {
 	style := newListStyle()
 	for _, wave := range plan.Waves {
 		state := "waiting"
-		if wave.Ready {
+		if wave.Done {
+			state = "done"
+		} else if wave.Ready {
 			state = "ready"
 		}
 		fmt.Printf("\nWave %d · %s\n", wave.Wave, state)
