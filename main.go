@@ -214,6 +214,14 @@ type deletedBatch struct {
 	MembersCleared int    `json:"members_cleared"`
 }
 
+type movedBatch struct {
+	Batch        string   `json:"batch"`
+	Project      string   `json:"project"`
+	TargetStatus string   `json:"target_status"`
+	Changed      []string `json:"changed"`
+	Skipped      []string `json:"skipped"`
+}
+
 type batchShowItem struct {
 	batch
 	Waves []batchWaveItem `json:"waves"`
@@ -372,6 +380,8 @@ func runBatch(args []string) int {
 		return runBatchNew(args[1:])
 	case "list":
 		return runBatchList(args[1:])
+	case "move":
+		return runBatchMove(args[1:])
 	case "rename":
 		return runBatchRename(args[1:])
 	case "rm":
@@ -463,6 +473,52 @@ func runBatchList(args []string) int {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not derive Batch Waves: %v", err), "try again or inspect the central store.")
 	}
 	return printBatchList(rows, jsonMode)
+}
+
+func runBatchMove(args []string) int {
+	if wantsHelp(args, commandValueFlags("batch move")) {
+		printCommandHelp("batch move")
+		return 0
+	}
+	fs := flag.NewFlagSet("batch move", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	var projectName string
+	fs.BoolVar(&jsonMode, "json", false, "")
+	fs.StringVar(&projectName, "project", "", "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, map[string]struct{}{"project": {}})
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, commandValueFlags("batch move")), exitBadUsage, err.Error(), "run 'ito batch move --help' to see the accepted flags.")
+	}
+	if len(positionals) != 2 {
+		return fail(jsonMode, exitBadUsage, "ito batch move takes exactly one Batch name and a target status.", "use: ito batch move <name> <status>.")
+	}
+	name, targetStatus := positionals[0], positionals[1]
+	if !isValidValue(targetStatus, validStatuses) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", targetStatus), "use "+statusList+".")
+	}
+	if projectName != "" && !itostore.ProjectNamePattern.MatchString(projectName) {
+		return failInvalidProjectName(jsonMode, projectName)
+	}
+
+	db, st, openFail := openMigratedStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+
+	p, code, message, hint := resolveProject(st, projectName)
+	if code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+	moved, err := st.MoveBatch(p, name, targetStatus)
+	if err != nil {
+		if errors.Is(err, itostore.ErrBatchNotFound) {
+			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", name, p.Name), "run 'ito batch list' to see the Project's Batches.")
+		}
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not move Batch %q: %v", name, err), "try again or inspect the central store.")
+	}
+	return printMovedBatch(moved, jsonMode)
 }
 
 func runBatchRename(args []string) int {
@@ -1364,7 +1420,7 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "list":
 		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "search": {}, "label": {}, "batch": {}}
-	case "batch new", "batch list", "batch rename", "batch rm", "batch show":
+	case "batch new", "batch list", "batch move", "batch rename", "batch rm", "batch show":
 		return map[string]struct{}{"project": {}}
 	case "move":
 		return map[string]struct{}{"project": {}}
@@ -1539,6 +1595,7 @@ Manages Batches in the current Project.
 Commands:
   new      Creates a Batch.
   list     Lists Batches newest-first.
+  move     Moves every member Issue to a status.
   show     Shows a Batch grouped by derived Waves.
   rename   Renames a Batch.
   rm       Deletes a Batch and releases its members.
@@ -1560,6 +1617,16 @@ Lists Batches newest-first with created date, progress, and derived Wave count.
 Flags:
   --project <name>     Explicit Project.
   --json               Prints JSON.`)
+	case "batch move":
+		fmt.Printf(`usage: ito batch move [--project <name>] [--json] <name> <status>
+
+Moves every Issue in a Batch to a valid status and reports changed and skipped IDs.
+
+Flags:
+  <status>             %s.
+  --project <name>     Explicit Project.
+  --json               Prints JSON.
+`, statusList)
 	case "batch rename":
 		fmt.Println(`usage: ito batch rename [--project <name>] [--json] <old> <new>
 
@@ -1768,6 +1835,21 @@ func printDeletedBatch(name string, membersCleared int, jsonMode bool) int {
 		return printJSON(deletedBatch{Deleted: name, MembersCleared: membersCleared}, "Batch deletion")
 	}
 	fmt.Printf("%s deleted. %d members released.\n", name, membersCleared)
+	return 0
+}
+
+func printMovedBatch(result itostore.BatchMoveResult, jsonMode bool) int {
+	if jsonMode {
+		return printJSON(movedBatch{
+			Batch:        result.Batch,
+			Project:      result.Project,
+			TargetStatus: result.TargetStatus,
+			Changed:      result.Changed,
+			Skipped:      result.Skipped,
+		}, "Batch move")
+	}
+	fmt.Printf("%s moved %d Issues to %s. changed: %s. skipped: %s.\n",
+		result.Batch, len(result.Changed), result.TargetStatus, formatList(result.Changed), formatList(result.Skipped))
 	return 0
 }
 

@@ -285,10 +285,11 @@ The Batch CRUD is the CLI's **first noun namespace** — the top level stays Iss
 | `ito batch new <name>`       | Creates a Batch in the current Project. The slug is validated like a Project name; a collision fails with exit `2`. |
 | `ito batch list`             | Lists the Project's Batches newest-first, each with its `created` date and derived progress (members `done`/total, current Wave). |
 | `ito batch show <name>`      | The Batch's members grouped by **derived Waves**, plus progress. A dependency cycle among members is a clear error naming the Issues involved. |
+| `ito batch move <name> <status>` | Moves every member Issue in the Batch to the target status in one transaction. It validates the target like `ito move`, stamps `updated` only for Issues whose status changes, and JSON reports `changed` and `skipped` Issue IDs. |
 | `ito batch rename <old> <new>` | Renames the Batch; membership and `created` stay intact.    |
 | `ito batch rm <name>`        | Deletes the Batch and clears membership — **never deletes Issues**. |
 
-Membership travels on the existing Issue commands: `ito new --batch <name>`, `ito edit <ID> --batch <name>` (and `--batch ""` to leave), `ito list --batch <name>` (AND-combines with the other filters; `--batch <name> --ready` = the current Wave). `--block`/`--unblock`/`--relate`/`--unrelate` gain `--conflict`/`--unconflict` siblings for the new link type. Everything keeps `--json`; the canonical issue object (§6.2) gains `"conflicts_with": []` and `"batch": "<name>" | null` (the stable-shape rule holds: always present, never omitted).
+Membership travels on the existing Issue commands: `ito new --batch <name>`, `ito edit <ID> --batch <name>` (and `--batch ""` to leave), `ito list --batch <name>` (AND-combines with the other filters; `--batch <name> --ready` = the current Wave). `ito batch move` is only bulk status convenience over member Issues, not a stored Batch status or close command. `--block`/`--unblock`/`--relate`/`--unrelate` gain `--conflict`/`--unconflict` siblings for the new link type. Everything keeps `--json`; the canonical issue object (§6.2) gains `"conflicts_with": []` and `"batch": "<name>" | null` (the stable-shape rule holds: always present, never omitted).
 
 ---
 
@@ -369,5 +370,5 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 | 16 | Result contract | Success: exit 0 + raw data (`--json`). Failure: exit ≠ 0 + an actionable sentence on stderr (+ an error object in `--json`). Fixed taxonomy of exit codes. |
 | 17 | Parallel fan-out grouping | **Batch** (named set of Issues; slug + immutable `created`; ≤1 per Issue; completion derived) + **Wave** (derived topological generations of the Link graph; never stored). v2 extension. |
 | 18 | Mutual exclusion | Third link type **`conflicts_with`** (symmetric): "not in parallel". Honoured by Waves and by `--ready` (deterministic winner — Priority, then ID — preserves the frontier's independence property). |
-| 19 | Batch CLI | First noun namespace: `ito batch new/list/show/rename/rm`; membership via `--batch` on `new`/`edit`/`list`; `batch rm` never deletes Issues. |
+| 19 | Batch CLI | First noun namespace: `ito batch new/list/show/move/rename/rm`; membership via `--batch` on `new`/`edit`/`list`; `batch move` bulk-moves member Issue statuses and `batch rm` never deletes Issues. |
 | 20 | Batch TUI | Second tab `[2]`, one screen: each Batch a Digest-style section (newest first, `created` at the rule's right end), members grouped by Wave sub-headings; no drill-in. Membership editing deferred to v3. |

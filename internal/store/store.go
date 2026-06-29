@@ -237,6 +237,14 @@ type MoveResult struct {
 	Changed      bool
 }
 
+type BatchMoveResult struct {
+	Batch        string
+	Project      string
+	TargetStatus string
+	Changed      []string
+	Skipped      []string
+}
+
 type EditResult struct {
 	Issue   Issue
 	Changed bool
@@ -401,6 +409,10 @@ func (s *Store) Move(p Project, id string, targetStatus string) (MoveResult, err
 		return MoveResult{}, err
 	}
 	return MoveResult{Issue: moved, BeforeStatus: beforeStatus, Changed: changed}, nil
+}
+
+func (s *Store) MoveBatch(p Project, name string, targetStatus string) (BatchMoveResult, error) {
+	return moveBatchStatus(s.db, p, name, targetStatus)
 }
 
 func (s *Store) Edit(p Project, id string, options EditIssueOptions) (EditResult, error) {
@@ -1409,6 +1421,81 @@ func moveIssueStatus(db *sql.DB, p Project, id string, targetStatus string) (Iss
 		return Issue{}, "", false, err
 	}
 	return moved, currentStatus, changed, nil
+}
+
+func moveBatchStatus(db *sql.DB, p Project, name string, targetStatus string) (BatchMoveResult, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return BatchMoveResult{}, err
+	}
+	defer tx.Rollback()
+
+	batchID, found, err := findBatchID(tx, p.ID, name)
+	if err != nil {
+		return BatchMoveResult{}, err
+	}
+	if !found {
+		return BatchMoveResult{}, ErrBatchNotFound
+	}
+
+	rows, err := tx.Query(`
+SELECT id, status
+FROM issues
+WHERE project_id = ? AND batch_id = ?
+ORDER BY row_id ASC`, p.ID, batchID)
+	if err != nil {
+		return BatchMoveResult{}, err
+	}
+
+	changed := []string{}
+	skipped := []string{}
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			rows.Close()
+			return BatchMoveResult{}, err
+		}
+		if status == targetStatus {
+			skipped = append(skipped, id)
+			continue
+		}
+		changed = append(changed, id)
+	}
+	if err := rows.Close(); err != nil {
+		return BatchMoveResult{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return BatchMoveResult{}, err
+	}
+
+	// One bulk write moves exactly the members the scan classified as changed —
+	// the WHERE re-selects the same rows inside this transaction's snapshot, so
+	// RowsAffected must match. The skipped members already hold targetStatus and
+	// keep their updated stamp.
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND batch_id = ? AND status != ?`,
+		targetStatus, now, p.ID, batchID, targetStatus)
+	if err != nil {
+		return BatchMoveResult{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return BatchMoveResult{}, err
+	}
+	if int(affected) != len(changed) {
+		return BatchMoveResult{}, sql.ErrNoRows
+	}
+
+	if err := tx.Commit(); err != nil {
+		return BatchMoveResult{}, err
+	}
+	return BatchMoveResult{
+		Batch:        name,
+		Project:      p.Name,
+		TargetStatus: targetStatus,
+		Changed:      changed,
+		Skipped:      skipped,
+	}, nil
 }
 
 // editIssue applies the edit and reads the resulting object inside the same

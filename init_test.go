@@ -54,6 +54,14 @@ type deletedBatchJSON struct {
 	MembersCleared int    `json:"members_cleared"`
 }
 
+type batchMoveJSON struct {
+	Batch        string   `json:"batch"`
+	Project      string   `json:"project"`
+	TargetStatus string   `json:"target_status"`
+	Changed      []string `json:"changed"`
+	Skipped      []string `json:"skipped"`
+}
+
 type batchShowJSON struct {
 	Name    string          `json:"name"`
 	Project string          `json:"project"`
@@ -106,7 +114,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "batch help",
 			args:     []string{"batch", "--help"},
-			contains: []string{"usage: ito batch <command>", "new", "list", "show", "rename", "rm"},
+			contains: []string{"usage: ito batch <command>", "new", "list", "move", "show", "rename", "rm"},
 		},
 		{
 			name:     "batch new help",
@@ -117,6 +125,11 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 			name:     "batch list help",
 			args:     []string{"batch", "list", "--help"},
 			contains: []string{"usage: ito batch list", "--project", "--json"},
+		},
+		{
+			name:     "batch move help",
+			args:     []string{"batch", "move", "--help"},
+			contains: []string{"usage: ito batch move", "--project", "--json", "changed and skipped"},
 		},
 		{
 			name:     "batch rename help",
@@ -1323,6 +1336,140 @@ func TestIssueBatchMembershipTravelsThroughNewEditListProgressAndDelete(t *testi
 	alpha, ok = findBatchJSON(progress, "alpha")
 	if !ok || alpha.Done != 0 || alpha.Total != 1 {
 		t.Fatalf("deleting a member must keep the Batch with one fewer member, got %#v in %#v", alpha, progress)
+	}
+}
+
+func TestBatchMoveMovesMembersReportsSkippedAndHonoursProject(t *testing.T) {
+	parent := t.TempDir()
+	firstRepo := filepath.Join(parent, "first")
+	secondRepo := filepath.Join(parent, "second")
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, repo, "git", "init", "-q")
+	}
+	itoHome := t.TempDir()
+	if result := runITO(t, firstRepo, itoHome, "init", "--json", "--name", "move-first", "--prefix", "BMF"); result.exitCode != 0 {
+		t.Fatalf("first init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, secondRepo, itoHome, "init", "--json", "--name", "move-second", "--prefix", "BMS"); result.exitCode != 0 {
+		t.Fatalf("second init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	for _, repo := range []string{firstRepo, secondRepo} {
+		if result := runITO(t, repo, itoHome, "batch", "new", "storage-refactor", "--json"); result.exitCode != 0 {
+			t.Fatalf("batch new failed in %s with exit %d\nstdout: %s\nstderr: %s", repo, result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	for _, fixture := range []struct {
+		title  string
+		status string
+		batch  string
+	}{
+		{title: "Todo member", status: "todo", batch: "storage-refactor"},
+		{title: "Review member", status: "in_review", batch: "storage-refactor"},
+		{title: "Done member", status: "done", batch: "storage-refactor"},
+		{title: "Outside member", status: "todo"},
+	} {
+		args := []string{"new", "--json", "--title", fixture.title, "--status", fixture.status}
+		if fixture.batch != "" {
+			args = append(args, "--batch", fixture.batch)
+		}
+		if result := runITO(t, firstRepo, itoHome, args...); result.exitCode != 0 {
+			t.Fatalf("first issue create failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+		}
+	}
+	if result := runITO(t, secondRepo, itoHome, "new", "--json", "--title", "Second project member", "--batch", "storage-refactor", "--status", "todo"); result.exitCode != 0 {
+		t.Fatalf("second issue create failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	db := openTestDB(t, itoHome)
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE issues SET updated = '2026-06-12T10:00:00Z'`); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := runITO(t, firstRepo, itoHome, "batch", "move", "--json", "storage-refactor", "done")
+	if moved.exitCode != 0 {
+		t.Fatalf("batch move failed with exit %d\nstdout: %s\nstderr: %s", moved.exitCode, moved.stdout, moved.stderr)
+	}
+	var payload batchMoveJSON
+	if err := json.Unmarshal([]byte(moved.stdout), &payload); err != nil {
+		t.Fatalf("stdout is not a Batch move JSON object: %v\nstdout: %s", err, moved.stdout)
+	}
+	if payload.Batch != "storage-refactor" || payload.Project != "move-first" || payload.TargetStatus != "done" {
+		t.Fatalf("unexpected batch move metadata: %#v", payload)
+	}
+	if !stringSlicesEqual(payload.Changed, []string{"BMF-1", "BMF-2"}) || !stringSlicesEqual(payload.Skipped, []string{"BMF-3"}) {
+		t.Fatalf("unexpected changed/skipped IDs: %#v", payload)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(moved.stdout), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"batch", "project", "target_status", "changed", "skipped"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("batch move JSON missing key %q in %s", key, moved.stdout)
+		}
+	}
+	if len(raw) != 5 {
+		t.Fatalf("batch move JSON must contain only batch, project, target_status, changed and skipped, got %s", moved.stdout)
+	}
+	for _, tt := range []struct {
+		id          string
+		wantStatus  string
+		wantUpdated string
+	}{
+		{id: "BMF-1", wantStatus: "done"},
+		{id: "BMF-2", wantStatus: "done"},
+		{id: "BMF-3", wantStatus: "done", wantUpdated: "2026-06-12T10:00:00Z"},
+		{id: "BMF-4", wantStatus: "todo", wantUpdated: "2026-06-12T10:00:00Z"},
+	} {
+		show := runITO(t, firstRepo, itoHome, "show", "--json", tt.id)
+		if show.exitCode != 0 {
+			t.Fatalf("show %s failed with exit %d\nstdout: %s\nstderr: %s", tt.id, show.exitCode, show.stdout, show.stderr)
+		}
+		var issue issueJSON
+		if err := json.Unmarshal([]byte(show.stdout), &issue); err != nil {
+			t.Fatalf("stdout is not an issue JSON object: %v\nstdout: %s", err, show.stdout)
+		}
+		if issue.Status != tt.wantStatus {
+			t.Fatalf("%s status = %q, want %q", tt.id, issue.Status, tt.wantStatus)
+		}
+		if tt.wantUpdated != "" && issue.Updated != tt.wantUpdated {
+			t.Fatalf("%s updated = %q, want %q", tt.id, issue.Updated, tt.wantUpdated)
+		}
+		if tt.wantUpdated == "" && issue.Updated == "2026-06-12T10:00:00Z" {
+			t.Fatalf("%s must have updated stamped by batch move, got %#v", tt.id, issue)
+		}
+	}
+
+	human := runITO(t, firstRepo, itoHome, "batch", "move", "storage-refactor", "done")
+	if human.exitCode != 0 || human.stdout != "storage-refactor moved 0 Issues to done. changed: []. skipped: BMF-1, BMF-2, BMF-3.\n" || human.stderr != "" {
+		t.Fatalf("unexpected human batch move output: exit=%d stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+	explicit := runITO(t, t.TempDir(), itoHome, "batch", "move", "--project", "move-second", "storage-refactor", "done", "--json")
+	if explicit.exitCode != 0 {
+		t.Fatalf("batch move --project failed with exit %d\nstdout: %s\nstderr: %s", explicit.exitCode, explicit.stdout, explicit.stderr)
+	}
+	if err := json.Unmarshal([]byte(explicit.stdout), &payload); err != nil {
+		t.Fatalf("stdout is not a Batch move JSON object: %v\nstdout: %s", err, explicit.stdout)
+	}
+	if payload.Project != "move-second" || !stringSlicesEqual(payload.Changed, []string{"BMS-1"}) || len(payload.Skipped) != 0 {
+		t.Fatalf("unexpected explicit project batch move payload: %#v", payload)
+	}
+
+	unknown := runITO(t, firstRepo, itoHome, "batch", "move", "--json", "missing", "done")
+	if unknown.exitCode != exitNotFound || unknown.stdout != "" {
+		t.Fatalf("unknown batch move must fail with exit 3 and no stdout, got exit=%d stdout=%q stderr=%q", unknown.exitCode, unknown.stdout, unknown.stderr)
+	}
+	envelope := decodeErrorEnvelope(t, unknown.stderr)
+	if envelope.Code != exitNotFound || !strings.Contains(envelope.Hint, "ito batch list") {
+		t.Fatalf("expected unknown Batch error with batch-list hint, got %#v", envelope)
+	}
+	invalidStatus := runITO(t, firstRepo, itoHome, "batch", "move", "--json", "storage-refactor", "closed")
+	if invalidStatus.exitCode != exitBadUsage || invalidStatus.stdout != "" {
+		t.Fatalf("invalid batch move status must fail with exit 2 and no stdout, got exit=%d stdout=%q stderr=%q", invalidStatus.exitCode, invalidStatus.stdout, invalidStatus.stderr)
 	}
 }
 
