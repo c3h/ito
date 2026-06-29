@@ -92,7 +92,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "root long help",
 			args:     []string{"--help"},
-			contains: []string{"usage: ito <command> [flags]", "Commands:", "init", "new", "list", "batch"},
+			contains: []string{"usage: ito <command> [flags]", "category, triage state and Labels", "Commands:", "init", "new", "list", "batch"},
 		},
 		{
 			name:     "root short help",

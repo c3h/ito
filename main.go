@@ -1559,7 +1559,7 @@ func printRootHelp(w io.Writer) {
 
 Local, agent-driven issue tracker. Issues are rows in a central SQLite store at ~/.ito/ito.db — never inside your repo.
 
-A Project is resolved from the git root, so every worktree shares it: run "ito init" once per repo, then address another Project from any cwd with --project <name> (or --all-projects to span all). An Issue's full ID is <PREFIX>-<n> such as AUTH-12; the Prefix is chosen per Project at init. A Batch is a named set of Issues planned together, and its Waves ("ito batch show") are the link-graph generations safe to run in parallel.
+A Project is resolved from the git root, so every worktree shares it: run "ito init" once per repo, then address another Project from any cwd with --project <name> (or --all-projects to span all). An Issue's full ID is <PREFIX>-<n> such as AUTH-12; the Prefix is chosen per Project at init. Issues carry execution status plus priority, category, triage state and Labels for agent-readable filtering. A Batch is a named set of Issues planned together, and its Waves ("ito batch show") are the link-graph generations safe to run in parallel.
 
 Commands:
   init     Registers or re-points the Project for the current directory.
