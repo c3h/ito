@@ -1202,7 +1202,6 @@ func batchWaveDone(issues []Issue) bool {
 
 func markBatchWaveReadiness(waves []BatchWave) {
 	for i := range waves {
-		waves[i].Ready = false
 		if !waves[i].Done {
 			waves[i].Ready = true
 			return
