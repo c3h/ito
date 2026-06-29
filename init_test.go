@@ -30,6 +30,8 @@ type issueJSON struct {
 	Title         string   `json:"title"`
 	Status        string   `json:"status"`
 	Priority      string   `json:"priority"`
+	Category      string   `json:"category"`
+	TriageState   string   `json:"triage_state"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -414,6 +416,8 @@ func TestNewRejectsInvalidInput(t *testing.T) {
 		{name: "blank title", args: []string{"new", "--json", "--title", " \t\n"}},
 		{name: "invalid status", args: []string{"new", "--json", "--title", "Bad status", "--status", "doing"}},
 		{name: "invalid priority", args: []string{"new", "--json", "--title", "Bad priority", "--priority", "critical"}},
+		{name: "invalid category", args: []string{"new", "--json", "--title", "Bad category", "--category", "task"}},
+		{name: "invalid triage state", args: []string{"new", "--json", "--title", "Bad triage", "--triage-state", "blocked"}},
 		{name: "invalid label", args: []string{"new", "--json", "--title", "Bad label", "--label", "custom"}},
 	}
 
@@ -587,7 +591,7 @@ func TestListDefaultsToCurrentProjectAndHidesDone(t *testing.T) {
 	if _, ok := raw[0]["body"]; ok {
 		t.Fatalf("list JSON must omit body, got %s", result.stdout)
 	}
-	for _, key := range []string{"id", "project", "title", "status", "priority", "labels", "blocked_by", "relates_to", "conflicts_with", "created", "updated"} {
+	for _, key := range []string{"id", "project", "title", "status", "priority", "category", "triage_state", "labels", "blocked_by", "relates_to", "conflicts_with", "batch", "created", "updated"} {
 		if _, ok := raw[0][key]; !ok {
 			t.Fatalf("list JSON missing key %q in %s", key, result.stdout)
 		}
@@ -671,6 +675,53 @@ func TestListFiltersByStatusPriorityAndLabels(t *testing.T) {
 				t.Fatalf("expected IDs %v, got %v\nstdout: %s", tt.want, got, result.stdout)
 			}
 		})
+	}
+}
+
+func TestIssueTriageMetadataCreateEditListAndShow(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "triage-app", "--prefix", "TRI"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	createdResult := runITO(t, repo, itoHome, "new", "--json", "--title", "Agent-ready enhancement", "--category", "enhancement", "--triage-state", "ready-for-agent", "--label", "feature")
+	if createdResult.exitCode != 0 {
+		t.Fatalf("ito new with triage metadata failed with exit %d\nstdout: %s\nstderr: %s", createdResult.exitCode, createdResult.stdout, createdResult.stderr)
+	}
+	created := decodeIssue(t, createdResult.stdout)
+	if created.ID != "TRI-1" || created.Category != "enhancement" || created.TriageState != "ready-for-agent" || !stringSlicesEqual(created.Labels, []string{"feature"}) {
+		t.Fatalf("unexpected created issue metadata: %#v", created)
+	}
+
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Human decision", "--category", "research", "--triage-state", "ready-for-human"); result.exitCode != 0 {
+		t.Fatalf("ito new second issue failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	filtered := runITO(t, repo, itoHome, "list", "--json", "--category", "enhancement", "--triage-state", "ready-for-agent")
+	if filtered.exitCode != 0 {
+		t.Fatalf("ito list by triage metadata failed with exit %d\nstdout: %s\nstderr: %s", filtered.exitCode, filtered.stdout, filtered.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, filtered.stdout)); !stringSlicesEqual(got, []string{"TRI-1"}) {
+		t.Fatalf("expected triage metadata filter to return TRI-1, got %v\nstdout: %s", got, filtered.stdout)
+	}
+
+	editedResult := runITO(t, repo, itoHome, "edit", "--json", "TRI-1", "--category", "bug", "--triage-state", "ready-for-human")
+	if editedResult.exitCode != 0 {
+		t.Fatalf("ito edit triage metadata failed with exit %d\nstdout: %s\nstderr: %s", editedResult.exitCode, editedResult.stdout, editedResult.stderr)
+	}
+	edited := decodeIssue(t, editedResult.stdout)
+	if edited.Category != "bug" || edited.TriageState != "ready-for-human" || edited.Status != "backlog" {
+		t.Fatalf("unexpected edited issue metadata: %#v", edited)
+	}
+
+	shown := decodeIssue(t, runITO(t, repo, itoHome, "show", "--json", "TRI-1").stdout)
+	if shown.Category != "bug" || shown.TriageState != "ready-for-human" {
+		t.Fatalf("show must preserve triage metadata, got %#v", shown)
+	}
+	defaultIssue := decodeIssue(t, runITO(t, repo, itoHome, "show", "--json", "TRI-2").stdout)
+	if defaultIssue.Category != "research" || defaultIssue.TriageState != "ready-for-human" {
+		t.Fatalf("explicit metadata on second issue lost, got %#v", defaultIssue)
 	}
 }
 
@@ -2305,7 +2356,7 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-
 	if err := json.Unmarshal([]byte(result.stdout), &raw); err != nil {
 		t.Fatalf("stdout is not a JSON object: %v\nstdout: %s", err, result.stdout)
 	}
-	expectedKeys := []string{"id", "project", "title", "status", "priority", "labels", "blocked_by", "relates_to", "conflicts_with", "batch", "body", "created", "updated"}
+	expectedKeys := []string{"id", "project", "title", "status", "priority", "category", "triage_state", "labels", "blocked_by", "relates_to", "conflicts_with", "batch", "body", "created", "updated"}
 	if len(raw) != len(expectedKeys) {
 		t.Fatalf("expected exactly keys %v, got %v in %s", expectedKeys, raw, result.stdout)
 	}
@@ -2327,7 +2378,7 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-
 	if issue.Batch != nil {
 		t.Fatalf("expected issue outside any Batch to report batch=null, got %#v", issue.Batch)
 	}
-	if issue.Body != "# Shape\n\nFull markdown" || issue.Status != "in_progress" || issue.Priority != "urgent" {
+	if issue.Body != "# Shape\n\nFull markdown" || issue.Status != "in_progress" || issue.Priority != "urgent" || issue.Category != "uncategorized" || issue.TriageState != "needs-triage" {
 		t.Fatalf("unexpected canonical issue fields: %#v", issue)
 	}
 
@@ -3021,6 +3072,8 @@ func TestEditRejectsNoChangeInvalidInputsAndProjectMismatch(t *testing.T) {
 		{name: "no requested change", args: []string{"edit", "--json", "FED-1"}, code: 2},
 		{name: "blank title", args: []string{"edit", "--json", "FED-1", "--title", " \t\n"}, code: 2},
 		{name: "invalid priority", args: []string{"edit", "--json", "FED-1", "--priority", "critical"}, code: 2},
+		{name: "invalid category", args: []string{"edit", "--json", "FED-1", "--category", "task"}, code: 2},
+		{name: "invalid triage state", args: []string{"edit", "--json", "FED-1", "--triage-state", "blocked"}, code: 2},
 		{name: "invalid add label", args: []string{"edit", "--json", "FED-1", "--add-label", "custom"}, code: 2},
 		{name: "invalid remove label", args: []string{"edit", "--json", "FED-1", "--remove-label", "custom"}, code: 2},
 		{name: "malformed ID", args: []string{"edit", "--json", "FED", "--title", "New"}, code: 2},
@@ -4285,6 +4338,15 @@ func decodeIssueList(t *testing.T, stdout string) []issueJSON {
 		t.Fatalf("stdout is not a JSON issue array: %v\nstdout: %s", err, stdout)
 	}
 	return issues
+}
+
+func decodeIssue(t *testing.T, stdout string) issueJSON {
+	t.Helper()
+	var issue issueJSON
+	if err := json.Unmarshal([]byte(stdout), &issue); err != nil {
+		t.Fatalf("stdout is not a JSON issue object: %v\nstdout: %s", err, stdout)
+	}
+	return issue
 }
 
 func decodeBatchList(t *testing.T, stdout string) []batchJSON {

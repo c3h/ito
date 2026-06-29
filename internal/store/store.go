@@ -39,9 +39,11 @@ var (
 // them; the CLI derives its validation sets and the TUI derives its surfaces
 // from these slices so the vocabulary lives in exactly one place.
 var (
-	Statuses   = []string{"backlog", "todo", "in_progress", "in_review", "done"}
-	Priorities = []string{"urgent", "high", "medium", "low"}
-	Labels     = []string{"feature", "bug", "docs", "tests", "refactor", "chore", "research", "infra"}
+	Statuses     = []string{"backlog", "todo", "in_progress", "in_review", "done"}
+	Priorities   = []string{"urgent", "high", "medium", "low"}
+	Categories   = []string{"uncategorized", "bug", "enhancement", "docs", "tests", "refactor", "chore", "research", "infra"}
+	TriageStates = []string{"needs-triage", "ready-for-agent", "ready-for-human", "wontfix"}
+	Labels       = []string{"feature", "bug", "docs", "tests", "refactor", "chore", "research", "infra"}
 )
 
 // The list ordering derives its precedence from the canonical slices above, so
@@ -140,6 +142,8 @@ type Issue struct {
 	Title         string   `json:"title"`
 	Status        string   `json:"status"`
 	Priority      string   `json:"priority"`
+	Category      string   `json:"category"`
+	TriageState   string   `json:"triage_state"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -196,6 +200,8 @@ type ListOptions struct {
 	AllProjects bool
 	Status      string
 	Priority    string
+	Category    string
+	TriageState string
 	Labels      []string
 	Search      string
 	Ready       bool
@@ -206,16 +212,20 @@ type ListOptions struct {
 }
 
 type EditIssueOptions struct {
-	TitleSet    bool
-	Title       string
-	PrioritySet bool
-	Priority    string
-	BodySet     bool
-	Body        string
-	BatchSet    bool
-	Batch       string
-	LabelOps    []LabelEditOp
-	LinkOps     []LinkEditOp
+	TitleSet       bool
+	Title          string
+	PrioritySet    bool
+	Priority       string
+	CategorySet    bool
+	Category       string
+	TriageStateSet bool
+	TriageState    string
+	BodySet        bool
+	Body           string
+	BatchSet       bool
+	Batch          string
+	LabelOps       []LabelEditOp
+	LinkOps        []LinkEditOp
 }
 
 type LabelEditOp struct {
@@ -367,11 +377,15 @@ func (s *Store) ProjectPrefixExists(prefix string) (bool, error) {
 }
 
 func (s *Store) CreateIssue(p Project, title, status, priority string, labels []string, body string) (Issue, error) {
-	return insertIssue(s.db, p, title, status, priority, labels, body, "")
+	return s.CreateIssueInBatchWithMetadata(p, title, status, priority, "uncategorized", "needs-triage", labels, body, "")
 }
 
 func (s *Store) CreateIssueInBatch(p Project, title, status, priority string, labels []string, body string, batch string) (Issue, error) {
-	return insertIssue(s.db, p, title, status, priority, labels, body, batch)
+	return s.CreateIssueInBatchWithMetadata(p, title, status, priority, "uncategorized", "needs-triage", labels, body, batch)
+}
+
+func (s *Store) CreateIssueInBatchWithMetadata(p Project, title, status, priority, category, triageState string, labels []string, body string, batch string) (Issue, error) {
+	return insertIssue(s.db, p, title, status, priority, category, triageState, labels, body, batch)
 }
 
 func (s *Store) CreateBatch(p Project, name string) (Batch, error) {
@@ -518,6 +532,7 @@ func Migrate(db *sql.DB) error {
 	}{
 		{version: 1, apply: migrateV1},
 		{version: 2, apply: migrateV2},
+		{version: 3, apply: migrateV3},
 	}
 	for _, migration := range migrations {
 		if version >= migration.version {
@@ -630,6 +645,28 @@ CREATE TABLE IF NOT EXISTS batches (
 	}
 	if !hasBatchID {
 		if _, err := tx.Exec(`ALTER TABLE issues ADD COLUMN batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateV3(tx *sql.Tx) error {
+	hasCategory, err := columnExists(tx, "issues", "category")
+	if err != nil {
+		return err
+	}
+	if !hasCategory {
+		if _, err := tx.Exec(`ALTER TABLE issues ADD COLUMN category TEXT NOT NULL DEFAULT 'uncategorized'`); err != nil {
+			return err
+		}
+	}
+	hasTriageState, err := columnExists(tx, "issues", "triage_state")
+	if err != nil {
+		return err
+	}
+	if !hasTriageState {
+		if _, err := tx.Exec(`ALTER TABLE issues ADD COLUMN triage_state TEXT NOT NULL DEFAULT 'needs-triage'`); err != nil {
 			return err
 		}
 	}
@@ -1212,7 +1249,7 @@ func batchWaveQuery(batchID int64, includeDone bool) string {
 		readyWhere = readyFrontierWhereSQLWithOptions("issues", historicalBatchCandidateWhereSQL("issues", batchID), batchDonePredicate(batchID))
 	}
 	return `
-SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, batches.name, issues.body, issues.created, issues.updated
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated
 FROM issues
 JOIN projects ON projects.id = issues.project_id
 LEFT JOIN batches ON batches.id = issues.batch_id
@@ -1358,7 +1395,7 @@ func updateProjectName(db *sql.DB, p Project, name string) (Project, error) {
 	return p, nil
 }
 
-func insertIssue(db *sql.DB, p Project, title, status, priority string, labels []string, body string, batch string) (Issue, error) {
+func insertIssue(db *sql.DB, p Project, title, status, priority, category, triageState string, labels []string, body string, batch string) (Issue, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return Issue{}, err
@@ -1400,6 +1437,8 @@ func insertIssue(db *sql.DB, p Project, title, status, priority string, labels [
 		Title:         title,
 		Status:        status,
 		Priority:      priority,
+		Category:      category,
+		TriageState:   triageState,
 		Labels:        dedupeStrings(labels),
 		BlockedBy:     []string{},
 		RelatesTo:     []string{},
@@ -1411,9 +1450,9 @@ func insertIssue(db *sql.DB, p Project, title, status, priority string, labels [
 	}
 
 	result, err = tx.Exec(`
-INSERT INTO issues(project_id, id, title, status, priority, body, created, updated, batch_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, created.ID, created.Title, created.Status, created.Priority, created.Body, created.Created, created.Updated, batchID)
+INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, body, created, updated, batch_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, created.ID, created.Title, created.Status, created.Priority, created.Category, created.TriageState, created.Body, created.Created, created.Updated, batchID)
 	if err != nil {
 		return Issue{}, err
 	}
@@ -1562,12 +1601,12 @@ func editIssue(db *sql.DB, p Project, id string, options EditIssueOptions) (Issu
 	defer tx.Rollback()
 
 	var rowID int64
-	var currentTitle, currentPriority, currentBody string
+	var currentTitle, currentPriority, currentCategory, currentTriageState, currentBody string
 	var currentBatchID sql.NullInt64
 	if err := tx.QueryRow(`
-SELECT row_id, title, priority, body, batch_id
+SELECT row_id, title, priority, category, triage_state, body, batch_id
 FROM issues
-WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &currentPriority, &currentBody, &currentBatchID); err != nil {
+WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &currentPriority, &currentCategory, &currentTriageState, &currentBody, &currentBatchID); err != nil {
 		return Issue{}, false, err
 	}
 
@@ -1629,6 +1668,14 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 	if options.PrioritySet {
 		nextPriority = options.Priority
 	}
+	nextCategory := currentCategory
+	if options.CategorySet {
+		nextCategory = options.Category
+	}
+	nextTriageState := currentTriageState
+	if options.TriageStateSet {
+		nextTriageState = options.TriageState
+	}
 	nextBody := currentBody
 	if options.BodySet {
 		nextBody = options.Body
@@ -1649,7 +1696,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 		}
 	}
 
-	scalarChanged := nextTitle != currentTitle || nextPriority != currentPriority || nextBody != currentBody
+	scalarChanged := nextTitle != currentTitle || nextPriority != currentPriority || nextCategory != currentCategory || nextTriageState != currentTriageState || nextBody != currentBody
 	batchChanged := nextBatchID.Valid != currentBatchID.Valid || (nextBatchID.Valid && nextBatchID.Int64 != currentBatchID.Int64)
 	labelsChanged := !labelSetMatches(currentLabels, nextLabels)
 	linksChanged := !stringSetMatches(currentLinks, nextLinks)
@@ -1659,8 +1706,8 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 		now := time.Now().UTC().Format(time.RFC3339)
 		result, err := tx.Exec(`
 UPDATE issues
-SET title = ?, priority = ?, body = ?, batch_id = ?, updated = ?
-WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextBody, nextBatchID, now, p.ID, id)
+SET title = ?, priority = ?, category = ?, triage_state = ?, body = ?, batch_id = ?, updated = ?
+WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTriageState, nextBody, nextBatchID, now, p.ID, id)
 		if err != nil {
 			return Issue{}, false, err
 		}
@@ -1804,7 +1851,7 @@ func deleteIssueRowsTx(tx *sql.Tx, p Project, matches []issueDeletionRow) (int, 
 
 func findIssueByID(q rowQuerier, p Project, id string) (Issue, bool, error) {
 	row := q.QueryRow(`
-SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, batches.name, issues.body, issues.created, issues.updated
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated
 FROM issues
 JOIN projects ON projects.id = issues.project_id
 LEFT JOIN batches ON batches.id = issues.batch_id
@@ -1824,8 +1871,8 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 }
 
 // scanIssue reads the shared issue column list — id, project name, title,
-// status, priority, batch name, body, created, updated — from a row or rows
-// cursor, leaving relations for loadIssueRelations.
+// status, priority, category, triage state, batch name, body, created, updated
+// — from a row or rows cursor, leaving relations for loadIssueRelations.
 func scanIssue(s interface{ Scan(dest ...any) error }) (Issue, error) {
 	found := Issue{
 		Labels:        []string{},
@@ -1834,7 +1881,7 @@ func scanIssue(s interface{ Scan(dest ...any) error }) (Issue, error) {
 		ConflictsWith: []string{},
 	}
 	var batch sql.NullString
-	if err := s.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
+	if err := s.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Category, &found.TriageState, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
 		return Issue{}, err
 	}
 	if batch.Valid {
@@ -1912,6 +1959,14 @@ func listIssues(db *sql.DB, options ListOptions) ([]Issue, error) {
 		where = append(where, "issues.priority = ?")
 		args = append(args, options.Priority)
 	}
+	if options.Category != "" {
+		where = append(where, "issues.category = ?")
+		args = append(args, options.Category)
+	}
+	if options.TriageState != "" {
+		where = append(where, "issues.triage_state = ?")
+		args = append(args, options.TriageState)
+	}
 	if options.Batch != "" {
 		if options.AllProjects {
 			return nil, ErrBatchNotFound
@@ -1940,7 +1995,7 @@ WHERE issue_labels.project_id = issues.project_id
 	}
 
 	query := `
-SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, batches.name, issues.body, issues.created, issues.updated, issues.project_id
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated, issues.project_id
 FROM issues
 JOIN projects ON projects.id = issues.project_id
 LEFT JOIN batches ON batches.id = issues.batch_id`
@@ -1984,7 +2039,7 @@ issues.id ASC`
 			},
 		}
 		var batch sql.NullString
-		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &batch, &found.Body, &found.Created, &found.Updated, &found.ProjectID); err != nil {
+		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Category, &found.TriageState, &batch, &found.Body, &found.Created, &found.Updated, &found.ProjectID); err != nil {
 			return nil, err
 		}
 		if batch.Valid {

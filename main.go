@@ -34,6 +34,8 @@ var (
 	// reason.
 	validStatuses   = valueSet(itostore.Statuses)
 	validPriorities = valueSet(itostore.Priorities)
+	validCategories = valueSet(itostore.Categories)
+	validTriage     = valueSet(itostore.TriageStates)
 	validLabels     = valueSet(itostore.Labels)
 	isTerminal      = isatty.IsTerminal
 	runTUI          = tui.Run
@@ -45,6 +47,8 @@ var (
 var (
 	statusList   = humanList(itostore.Statuses)
 	priorityList = humanList(ascendingPriorities())
+	categoryList = humanList(itostore.Categories)
+	triageList   = humanList(itostore.TriageStates)
 	labelList    = humanList(itostore.Labels)
 )
 
@@ -240,6 +244,8 @@ type issueListItem struct {
 	Title         string   `json:"title"`
 	Status        string   `json:"status"`
 	Priority      string   `json:"priority"`
+	Category      string   `json:"category"`
+	TriageState   string   `json:"triage_state"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -839,6 +845,8 @@ func runNew(args []string) int {
 	var title string
 	var status string
 	var priority string
+	var category string
+	var triageState string
 	var labels stringSliceFlag
 	var body string
 	var batchName string
@@ -847,6 +855,8 @@ func runNew(args []string) int {
 	fs.StringVar(&title, "title", "", "")
 	fs.StringVar(&status, "status", "backlog", "")
 	fs.StringVar(&priority, "priority", "low", "")
+	fs.StringVar(&category, "category", "uncategorized", "")
+	fs.StringVar(&triageState, "triage-state", "needs-triage", "")
 	fs.Var(&labels, "label", "")
 	fs.StringVar(&body, "body", "", "")
 	fs.StringVar(&batchName, "batch", "", "")
@@ -864,6 +874,12 @@ func runNew(args []string) int {
 	}
 	if !isValidValue(priority, validPriorities) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use "+priorityList+".")
+	}
+	if !isValidValue(category, validCategories) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid category %q.", category), "use "+categoryList+".")
+	}
+	if !isValidValue(triageState, validTriage) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid triage state %q.", triageState), "use "+triageList+".")
 	}
 	for _, label := range labels {
 		if !isValidValue(label, validLabels) {
@@ -897,7 +913,7 @@ func runNew(args []string) int {
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
-	created, err := st.CreateIssueInBatch(p, title, status, priority, labels, body, batchName)
+	created, err := st.CreateIssueInBatchWithMetadata(p, title, status, priority, category, triageState, labels, body, batchName)
 	if err != nil {
 		if errors.Is(err, itostore.ErrBatchNotFound) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", batchName, p.Name), "run 'ito batch list' to see the Project's Batches.")
@@ -1028,6 +1044,8 @@ func runEdit(args []string) int {
 	var projectName string
 	var title string
 	var priority string
+	var category string
+	var triageState string
 	var body string
 	var batchName string
 	var labelOps []labelEditOp
@@ -1036,6 +1054,8 @@ func runEdit(args []string) int {
 	fs.StringVar(&projectName, "project", "", "")
 	fs.StringVar(&title, "title", "", "")
 	fs.StringVar(&priority, "priority", "", "")
+	fs.StringVar(&category, "category", "", "")
+	fs.StringVar(&triageState, "triage-state", "", "")
 	fs.StringVar(&body, "body", "", "")
 	fs.StringVar(&batchName, "batch", "", "")
 	fs.Var(labelEditFlag{kind: "add", ops: &labelOps}, "add-label", "")
@@ -1069,14 +1089,18 @@ func runEdit(args []string) int {
 			options.TitleSet = true
 		case "priority":
 			options.PrioritySet = true
+		case "category":
+			options.CategorySet = true
+		case "triage-state":
+			options.TriageStateSet = true
 		case "body":
 			options.BodySet = true
 		case "batch":
 			options.BatchSet = true
 		}
 	})
-	if !options.TitleSet && !options.PrioritySet && !options.BodySet && !options.BatchSet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
-		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --body, --batch, --add-label, --block, --relate or --conflict.")
+	if !options.TitleSet && !options.PrioritySet && !options.CategorySet && !options.TriageStateSet && !options.BodySet && !options.BatchSet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
+		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --category, --triage-state, --body, --batch, --add-label, --block, --relate or --conflict.")
 	}
 	if options.TitleSet {
 		if strings.TrimSpace(title) == "" {
@@ -1089,6 +1113,18 @@ func runEdit(args []string) int {
 			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use "+priorityList+".")
 		}
 		options.Priority = priority
+	}
+	if options.CategorySet {
+		if !isValidValue(category, validCategories) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid category %q.", category), "use "+categoryList+".")
+		}
+		options.Category = category
+	}
+	if options.TriageStateSet {
+		if !isValidValue(triageState, validTriage) {
+			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid triage state %q.", triageState), "use "+triageList+".")
+		}
+		options.TriageState = triageState
 	}
 	if options.BodySet {
 		if body == "-" {
@@ -1276,6 +1312,8 @@ func runList(args []string) int {
 	var allProjects bool
 	var status string
 	var priority string
+	var category string
+	var triageState string
 	var search string
 	var batchName string
 	var ready bool
@@ -1285,6 +1323,8 @@ func runList(args []string) int {
 	fs.BoolVar(&allProjects, "all-projects", false, "")
 	fs.StringVar(&status, "status", "", "")
 	fs.StringVar(&priority, "priority", "", "")
+	fs.StringVar(&category, "category", "", "")
+	fs.StringVar(&triageState, "triage-state", "", "")
 	fs.StringVar(&search, "search", "", "")
 	fs.StringVar(&batchName, "batch", "", "")
 	fs.BoolVar(&ready, "ready", false, "")
@@ -1307,6 +1347,12 @@ func runList(args []string) int {
 	if priority != "" && !isValidValue(priority, validPriorities) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use "+priorityList+".")
 	}
+	if category != "" && !isValidValue(category, validCategories) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid category %q.", category), "use "+categoryList+".")
+	}
+	if triageState != "" && !isValidValue(triageState, validTriage) {
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid triage state %q.", triageState), "use "+triageList+".")
+	}
 	for _, label := range labels {
 		if !isValidValue(label, validLabels) {
 			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid label %q.", label), "use "+labelList+".")
@@ -1323,6 +1369,8 @@ func runList(args []string) int {
 		AllProjects: allProjects,
 		Status:      status,
 		Priority:    priority,
+		Category:    category,
+		TriageState: triageState,
 		Labels:      append([]string{}, labels...),
 		Search:      search,
 		Ready:       ready,
@@ -1418,18 +1466,18 @@ func commandValueFlags(command string) map[string]struct{} {
 	case "rename":
 		return map[string]struct{}{"project": {}}
 	case "new":
-		return map[string]struct{}{"project": {}, "title": {}, "status": {}, "priority": {}, "label": {}, "body": {}, "batch": {}}
+		return map[string]struct{}{"project": {}, "title": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "label": {}, "body": {}, "batch": {}}
 	case "show":
 		return map[string]struct{}{"project": {}}
 	case "list":
-		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "search": {}, "label": {}, "batch": {}}
+		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "search": {}, "label": {}, "batch": {}}
 	case "batch new", "batch list", "batch move", "batch rename", "batch rm", "batch show":
 		return map[string]struct{}{"project": {}}
 	case "move":
 		return map[string]struct{}{"project": {}}
 	case "edit":
 		return map[string]struct{}{
-			"project": {}, "title": {}, "priority": {}, "body": {},
+			"project": {}, "title": {}, "priority": {}, "category": {}, "triage-state": {}, "body": {},
 			"batch":     {},
 			"add-label": {}, "remove-label": {},
 			"block": {}, "unblock": {}, "relate": {}, "unrelate": {}, "conflict": {}, "unconflict": {},
@@ -1551,20 +1599,23 @@ Flags:
   --project <name>     Target Project when the cwd should not resolve implicitly.
   --json               Prints JSON.`)
 	case "new":
-		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--label <label>] [--body <text>|-] [--batch <name>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--body <text>|-] [--batch <name>] [--project <name>] [--json]
 
 Creates an Issue and prints the ID in human mode.
+Status tracks execution; triage state tracks whether the Issue needs triage, is ready for an agent, needs human decision, or is wontfix. Category describes the kind of work and is separate from Labels.
 
 Flags:
   --title <title>          Title is required.
   --status <status>        %s. Default: backlog.
   --priority <priority>    %s. Default: low.
+  --category <category>    %s. Default: uncategorized.
+  --triage-state <state>   %s. Default: needs-triage.
   --label <label>          Repeatable initial Label: %s.
   --body <text>|-          Markdown body. Use "-" to read stdin.
   --batch <name>           Assign the Issue to an existing Batch.
   --project <name>         Explicit Project.
   --json                   Prints JSON.
-`, statusList, priorityList, labelList)
+`, statusList, priorityList, categoryList, triageList, labelList)
 	case "show":
 		fmt.Println(`usage: ito show [--project <name>] [--json] <PREFIX>-<n>
 
@@ -1574,22 +1625,25 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "list":
-		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--label <label>] [--search <text>] [--batch <name>] [--project <name>|--all-projects] [--json]
+		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--search <text>] [--batch <name>] [--project <name>|--all-projects] [--json]
 
 Lists Issues in the current Project. Issues in done are hidden by default, except with --status done.
 Use --ready to list the backlog/todo frontier whose blockers are all done and conflicts_with partners are not unsafe to start in parallel; an agent can fan out one git worktree per ready Issue.
+Status filters execution; triage state filters triage/readiness metadata.
 
 Flags:
   --ready                  Filter to backlog/todo Issues whose blockers are done and conflicts allow parallel work.
   --status <status>        Filter by %s.
   --priority <priority>    Filter by %s.
+  --category <category>    Filter by %s.
+  --triage-state <state>   Filter by %s.
   --label <label>          Filter by Label. Repeatable.
   --search <text>          Full-text search in title and body.
   --batch <name>           Filter to Issues assigned to an existing Batch.
   --project <name>         Explicit Project.
   --all-projects           Lists all Projects.
   --json                   Prints JSON.
-`, statusList, priorityList)
+`, statusList, priorityList, categoryList, triageList)
 	case "batch":
 		fmt.Println(`usage: ito batch <command> [flags]
 
@@ -1665,13 +1719,16 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "edit":
-		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--body <text>|-] [--batch <name>|--batch ""] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--body <text>|-] [--batch <name>|--batch ""] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
 
 Edits an Issue. Requires at least one change.
+Status is changed with ito move; triage state is changed here because it describes review/readiness metadata, not execution progress.
 
 Flags:
   --title <title>          New title.
   --priority <priority>    %s.
+  --category <category>    %s.
+  --triage-state <state>   %s.
   --body <text>|-          New markdown body. Use "-" to read stdin.
   --batch <name>|""        Move into a Batch, or clear membership with "".
   --add-label <label>      Adds a Label. Repeatable.
@@ -1684,7 +1741,7 @@ Flags:
   --unconflict <ID>        Removes a conflicts_with link.
   --project <name>         Validates that the Issue belongs to the given Project.
   --json                   Prints JSON.
-`, priorityList)
+`, priorityList, categoryList, triageList)
 	case "rm":
 		fmt.Println(`usage: ito rm [--project <name>] [--json] <PREFIX>-<n>
 
@@ -1908,6 +1965,8 @@ func printIssueDetail(i issue, jsonMode bool) int {
 	fmt.Printf("Title: %s\n", i.Title)
 	fmt.Printf("Status: %s\n", i.Status)
 	fmt.Printf("Priority: %s\n", i.Priority)
+	fmt.Printf("Category: %s\n", i.Category)
+	fmt.Printf("Triage state: %s\n", i.TriageState)
 	fmt.Printf("Batch: %s\n", formatOptionalString(i.Batch))
 	fmt.Printf("Created: %s\n", i.Created)
 	fmt.Printf("Updated: %s\n", i.Updated)
@@ -1962,6 +2021,8 @@ func issueListJSON(i issue) issueListItem {
 		Title:         i.Title,
 		Status:        i.Status,
 		Priority:      i.Priority,
+		Category:      i.Category,
+		TriageState:   i.TriageState,
 		Labels:        i.Labels,
 		BlockedBy:     i.BlockedBy,
 		RelatesTo:     i.RelatesTo,

@@ -82,9 +82,9 @@ backlog → todo → in_progress → in_review → done
 > **The arrows are a recommended happy path, not a mandatory rail.** `move` accepts **any source → any target** (skip `todo`, reopen a `done`, send back from `in_review`). It validates **only the target**: the target must be a known status (otherwise exit `2`) and the ID must exist (otherwise exit `3`); moving to the current status is a no-op (exit `0`) and doesn't change `updated`. Enforcing flow discipline is not a goal of `ito` (solo/local/AI); if it ever is, it becomes opt-in.
 > There is also no WIP limit: multiple Issues can be in `in_progress` at the same time.
 
-Each status belongs to a **category** (internal meaning, independent of the label):
+Each status belongs to a **status group** (internal meaning, independent of the issue's `category` field):
 
-| Category   | Status                    |
+| Status group | Status                    |
 |------------|---------------------------|
 | open       | `backlog`, `todo`         |
 | in-flight  | `in_progress`, `in_review`|
@@ -101,6 +101,8 @@ Semantics of the early stages: `backlog` = work that's mapped or still subject t
 | `title`      | text            | required and non-empty                            |
 | `status`     | enum            | `backlog\|todo\|in_progress\|in_review\|done`            |
 | `priority`   | enum            | default `low`; `low\|medium\|high\|urgent`       |
+| `category`   | enum            | default `uncategorized`; `uncategorized\|bug\|enhancement\|docs\|tests\|refactor\|chore\|research\|infra` |
+| `triage_state` | enum          | default `needs-triage`; `needs-triage\|ready-for-agent\|ready-for-human\|wontfix` |
 | `blocked_by` | refs            | typed links                                      |
 | `relates_to` | refs            | typed links                                      |
 | `conflicts_with` | refs        | typed links (v2): mutual exclusion, "not in parallel" |
@@ -111,6 +113,8 @@ Semantics of the early stages: `backlog` = work that's mapped or still subject t
 | `updated`    | timestamp       | UTC/RFC3339; written **transactionally** on every real mutation |
 
 > No `owner` (solo). `updated` is now a reliable column — the old hack of deriving recency from `mtime` died together with double writing (ADR-0001).
+
+`category` and `triage_state` are agent-readable metadata, not execution progress. `category` says what kind of work the issue is; `triage_state` says what kind of attention it needs before or around execution. `needs-triage` means the issue still needs shaping, `ready-for-agent` means an agent can pick it up with the current context, `ready-for-human` means a human decision is needed first, and `wontfix` records that the issue should not be implemented while preserving the history. `status=done` remains the normal way to close work; a wontfix issue is typically represented as `triage_state=wontfix` plus a closed status when no action remains.
 
 ### 3.4 Lifecycle
 - `done` is **just a status**. Nothing is deleted or archived automatically.
@@ -157,6 +161,8 @@ CREATE TABLE issues (              -- v1: flat issue (parent/type arrive via a f
   title      TEXT NOT NULL,
   status     TEXT NOT NULL,
   priority   TEXT NOT NULL,
+  category   TEXT NOT NULL DEFAULT 'uncategorized',
+  triage_state TEXT NOT NULL DEFAULT 'needs-triage',
   body       TEXT NOT NULL DEFAULT '',
   batch_id   INTEGER REFERENCES batches(id) ON DELETE SET NULL,  -- v2; NULL = no Batch
   created    TEXT NOT NULL,
@@ -225,14 +231,14 @@ CREATE TABLE issue_labels (
 | `ito init`          | Registers the current project (git root or cwd) in the central store: creates `name` (`--name` or default = folder name) + `prefix` (`--prefix` or derived default). Never asks anything; if there's a compatible "detached" Project, it prints the explicit action `ito init --reattach <name>`. **Doesn't touch the repo.** |
 | `ito init --reattach <name>` | Re-points the `root_path` of an existing Project to the current root. It's the deterministic path for a moved/renamed repo. |
 | `ito rename <name>` | Renames the Project (the `id`, the `prefix`, the `root_path` and the issues stay intact). |
-| `ito new`           | Mints an ID + creates the issue. Requires a non-empty `--title`; accepts `--status` (default `backlog`), `--priority` (default `low`), a repeatable `--label` for initial Labels, `--body "text"` or `--body -` to read stdin. Without `--body`, the body is empty. Prints the ID. |
-| `ito edit <ID>`     | Edits an issue's fields/body (`--title`, `--priority`, `--body "text"` or `--body -`; the body always replaces the whole text) and applies repeatable incremental operations (`--add-label`, `--remove-label`, `--block`, `--unblock`, `--relate`, `--unrelate`). Requires at least one change; without changes it fails with exit `2`. Redundant operations are idempotent (exit `0`) and only stamp `updated` when the final state changes. |
-| `ito list`          | Lists issues of the current project (hides `done` by default; use `--status done` to see completed ones). Separate axes: **scope** `--all-projects`; **status** `--status <s>` (filters). Plus `--label`, `--priority`, `--search`, `--ready`, `--json`. `--ready` narrows to the **ready frontier** (§3.1): `backlog`/`todo` Issues whose `blocked_by` are all `done` — the set safe to fan out across worktrees. Default ordering: Status in the flow (`backlog`, `todo`, `in_progress`, `in_review`, `done` when filtered), Priority (`urgent`, `high`, `medium`, `low`), then `updated` desc. With `--search`, it orders by textual ranking and uses the normal ordering as a tie-breaker. With `--all-projects`, human output groups by Project; JSON returns a flat array ordered by `project`, then the normal ordering. |
+| `ito new`           | Mints an ID + creates the issue. Requires a non-empty `--title`; accepts `--status` (default `backlog`), `--priority` (default `low`), `--category` (default `uncategorized`), `--triage-state` (default `needs-triage`), a repeatable `--label` for initial Labels, `--body "text"` or `--body -` to read stdin. Without `--body`, the body is empty. Prints the ID. |
+| `ito edit <ID>`     | Edits an issue's fields/body (`--title`, `--priority`, `--category`, `--triage-state`, `--body "text"` or `--body -`; the body always replaces the whole text) and applies repeatable incremental operations (`--add-label`, `--remove-label`, `--block`, `--unblock`, `--relate`, `--unrelate`). Requires at least one change; without changes it fails with exit `2`. Redundant operations are idempotent (exit `0`) and only stamp `updated` when the final state changes. `status` still changes through `ito move`. |
+| `ito list`          | Lists issues of the current project (hides `done` by default; use `--status done` to see completed ones). Separate axes: **scope** `--all-projects`; **status** `--status <s>` (filters). Plus `--label`, `--priority`, `--category`, `--triage-state`, `--search`, `--ready`, `--json`. `--ready` narrows to the **ready frontier** (§3.1): `backlog`/`todo` Issues whose `blocked_by` are all `done` — the set safe to fan out across worktrees. Default ordering: Status in the flow (`backlog`, `todo`, `in_progress`, `in_review`, `done` when filtered), Priority (`urgent`, `high`, `medium`, `low`), then `updated` desc. With `--search`, it orders by textual ranking and uses the normal ordering as a tie-breaker. With `--all-projects`, human output groups by Project; JSON returns a flat array ordered by `project`, then the normal ordering. |
 | `ito show <ID>`     | Shows an issue (fields + body + links). `--json`. |
 | `ito move <ID> <status>` | Status transition (validates only the target, §3.2); stamps `updated` only when the Status changes. |
 | `ito rm <ID>` / `ito prune` | Destructively deletes an issue / deletes in bulk with a required filter and `--yes` (e.g.: `--status done --yes`). |
 
-Principles: every v1 command has `--json`; no command blocks waiting for interactive input. Commands with a full ID resolve the Project by the Prefix of the ID; commands without a full ID resolve by the cwd, unless `--project` or `--all-projects`. v1 full-text search uses SQLite FTS5 over `title` + `body`, not over ID or metadata. `--search <text>` treats the input as a simple search: the CLI splits it into terms and searches by prefix (`login oauth` → `login* oauth*`), without exposing the advanced FTS5 syntax. `list` filters combine with AND. Repeated `--label` flags are also AND: `--label feature --label infra` returns Issues that have both Labels. `--ready` is a computed filter (it evaluates each Issue's blockers, counting a blocker as satisfied only when `done`); it AND-combines with the rest, so a contradictory combination like `--ready --status in_progress` returns an empty set, not an error.
+Principles: every v1 command has `--json`; no command blocks waiting for interactive input. Commands with a full ID resolve the Project by the Prefix of the ID; commands without a full ID resolve by the cwd, unless `--project` or `--all-projects`. v1 full-text search uses SQLite FTS5 over `title` + `body`, not over ID or metadata. `--search <text>` treats the input as a simple search: the CLI splits it into terms and searches by prefix (`login oauth` → `login* oauth*`), without exposing the advanced FTS5 syntax. `list` filters combine with AND. Repeated `--label` flags are also AND: `--label feature --label infra` returns Issues that have both Labels. `--category` and `--triage-state` combine with the same AND semantics. `--ready` is a computed filter (it evaluates each Issue's blockers, counting a blocker as satisfied only when `done`); it AND-combines with the rest, so a contradictory combination like `--ready --status in_progress` returns an empty set, not an error.
 
 ### 6.1 Result contract (agent-native)
 The agent has no special protocol with the CLI: it runs in the shell and receives **stdout**, **stderr** and an **exit code**. Hence the contract:
@@ -265,6 +271,8 @@ Philosophy: **the actionable sentence is the product; the exit code is the bonus
     "title": "Login via OAuth",
     "status": "todo",
     "priority": "high",
+    "category": "enhancement",
+    "triage_state": "ready-for-agent",
     "labels": ["feature", "infra"],
     "blocked_by": ["AUTH-9"],
     "relates_to": [],
@@ -359,7 +367,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 | 5 | Hierarchy | **v1 = flat issues, no `parent`/`type`/epic** (YAGNI). Only flat `blocked_by`/`relates_to` links. Hierarchy later via migration. |
 | 6 | Status | Fixed: backlog/todo/in_progress/in_review/done + categories. `move` validates only the target. |
 | 7 | ID | Prefix at init + **transactional** monotonic counter. Never reused, no reconciliation. |
-| 8 | Fields | `title`/`status`/`priority`/`labels`/`body` + links. No `owner`, no `type`/`parent` (v1). `created`/`updated` = timestamp columns. |
+| 8 | Fields | `title`/`status`/`priority`/`category`/`triage_state`/`labels`/`body` + links. No `owner`, no `type`/`parent` (v1). `created`/`updated` = timestamp columns. |
 | 9 | Writing | **Single writer: the CLI only.** No Obsidian/file editing. *(ADR-0001 — reverts double writing.)* |
 | 10 | Footprint | The CLI **never writes in the repo** — only in `~/.ito/`. |
 | 11 | Lifecycle | `done` is just a status; deleting is manual (`rm`/`prune`). |

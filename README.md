@@ -23,7 +23,7 @@ A single static binary: pure-Go SQLite (no CGO), instant cold start.
 ```sh
 cd your-project
 ito init                  # registers the project; name and prefix derive from the folder
-ito new --title "Ship the login flow" --priority high --label feature
+ito new --title "Ship the login flow" --priority high --category enhancement --triage-state ready-for-agent --label feature
 ito list                  # issues of the current project
 ito move PROJ-1 in_progress
 ito show PROJ-1
@@ -51,7 +51,7 @@ The AI is external: `ito` does not expose MCP and does not embed an LLM. The age
 - **The CLI is the only writer.** Every mutation is a transaction; IDs (`PROJ-12`) are minted from a monotonic per-project counter and never reused.
 - **The TUI calls the core in-process.** Running bare `ito` opens the digest and batches surfaces over the same store — no daemon.
 
-Issues are flat in v1: statuses `backlog → todo → in_progress → in_review → done`, priorities, a fixed label vocabulary, and typed links (`blocked_by`, `relates_to`, `conflicts_with`). A **Batch** groups issues planned together as one effort; its **Waves** are derived from the link graph at read time, never stored.
+Issues are flat in v1: statuses `backlog → todo → in_progress → in_review → done`, priorities, `category`, `triage_state`, a fixed label vocabulary, and typed links (`blocked_by`, `relates_to`, `conflicts_with`). A **Batch** groups issues planned together as one effort; its **Waves** are derived from the link graph at read time, never stored.
 
 ## Documentation
 

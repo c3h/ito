@@ -17,8 +17,10 @@ func TestMigrateFreshDatabaseReachesBatchSchemaVersion(t *testing.T) {
 	}
 	defer db.Close()
 
-	assertSchemaVersion(t, db, 2)
+	assertSchemaVersion(t, db, 3)
 	assertColumnExists(t, db, "issues", "batch_id")
+	assertColumnExists(t, db, "issues", "category")
+	assertColumnExists(t, db, "issues", "triage_state")
 	if _, err := db.Exec(`INSERT INTO batches(project_id, name, created) VALUES (1, 'orphan', '2026-06-12T10:00:00Z')`); err == nil {
 		t.Fatal("expected foreign key to reject a Batch without a Project")
 	}
@@ -89,8 +91,10 @@ VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '
 		t.Fatalf("migrate v1 database: %v", err)
 	}
 
-	assertSchemaVersion(t, db, 2)
+	assertSchemaVersion(t, db, 3)
 	assertColumnExists(t, db, "issues", "batch_id")
+	assertColumnExists(t, db, "issues", "category")
+	assertColumnExists(t, db, "issues", "triage_state")
 	var title string
 	if err := db.QueryRow(`SELECT title FROM issues WHERE id = 'LEG-1'`).Scan(&title); err != nil {
 		t.Fatalf("legacy issue was not preserved: %v", err)
