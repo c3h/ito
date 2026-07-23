@@ -1819,7 +1819,19 @@ func failInvalidBatchName(jsonMode bool, name string) int {
 	return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid batch name %q.", name), "use the format [a-z0-9][a-z0-9-]{1,62}.")
 }
 
+// errorSentence ends a message the way every ito error reads, so the ones that
+// come from elsewhere (the flag package's, above all) match the hand-written
+// ones: an actionable sentence, then the hint.
+func errorSentence(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" || strings.ContainsAny(message[len(message)-1:], ".!?") {
+		return message
+	}
+	return message + "."
+}
+
 func fail(jsonMode bool, code int, message string, hint string) int {
+	message = errorSentence(message)
 	if jsonMode {
 		encoded, err := json.Marshal(cliError{Error: message, Code: code, Hint: hint})
 		if err == nil {

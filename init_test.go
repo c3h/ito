@@ -4558,6 +4558,29 @@ func TestJSONValueFormSelectsErrorEnvelope(t *testing.T) {
 	}
 }
 
+func TestFlagParseErrorsEndSentenceBeforeHint(t *testing.T) {
+	repo := t.TempDir()
+	itoHome := t.TempDir()
+
+	human := runITO(t, repo, itoHome, "list", "--bogus")
+	if human.exitCode != exitBadUsage || human.stdout != "" {
+		t.Fatalf("expected human usage failure, got exit=%d stdout=%q stderr=%q", human.exitCode, human.stdout, human.stderr)
+	}
+	want := "flag provided but not defined: -bogus. run 'ito list --help' to see the accepted flags.\n"
+	if human.stderr != want {
+		t.Fatalf("expected %q, got %q", want, human.stderr)
+	}
+
+	jsonResult := runITO(t, repo, itoHome, "list", "--json", "--bogus")
+	if jsonResult.exitCode != exitBadUsage || jsonResult.stdout != "" {
+		t.Fatalf("expected JSON usage failure, got exit=%d stdout=%q stderr=%q", jsonResult.exitCode, jsonResult.stdout, jsonResult.stderr)
+	}
+	envelope := decodeErrorEnvelope(t, jsonResult.stderr)
+	if envelope.Error != "flag provided but not defined: -bogus." || envelope.Code != exitBadUsage || envelope.Hint != "run 'ito list --help' to see the accepted flags." {
+		t.Fatalf("unexpected JSON flag error: %#v", envelope)
+	}
+}
+
 func TestJSONValueFormFalseStaysHuman(t *testing.T) {
 	repo := t.TempDir()
 	itoHome := t.TempDir()
