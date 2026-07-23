@@ -158,7 +158,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "list help",
 			args:     []string{"list", "--help"},
-			contains: []string{"usage: ito list", "--ready", "--batch", "conflicts_with", "one git worktree per ready Issue"},
+			contains: []string{"usage: ito list", "--ready", "--batch", "all shows every status, including done", "conflicts_with", "one git worktree per ready Issue"},
 		},
 		{
 			name:     "batch help",
@@ -706,6 +706,8 @@ func TestListFiltersByStatusPriorityAndLabels(t *testing.T) {
 		want []string
 	}{
 		{name: "status allows done explicitly", args: []string{"list", "--json", "--status", "done"}, want: []string{"FLT-4"}},
+		{name: "status all includes every status in flow order", args: []string{"list", "--json", "--status", "all"}, want: []string{"FLT-1", "FLT-2", "FLT-3", "FLT-4"}},
+		{name: "status all combines with other filters", args: []string{"list", "--json", "--status", "all", "--label", "infra"}, want: []string{"FLT-1", "FLT-3", "FLT-4"}},
 		{name: "priority", args: []string{"list", "--json", "--priority", "high"}, want: []string{"FLT-1", "FLT-3"}},
 		{name: "label", args: []string{"list", "--json", "--label", "infra"}, want: []string{"FLT-1", "FLT-3"}},
 		{name: "combined labels use AND", args: []string{"list", "--json", "--label", "feature", "--label", "infra"}, want: []string{"FLT-1"}},

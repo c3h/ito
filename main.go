@@ -46,11 +46,12 @@ var (
 // vocabulary change never leaves stale text behind. Priorities are spelled
 // ascending (low first) in prose, while the slice orders by precedence.
 var (
-	statusList   = humanList(itostore.Statuses)
-	priorityList = humanList(ascendingPriorities())
-	categoryList = humanList(itostore.Categories)
-	triageList   = humanList(itostore.TriageStates)
-	labelList    = humanList(itostore.Labels)
+	statusList     = humanList(itostore.Statuses)
+	listStatusList = humanList(append(slices.Clone(itostore.Statuses), "all"))
+	priorityList   = humanList(ascendingPriorities())
+	categoryList   = humanList(itostore.Categories)
+	triageList     = humanList(itostore.TriageStates)
+	labelList      = humanList(itostore.Labels)
 )
 
 // humanList joins a vocabulary for prose: "a, b, c or d".
@@ -1378,8 +1379,14 @@ func runList(args []string) int {
 	if batchName != "" && allProjects {
 		return fail(jsonMode, exitBadUsage, "--batch and --all-projects cannot be used together.", "choose a single Project when filtering by Batch.")
 	}
+	// "all" is a pseudo-status: it stands for no status filter plus the done
+	// Issues the default hides, so nothing past this point knows the word.
+	includeDone := status == "all"
+	if includeDone {
+		status = ""
+	}
 	if status != "" && !isValidValue(status, validStatuses) {
-		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use "+statusList+".")
+		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid status %q.", status), "use "+listStatusList+".")
 	}
 	if priority != "" && !isValidValue(priority, validPriorities) {
 		return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid priority %q.", priority), "use "+priorityList+".")
@@ -1405,6 +1412,7 @@ func runList(args []string) int {
 	options := listOptions{
 		AllProjects: allProjects,
 		Status:      status,
+		IncludeDone: includeDone,
 		Priority:    priority,
 		Category:    category,
 		TriageState: triageState,
@@ -1664,13 +1672,13 @@ Flags:
 	case "list":
 		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--search <text>] [--batch <name>] [--project <name>|--all-projects] [--json]
 
-Lists Issues in the current Project. Issues in done are hidden by default, except with --status done.
+Lists Issues in the current Project. Issues in done are hidden by default; --status all shows every status, including done.
 Use --ready to list the backlog/todo frontier whose blockers are all done and conflicts_with partners are not unsafe to start in parallel; an agent can fan out one git worktree per ready Issue.
 Status filters execution; triage state filters triage/readiness metadata.
 
 Flags:
   --ready                  Filter to backlog/todo Issues whose blockers are done and conflicts allow parallel work.
-  --status <status>        Filter by %s.
+  --status <status>        Filter by %s; all shows every status, including done.
   --priority <priority>    Filter by %s.
   --category <category>    Filter by %s.
   --triage-state <state>   Filter by %s.
@@ -1680,7 +1688,7 @@ Flags:
   --project <name>         Explicit Project.
   --all-projects           Lists all Projects.
   --json                   Prints JSON.
-`, statusList, priorityList, categoryList, triageList)
+`, listStatusList, priorityList, categoryList, triageList)
 	case "batch":
 		fmt.Println(`usage: ito batch <command> [flags]
 
