@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"slices"
@@ -15,7 +16,7 @@ import (
 // three surfaces (digest, board, issue) share this so switching views never
 // reflows the frame.
 const (
-	surfaceMaxWidth = 88
+	surfaceMaxWidth = 100
 	surfaceMinWidth = 32
 )
 
@@ -31,10 +32,10 @@ const (
 )
 
 // Digest rows View() draws besides Issues: digestChromeLines (header, divider,
-// blank, bottom rule, shortcut bar) and sectionChromeLines per section
-// (heading + blank).
+// bottom rule, shortcut bar) and sectionChromeLines per section (heading +
+// blank).
 const (
-	digestChromeLines  = 5
+	digestChromeLines  = 4
 	sectionChromeLines = 2
 )
 
@@ -87,22 +88,25 @@ type model struct {
 	sections      []digestSection
 	batchSections []batchSection
 	batchFocus    int
-	focusIndex    int
-	mode          viewMode
-	returnMode    viewMode
-	detailIssue   store.Issue
-	detailScroll  int
-	linkTitles    map[string]string
-	labelCursor   int
-	projects      []store.Project
-	projectCursor int
-	filterOpen    bool
-	filterQuery   string
-	commandOpen   bool
-	commandQuery  string
-	loadErr       error
-	width         int
-	height        int
+	// completedShown reveals the Batches surface's completed rollup, the one
+	// section standing in for every fully done Batch.
+	completedShown bool
+	focusIndex     int
+	mode           viewMode
+	returnMode     viewMode
+	detailIssue    store.Issue
+	detailScroll   int
+	linkTitles     map[string]string
+	labelCursor    int
+	projects       []store.Project
+	projectCursor  int
+	filterOpen     bool
+	filterQuery    string
+	commandOpen    bool
+	commandQuery   string
+	loadErr        error
+	width          int
+	height         int
 }
 
 type digestSection struct {
@@ -140,7 +144,7 @@ func newModel(st *store.Store, project store.Project) model {
 	if project.ID == 0 {
 		m.openProjectPicker()
 	} else {
-		m.reloadDigest()
+		m.reload()
 	}
 	return m
 }
@@ -181,9 +185,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mode = viewDigest
 			}
 		case "2":
-			if m.isSurfaceMode() && m.mode != viewBatches {
+			if m.isSurfaceMode() {
 				m.mode = viewBatches
-				m.reloadBatches()
 			}
 		case "/":
 			if m.isSurfaceMode() {
@@ -216,12 +219,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.moveSelectedIssueStatus()
 			}
 		case "r":
-			switch m.mode {
-			case viewLabels:
-			case viewBatches:
-				m.reloadBatches()
-			default:
-				m.reloadDigest()
+			if m.mode != viewLabels {
+				m.reload()
 			}
 		case "p":
 			if m.mode == viewIssue {
@@ -285,7 +284,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // While a filter narrows the list the rendered copies derive their own offset
 // (reset to the top), so there is nothing to persist.
 func (m *model) syncScroll() {
-	if strings.TrimSpace(m.filterQuery) != "" {
+	if m.filtering() {
 		return
 	}
 	switch m.mode {
@@ -300,19 +299,19 @@ func (m *model) syncScroll() {
 			m.sections[i].top = visibleIssueWindow(len(m.sections[i].Issues), m.sections[i].selected, m.sections[i].top, budget).start
 		}
 	case viewBatches:
-		width := m.viewWidth()
-		counts := make([]int, len(m.batchSections))
-		selectedLines := make([]int, len(m.batchSections))
-		for i := range m.batchSections {
-			body, line := batchBody(m.batchSections[i], i == m.batchFocus, width)
-			counts[i] = len(body)
-			selectedLines[i] = line
-		}
-		budgets := allocateLineBudgets(counts, m.height)
-		for i := range m.batchSections {
-			m.batchSections[i].top = visibleIssueWindow(counts[i], selectedLines[i], m.batchSections[i].top, budgets[i]).start
+		for _, block := range m.batchBlocks(m.batchSections) {
+			if block.completed != nil {
+				continue // the rollup lists no rows, so it has nothing to scroll
+			}
+			window, _ := batchBodyWindow(m.batchSections[block.index], block.rows, block.budget)
+			m.batchSections[block.index].top = window.start
 		}
 	}
+}
+
+// filtering reports whether the live / filter is narrowing the current surface.
+func (m model) filtering() bool {
+	return strings.TrimSpace(m.filterQuery) != ""
 }
 
 // isSurfaceMode reports whether one of the header-tab surfaces is active — the
@@ -366,28 +365,22 @@ func (m model) View() string {
 
 	width := m.viewWidth()
 	sections := m.digestSections()
-	lines := []string{
-		header(m.project.Name, activeIssueCount(sections), width, viewDigest),
-		fullRule(width),
-		"",
-	}
+	var body []string
 	windows := m.digestWindows(sections)
-	filtering := strings.TrimSpace(m.filterQuery) != ""
+	filtering := m.filtering()
 	for i, section := range sections {
 		if filtering && len(section.Issues) == 0 {
 			continue // while filtering, only sections with matches are shown
 		}
 		focused := i == m.focusIndex
 		if section.hidden {
-			lines = append(lines, sectionHeading(section.Label, len(section.Issues), focused, true, width))
-			lines = append(lines, "")
+			body = append(body, sectionHeading(section.Label, len(section.Issues), focused, true, width))
+			body = append(body, "")
 			continue
 		}
-		lines = append(lines, sectionHeading(section.Label, len(section.Issues), focused, false, width))
+		body = append(body, sectionHeading(section.Label, len(section.Issues), focused, false, width))
 		window := windows[i]
-		if window.showAbove {
-			lines = append(lines, styleDim.Render(fmt.Sprintf("    ↑ %d more", window.start)))
-		}
+		rows := make([]string, 0, window.end-window.start)
 		for j, issue := range section.Issues[window.start:window.end] {
 			issueIndex := window.start + j
 			// Two leading spaces put the cursor under the heading's ▾ and the
@@ -396,14 +389,28 @@ func (m model) View() string {
 			if focused && issueIndex == section.selected {
 				prefix = "  " + styleActive.Render("▸") + " "
 			}
-			lines = append(lines, prefix+renderIssueRow(issue, width-4))
+			rows = append(rows, prefix+renderIssueRow(issue, width-4))
 		}
-		if window.showBelow {
-			lines = append(lines, styleDim.Render(fmt.Sprintf("    ↓ %d more", len(section.Issues)-window.end)))
-		}
-		lines = append(lines, "")
+		body = append(body, withOverflow(window, len(section.Issues), rows)...)
+		body = append(body, "")
 	}
-	lines = append(lines, fullRule(width), m.digestBottomBar(issueCount(sections), issueCount(m.sections)))
+	return surfaceFrame(header(m.project.Name, activeIssueCount(sections), width, viewDigest),
+		body, m.digestBottomBar(issueCount(sections), issueCount(m.sections)), width)
+}
+
+// surfaceFrame wraps a tab surface's body between its header and bottom bar: the
+// header line and a full rule above, a full rule and the bottom bar below. It
+// owns the frame's spacing — no blank padding hugs either rule, and any trailing
+// blanks the sections left are trimmed, so the bottom rule never floats a line
+// off the last row. digestChromeLines counts these four fixed lines.
+func surfaceFrame(headerLine string, body []string, bottomBar string, width int) string {
+	for len(body) > 0 && body[len(body)-1] == "" {
+		body = body[:len(body)-1]
+	}
+	lines := make([]string, 0, len(body)+4)
+	lines = append(lines, headerLine, fullRule(width))
+	lines = append(lines, body...)
+	lines = append(lines, fullRule(width), bottomBar)
 	return strings.Join(lines, "\n")
 }
 
@@ -411,11 +418,7 @@ func (m model) boardView() string {
 	sections := m.boardSections()
 	width := m.boardViewWidth(len(sections))
 	visible := m.visibleBoardSections(sections, width)
-	lines := []string{
-		boardHeader(m.project.Name, activeIssueCount(sections), width),
-		fullRule(width),
-		"",
-	}
+	var body []string
 
 	columns := make([][]string, 0, len(visible.sections))
 	for i, section := range visible.sections {
@@ -444,11 +447,11 @@ func (m model) boardView() string {
 		if row == 0 && visible.hasRight {
 			line += " ›"
 		}
-		lines = append(lines, line)
+		body = append(body, line)
 	}
 
-	lines = append(lines, "", fullRule(width), m.boardBottomBar(issueCount(sections), issueCount(m.sections)))
-	return strings.Join(lines, "\n")
+	return surfaceFrame(boardHeader(m.project.Name, activeIssueCount(sections), width),
+		body, m.boardBottomBar(issueCount(sections), issueCount(m.sections)), width)
 }
 
 type visibleBoardSections struct {
@@ -720,11 +723,7 @@ func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
 	case "switch project":
 		m.openProjectPicker()
 	case "refresh":
-		if m.mode == viewBatches {
-			m.reloadBatches()
-		} else {
-			m.reloadDigest()
-		}
+		m.reload()
 	case "quit":
 		return m, tea.Quit
 	}
@@ -781,6 +780,7 @@ func (m *model) switchToSelectedProject() {
 	m.sections = nil
 	m.batchSections = nil
 	m.batchFocus = 0
+	m.completedShown = false
 	m.focusIndex = 0
 	m.detailIssue = store.Issue{}
 	m.linkTitles = map[string]string{}
@@ -789,10 +789,21 @@ func (m *model) switchToSelectedProject() {
 	m.commandOpen = false
 	m.commandQuery = ""
 	m.mode = viewDigest
-	m.reloadDigest()
+	m.reload()
 }
 
-func (m *model) reloadDigest() {
+// reload re-reads every surface from the store in one pass: the model holds a
+// single snapshot, so a refresh from any view leaves the Digest, the Board and
+// the Batches consistent with each other — switching tabs never lands on a
+// surface that was left behind. Both loads always run; the first failure is the
+// one reported, and a failing load leaves its previous rows on screen.
+func (m *model) reload() {
+	digestErr := m.reloadDigest()
+	batchErr := m.reloadBatches()
+	m.loadErr = cmp.Or(digestErr, batchErr)
+}
+
+func (m *model) reloadDigest() error {
 	focusedLabel := ""
 	if m.focusIndex >= 0 && m.focusIndex < len(m.sections) {
 		focusedLabel = m.sections[m.focusIndex].Label
@@ -807,7 +818,6 @@ func (m *model) reloadDigest() {
 	}
 	detailID := m.detailIssue.ID
 
-	m.loadErr = nil
 	// One query for every status: a single snapshot, so a concurrent write can
 	// never show an Issue in two sections (or in none) within the same reload.
 	all, err := m.store.ListIssues(store.ListOptions{
@@ -815,8 +825,7 @@ func (m *model) reloadDigest() {
 		IncludeDone: true,
 	})
 	if err != nil {
-		m.loadErr = err
-		return
+		return err
 	}
 	byStatus := make(map[string][]store.Issue, len(store.Statuses))
 	for _, issue := range all {
@@ -857,10 +866,15 @@ func (m *model) reloadDigest() {
 	if detailID != "" {
 		if refreshed, ok := m.issueInSections(detailID); ok {
 			m.detailIssue = refreshed
-			m.linkTitles = m.loadLinkTitles(refreshed)
+			titles, err := m.loadLinkTitles(refreshed)
+			m.linkTitles = titles
 			m.focusIssue(detailID)
+			if err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 type issueWindow struct {
@@ -868,6 +882,20 @@ type issueWindow struct {
 	end       int
 	showAbove bool
 	showBelow bool
+}
+
+// withOverflow wraps rendered rows in the dim "↑/↓ N more" markers, so a body
+// the line budget cut never looks complete.
+func withOverflow(window issueWindow, total int, rows []string) []string {
+	lines := make([]string, 0, len(rows)+2)
+	if window.showAbove {
+		lines = append(lines, styleDim.Render(fmt.Sprintf("    ↑ %d more", window.start)))
+	}
+	lines = append(lines, rows...)
+	if window.showBelow {
+		lines = append(lines, styleDim.Render(fmt.Sprintf("    ↓ %d more", total-window.end)))
+	}
+	return lines
 }
 
 func (m model) digestWindows(sections []digestSection) []issueWindow {
@@ -889,16 +917,18 @@ func (m model) digestSectionCapacities(sections []digestSection) []int {
 			counts[i] = len(section.Issues)
 		}
 	}
-	return allocateLineBudgets(counts, m.height)
+	// Every Digest section spends sectionChromeLines on its heading and trailing
+	// blank, including empty and hidden ones, so hiding preserves the surface's
+	// visual rhythm — it has five fixed sections and can afford it.
+	return allocateLineBudgets(counts, m.height, digestChromeLines+len(sections)*sectionChromeLines)
 }
 
-// allocateLineBudgets splits the terminal height across sections wanting
-// counts[i] lines each — shared by the Digest sections and the Batch bodies.
-// Every section spends sectionChromeLines on its heading and trailing blank,
-// including empty and collapsed ones (count 0), so hiding preserves the
-// surface's visual rhythm. When everything fits each section gets its full
-// count; otherwise non-empty sections start at one line and grow round-robin.
-func allocateLineBudgets(counts []int, height int) []int {
+// allocateLineBudgets splits the terminal height left over after chrome across
+// sections wanting counts[i] lines each — shared by the Digest sections and the
+// Batch bodies, which each account for their own chrome. When everything fits
+// each section gets its full count; otherwise non-empty sections start at one
+// line and grow round-robin.
+func allocateLineBudgets(counts []int, height, chrome int) []int {
 	budgets := make([]int, len(counts))
 	showAll := func() []int {
 		copy(budgets, counts)
@@ -921,8 +951,7 @@ func allocateLineBudgets(counts []int, height int) []int {
 		return budgets
 	}
 
-	fixedLines := digestChromeLines + len(counts)*sectionChromeLines
-	available := height - fixedLines
+	available := height - chrome
 	if available >= totalLines {
 		return showAll()
 	}
@@ -1199,16 +1228,24 @@ func (m *model) digestCursor() rowCursor {
 	return rowCursor{stops: stops, focus: &m.focusIndex, flows: m.mode != viewBoard}
 }
 
-// batchCursor builds the cursor over the Batch sections: a collapsed Batch
-// folds away and the surface flows across Batch boundaries like the Digest.
+// batchCursor builds the cursor over the Batches surface's stops: the Batches
+// with open work, then the completed rollup. A collapsed Batch folds away and
+// the surface flows across Batch boundaries like the Digest. The rollup is a
+// stop so tab reaches it and h reveals it, but it lists no rows — a fully done
+// Batch has no open member to select — so its selection is a scratch cell the
+// cursor writes to and nothing reads.
 func (m *model) batchCursor() rowCursor {
-	stops := make([]rowStop, len(m.batchSections))
-	for i := range m.batchSections {
-		stops[i] = rowStop{
+	open := openBatchCount(m.batchSections)
+	stops := make([]rowStop, 0, open+1)
+	for i := range m.batchSections[:open] {
+		stops = append(stops, rowStop{
 			rows:      batchIssues(m.batchSections[i]),
 			collapsed: m.batchSections[i].collapsed,
 			selected:  &m.batchSections[i].selected,
-		}
+		})
+	}
+	if open < len(m.batchSections) {
+		stops = append(stops, rowStop{collapsed: true, selected: new(int)})
 	}
 	return rowCursor{stops: stops, focus: &m.batchFocus, flows: true}
 }
@@ -1275,7 +1312,7 @@ func (m *model) openLabelPicker() {
 		m.detailScroll = 0
 	}
 	m.detailIssue = issue
-	m.linkTitles = m.loadLinkTitles(issue)
+	m.setLinkTitles(issue)
 	m.focusIssue(issue.ID)
 	m.labelCursor = 0
 	m.mode = viewLabels
@@ -1311,18 +1348,13 @@ func (m *model) toggleFocusedLabel() {
 	m.reloadAfterEdit(edited.Issue)
 }
 
-// reloadAfterEdit refreshes the Digest from the store and keeps the edited
-// Issue focused, re-rendering whichever detail surface is open so the change
-// shows immediately. When the Batches surface is active (or the open detail
-// returns to it), the waves re-derive too — a member moved to done leaves its
-// rows on the spot.
+// reloadAfterEdit refreshes every surface from the store and keeps the edited
+// Issue focused on each of them, re-rendering whichever detail surface is open
+// so the change shows immediately.
 func (m *model) reloadAfterEdit(edited store.Issue) {
-	m.reloadDigest()
+	m.reload()
 	m.focusIssue(edited.ID)
-	if m.mode == viewBatches || m.returnMode == viewBatches {
-		m.reloadBatches()
-		m.focusBatchIssue(edited.ID)
-	}
+	m.focusBatchIssue(edited.ID)
 	switch m.mode {
 	case viewIssue:
 		m.showIssue(edited)
@@ -1348,7 +1380,7 @@ func (m *model) showIssue(issue store.Issue) {
 	}
 	m.detailIssue = issue
 	m.detailScroll = 0
-	m.linkTitles = m.loadLinkTitles(issue)
+	m.setLinkTitles(issue)
 	m.focusIssue(issue.ID)
 	if m.returnMode == viewBatches {
 		m.focusBatchIssue(issue.ID)
@@ -1442,10 +1474,12 @@ func (m model) issueInSections(id string) (store.Issue, bool) {
 
 // loadLinkTitles resolves linked Issue titles from the already-loaded sections
 // (which hold every status), falling back to the store only for Issues created
-// since the last reload. A missing target renders blank; a real store error
-// surfaces through loadErr instead of being silently swallowed.
-func (m *model) loadLinkTitles(issue store.Issue) map[string]string {
+// since the last reload. A missing target renders blank; a real store error is
+// returned rather than written to loadErr, because the reload path owns that
+// field — a failure raised inside a reload has to travel back up to it.
+func (m *model) loadLinkTitles(issue store.Issue) (map[string]string, error) {
 	titles := map[string]string{}
+	var failure error
 	resolve := func(ids []string) {
 		for _, id := range ids {
 			if linked, ok := m.issueInSections(id); ok {
@@ -1455,7 +1489,7 @@ func (m *model) loadLinkTitles(issue store.Issue) map[string]string {
 			linked, err := m.store.FindIssue(m.project, id)
 			if err != nil {
 				if !errors.Is(err, store.ErrNotFound) {
-					m.loadErr = err
+					failure = cmp.Or(failure, err)
 				}
 				continue
 			}
@@ -1465,7 +1499,17 @@ func (m *model) loadLinkTitles(issue store.Issue) map[string]string {
 	resolve(issue.BlockedBy)
 	resolve(issue.RelatesTo)
 	resolve(issue.ConflictsWith)
-	return titles
+	return titles, failure
+}
+
+// setLinkTitles is the non-reload path into loadLinkTitles: opening a detail
+// surface reports its own failure straight away.
+func (m *model) setLinkTitles(issue store.Issue) {
+	titles, err := m.loadLinkTitles(issue)
+	m.linkTitles = titles
+	if err != nil {
+		m.loadErr = err
+	}
 }
 
 func (m model) issueDetailView() string {
@@ -1800,17 +1844,35 @@ func renderIssueRow(issue store.Issue, width int) string {
 	return styledLeft + strings.Repeat(" ", gap) + styledRight
 }
 
+// maxRowLinkIDs caps how many linked ids a Digest/Board row lists inline before
+// the rest collapse into a dim "…(N)" count, so a heavily-linked issue can't blow
+// out the row width.
+const maxRowLinkIDs = 3
+
+// rowLinkIDs renders up to maxRowLinkIDs ids joined by commas, then a dim "…(N)"
+// summary for the remainder. Returns the plain and styled forms; their widths
+// match so callers can lay out with runeLen on the plain form.
+func rowLinkIDs(ids []string) (string, string) {
+	if len(ids) <= maxRowLinkIDs {
+		joined := strings.Join(ids, ",")
+		return joined, styleID.Render(joined)
+	}
+	shown := strings.Join(ids[:maxRowLinkIDs], ",")
+	rest := fmt.Sprintf(" …(%d)", len(ids)-maxRowLinkIDs)
+	return shown + rest, styleID.Render(shown) + styleDim.Render(rest)
+}
+
 func issueRowRight(issue store.Issue, includeLabels bool) (string, string) {
 	plainRight, styledRight := "", ""
 	if len(issue.BlockedBy) > 0 {
-		blockers := strings.Join(issue.BlockedBy, ",")
+		blockers, styledBlockers := rowLinkIDs(issue.BlockedBy)
 		plainRight += "⊘ " + blockers + "   "
-		styledRight += styleBlock.Render("⊘ ") + styleID.Render(blockers) + "   "
+		styledRight += styleBlock.Render("⊘ ") + styledBlockers + "   "
 	}
 	if len(issue.ConflictsWith) > 0 {
-		conflicts := strings.Join(issue.ConflictsWith, ",")
+		conflicts, styledConflicts := rowLinkIDs(issue.ConflictsWith)
 		plainRight += "⊘ " + conflicts + "   "
-		styledRight += styleConflict.Render("⊘ ") + styleID.Render(conflicts) + "   "
+		styledRight += styleConflict.Render("⊘ ") + styledConflicts + "   "
 	}
 	if includeLabels && len(issue.Labels) > 0 {
 		plainRight += strings.Join(issue.Labels, " ") + " "

@@ -101,6 +101,27 @@ func TestBoardIssueRowShowsBlockedAndConflictMarkers(t *testing.T) {
 	}
 }
 
+func TestRowCollapsesOverflowingBlockedByIntoCount(t *testing.T) {
+	blockers := []string{"OVR-2", "OVR-3", "OVR-4", "OVR-5", "OVR-6"}
+	row := renderBoardIssue(store.Issue{
+		ID:        "OVR-1",
+		Title:     "Many blockers",
+		Priority:  "medium",
+		BlockedBy: blockers,
+	}, false, 120)
+
+	for _, want := range []string{"OVR-2", "OVR-3", "OVR-4", "…(2)"} {
+		if !strings.Contains(row, want) {
+			t.Fatalf("expected row to contain %q, got %q", want, row)
+		}
+	}
+	for _, hidden := range []string{"OVR-5", "OVR-6"} {
+		if strings.Contains(row, hidden) {
+			t.Fatalf("expected %q to be collapsed into the count, got %q", hidden, row)
+		}
+	}
+}
+
 func TestBoardOpensFromCommandLineAndEscReturns(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
@@ -1323,7 +1344,7 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 	// visible row: the selection sits on the last row before the "↓ more" rule,
 	// with the rows it scrolled past indicated above.
 	for _, want := range []string{
-		"↑ 3 more",
+		"↑ 2 more",
 		"OVR-4 Scrollable issue 4",
 		" ▸ ◆ OVR-5 Scrollable issue 5",
 		"↓ 3 more",
@@ -1358,16 +1379,16 @@ func TestDigestScrollKeepsCursorAtEdgeNotCentre(t *testing.T) {
 		}
 	}
 
-	// This window fits five issue rows. Moving the cursor down inside it must not
-	// scroll until the cursor would leave the bottom edge — so four steps down
-	// land on the fifth, last visible row with the first row still on screen.
+	// This window fits six issue rows. Moving the cursor down inside it must not
+	// scroll until the cursor would leave the bottom edge — so five steps down
+	// land on the sixth, last visible row with the first row still on screen.
 	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 21})
 	current, _ = current.Update(keyMsg(t, "tab"))
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
 		current, _ = current.Update(keyMsg(t, "down"))
 	}
 	down := current.View()
-	for _, want := range []string{"SCR-1 Row 1", " ▸ ◆ SCR-5 Row 5", "↓ 4 more"} {
+	for _, want := range []string{"SCR-1 Row 1", " ▸ ◆ SCR-6 Row 6", "↓ 3 more"} {
 		if !strings.Contains(down, want) {
 			t.Fatalf("expected the cursor to reach the bottom row before scrolling, missing %q:\n%s", want, down)
 		}
@@ -1379,19 +1400,19 @@ func TestDigestScrollKeepsCursorAtEdgeNotCentre(t *testing.T) {
 	// Drive the cursor to the last row, then climb back: the window must hold
 	// still while the cursor walks up through it, rather than sticking to the
 	// bottom edge — the symmetric counterpart to the descent above.
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 3; i++ {
 		current, _ = current.Update(keyMsg(t, "down"))
 	}
 	for i := 0; i < 3; i++ {
 		current, _ = current.Update(keyMsg(t, "up"))
 	}
 	up := current.View()
-	for _, want := range []string{"↑ 4 more", " ▸ ◆ SCR-6 Row 6", "SCR-9 Row 9"} {
+	for _, want := range []string{"↑ 3 more", " ▸ ◆ SCR-6 Row 6", "SCR-9 Row 9"} {
 		if !strings.Contains(up, want) {
 			t.Fatalf("expected the window to hold while the cursor climbs, missing %q:\n%s", want, up)
 		}
 	}
-	if strings.Contains(up, "SCR-4 Row 4") {
+	if strings.Contains(up, "SCR-3 Row 3") {
 		t.Fatalf("expected climbing inside the window not to scroll rows back into view, got:\n%s", up)
 	}
 }

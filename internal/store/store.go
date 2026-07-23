@@ -392,6 +392,9 @@ func (s *Store) CreateBatch(p Project, name string) (Batch, error) {
 	return insertBatch(s.db, p, name)
 }
 
+// ListBatches returns the Project's Batches newest-first, each with its derived
+// progress. The order is part of the contract: the TUI's Batches surface only
+// partitions this list, so it inherits the ordering rather than re-deriving it.
 func (s *Store) ListBatches(p Project) ([]Batch, error) {
 	return listBatches(s.db, p)
 }

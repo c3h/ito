@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -174,11 +175,112 @@ func TestBatchesCountsDoneInHeadingAndCollapsesFullyDoneBatch(t *testing.T) {
 	if strings.Contains(view, "Finished member") {
 		t.Fatalf("expected done members never listed under Waves, got:\n%s", view)
 	}
-	if !strings.Contains(view, "▸ shipped-effort  (1) · done · h to show") {
-		t.Fatalf("expected fully-done Batch to start collapsed, got:\n%s", view)
+	if !strings.Contains(view, "▸ completed  (1) · done · h to show") {
+		t.Fatalf("expected fully-done Batches to roll up into one collapsed section, got:\n%s", view)
 	}
-	if strings.Contains(view, "Shipped member") {
-		t.Fatalf("expected collapsed Batch to hide its rows, got:\n%s", view)
+	if strings.Contains(view, "shipped-effort") || strings.Contains(view, "Shipped member") {
+		t.Fatalf("expected the collapsed rollup to name neither its Batches nor their rows, got:\n%s", view)
+	}
+}
+
+// The completed rollup is what keeps the surface bounded: however many Batches
+// have shipped, they cost one section, and the open work keeps the rest of the
+// height.
+func TestBatchesRollUpCompletedBatchesIntoOneSection(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-rollup-app", "BRU", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	for i := range 12 {
+		name := fmt.Sprintf("shipped-%02d", i)
+		if _, err := st.CreateBatch(project, name); err != nil {
+			t.Fatalf("create batch: %v", err)
+		}
+		if _, err := st.CreateIssueInBatch(project, "Shipped member", "done", "low", nil, "", name); err != nil {
+			t.Fatalf("create member: %v", err)
+		}
+	}
+	if _, err := st.CreateBatch(project, "live-effort"); err != nil {
+		t.Fatalf("create live batch: %v", err)
+	}
+	for i := range 4 {
+		if _, err := st.CreateIssueInBatch(project, fmt.Sprintf("Open member %d", i), "todo", "medium", nil, "", "live-effort"); err != nil {
+			t.Fatalf("create open member: %v", err)
+		}
+	}
+
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	current, _ = current.Update(keyMsg(t, "2"))
+	view := current.View()
+
+	if lines := strings.Count(view, "\n") + 1; lines > 24 {
+		t.Fatalf("expected the frame to fit the terminal height, got %d lines:\n%s", lines, view)
+	}
+	if !strings.Contains(view, "▸ completed  (12) · done · h to show") {
+		t.Fatalf("expected one rollup for the twelve shipped Batches, got:\n%s", view)
+	}
+	for i := range 4 {
+		if !strings.Contains(view, fmt.Sprintf("Open member %d", i)) {
+			t.Fatalf("expected every open member to fit once the shipped Batches roll up, got:\n%s", view)
+		}
+	}
+
+	// h reveals the rolled-up Batches as one quiet line each.
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "h"))
+	revealed := current.View()
+	if !strings.Contains(revealed, "▾ completed  (12) · done") {
+		t.Fatalf("expected h to reveal the rollup, got:\n%s", revealed)
+	}
+	if !strings.Contains(revealed, "shipped-11  (1)") {
+		t.Fatalf("expected the newest shipped Batch listed in the rollup, got:\n%s", revealed)
+	}
+	if !strings.Contains(revealed, "more") {
+		t.Fatalf("expected the rollup to mark the Batches the height cut, got:\n%s", revealed)
+	}
+}
+
+// A Batch that has open work always outranks a shipped one, whatever the dates
+// say — the surface exists to show what is still moving.
+func TestBatchesOrderOpenWorkBeforeCompletedBatches(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-order-app", "BOR", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "older-open"); err != nil {
+		t.Fatalf("create older batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Still open", "todo", "medium", nil, "", "older-open"); err != nil {
+		t.Fatalf("create open member: %v", err)
+	}
+	// Created last, so ListBatches puts it first — but it has shipped.
+	if _, err := st.CreateBatch(project, "newer-shipped"); err != nil {
+		t.Fatalf("create newer batch: %v", err)
+	}
+	if _, err := st.CreateIssueInBatch(project, "Shipped", "done", "low", nil, "", "newer-shipped"); err != nil {
+		t.Fatalf("create done member: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	view := current.View()
+	openAt := strings.Index(view, "older-open")
+	rollupAt := strings.Index(view, "completed  (1)")
+	if openAt < 0 || rollupAt < 0 || openAt > rollupAt {
+		t.Fatalf("expected the Batch with open work above the completed rollup, got:\n%s", view)
 	}
 }
 
@@ -457,9 +559,10 @@ func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	// Surface order is newest-first: open-head, shipped-middle (done, collapsed,
-	// rowless), open-tail. The cursor flows head → tail and stops on every Batch
-	// in turn, including the collapsed one, so h can reveal it from there.
+	// Surface order puts the Batches with open work first, newest-first among
+	// themselves — open-head, open-tail — and rolls shipped-middle into the
+	// completed section at the end. The cursor flows head → tail → rollup and
+	// stops on each in turn, so h can reveal the rollup from there.
 	if _, err := st.CreateBatch(project, "open-tail"); err != nil {
 		t.Fatalf("create tail batch: %v", err)
 	}
@@ -496,32 +599,32 @@ func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
 		t.Fatalf("expected Down to select the next row, got:\n%s", view)
 	}
 
-	// Down past the head's last row stops on the collapsed shipped-middle
-	// heading — focused, no row selected, its done member off-screen.
 	current, _ = current.Update(keyMsg(t, "down"))
 	view := current.View()
-	if !strings.Contains(view, " ▌▸ shipped-middle") || !strings.Contains(view, "h to show") {
-		t.Fatalf("expected Down to land focus on the collapsed Batch, got:\n%s", view)
-	}
-	if strings.Contains(view, "▸ ◆ "+second.ID) || strings.Contains(view, shipped.ID) {
-		t.Fatalf("expected no row cursor on a collapsed Batch, got:\n%s", view)
+	if !strings.Contains(view, "▸ · "+tail.ID) || !strings.Contains(view, " ▌▾ open-tail") {
+		t.Fatalf("expected Down to flow into the next open Batch, got:\n%s", view)
 	}
 
+	// Down past the last open row stops on the completed rollup — focused, no
+	// row selected, the shipped member off-screen.
 	current, _ = current.Update(keyMsg(t, "down"))
 	view = current.View()
-	if !strings.Contains(view, "▸ · "+tail.ID) || !strings.Contains(view, " ▌▾ open-tail") {
-		t.Fatalf("expected Down to flow into the last open Batch, got:\n%s", view)
+	if !strings.Contains(view, " ▌▸ completed") || !strings.Contains(view, "h to show") {
+		t.Fatalf("expected Down to land focus on the completed rollup, got:\n%s", view)
+	}
+	if strings.Contains(view, "▸ · "+tail.ID) || strings.Contains(view, shipped.ID) {
+		t.Fatalf("expected no row cursor on the rollup, got:\n%s", view)
 	}
 
 	current, _ = current.Update(keyMsg(t, "down"))
-	if view := current.View(); !strings.Contains(view, "▸ · "+tail.ID) {
+	if view := current.View(); !strings.Contains(view, " ▌▸ completed") {
 		t.Fatalf("expected Down at the surface's end to stay put, got:\n%s", view)
 	}
 
-	// Up retraces the same stops: the collapsed Batch, then the head's last row.
+	// Up retraces the same stops: the last open row, then the head's last row.
 	current, _ = current.Update(keyMsg(t, "up"))
-	if view := current.View(); !strings.Contains(view, " ▌▸ shipped-middle") {
-		t.Fatalf("expected Up to land back on the collapsed Batch, got:\n%s", view)
+	if view := current.View(); !strings.Contains(view, "▸ · "+tail.ID) {
+		t.Fatalf("expected Up to land back on the last open row, got:\n%s", view)
 	}
 	current, _ = current.Update(keyMsg(t, "up"))
 	view = current.View()
@@ -667,15 +770,15 @@ func TestBatchesHideTogglesFocusedBatchAndInteropsWithDefaultCollapse(t *testing
 		t.Fatalf("expected h to reveal the Batch again, got:\n%s", view)
 	}
 
-	// The fully-done Batch starts collapsed by default; a manual reveal both
-	// works and survives a refresh.
+	// The completed rollup starts collapsed; a manual reveal both works and
+	// survives a refresh, listing the Batch it stands for.
 	current, _ = current.Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "h"))
-	if view := current.View(); !strings.Contains(view, "▾ done-effort  (1) · done") || strings.Contains(view, "▸ done-effort") {
-		t.Fatalf("expected h to reveal the fully-done Batch, got:\n%s", view)
+	if view := current.View(); !strings.Contains(view, "▾ completed  (1) · done") || !strings.Contains(view, "done-effort  (1)") {
+		t.Fatalf("expected h to reveal the completed rollup, got:\n%s", view)
 	}
 	current, _ = current.Update(keyMsg(t, "r"))
-	if view := current.View(); !strings.Contains(view, "▾ done-effort  (1) · done") {
+	if view := current.View(); !strings.Contains(view, "▾ completed  (1) · done") {
 		t.Fatalf("expected the manual reveal to survive a refresh, got:\n%s", view)
 	}
 }
@@ -784,12 +887,17 @@ func TestBatchesStatusKeyRederivesWavesAndCollapsesCompletedBatch(t *testing.T) 
 		t.Fatalf("expected s to move the member through the store, got %q", moved.Status)
 	}
 
-	// Walking the last member to done completes the Batch and collapses it.
+	// Walking the last member to done completes the Batch: it leaves the open
+	// list for the completed rollup on the spot, taking the focus with it.
 	for range 3 {
 		current, _ = current.Update(keyMsg(t, "s"))
 	}
-	if view := current.View(); !strings.Contains(view, "▸ ship-effort  (2) · done · h to show") {
-		t.Fatalf("expected the completed Batch to collapse on the spot, got:\n%s", view)
+	view = current.View()
+	if !strings.Contains(view, " ▌▸ completed  (1) · done · h to show") {
+		t.Fatalf("expected the completed Batch to roll up on the spot, focus following, got:\n%s", view)
+	}
+	if strings.Contains(view, "ship-effort") {
+		t.Fatalf("expected the completed Batch to leave the open list, got:\n%s", view)
 	}
 }
 
@@ -906,5 +1014,161 @@ func TestBatchesInlineFilterNarrowsRowsWithCounts(t *testing.T) {
 	}
 	if !strings.Contains(restored, "tab focus   ↑↓ select") {
 		t.Fatalf("expected Esc to restore the shortcut bar, got:\n%s", restored)
+	}
+}
+
+func TestRefreshReloadsEverySurfaceFromAnyView(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-refresh-app", "BRF", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "shared-effort"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+
+	var current tea.Model = newModel(st, project)
+	// A write from outside the TUI — another agent or a CLI run.
+	if _, err := st.CreateIssueInBatch(project, "Written elsewhere", "todo", "high", nil, "", "shared-effort"); err != nil {
+		t.Fatalf("create outside member: %v", err)
+	}
+
+	// Refreshing on the Digest also re-derives the Batches behind it.
+	current, _ = current.Update(keyMsg(t, "r"))
+	if digest := current.View(); !strings.Contains(digest, "Written elsewhere") {
+		t.Fatalf("expected r to reload the Digest, got:\n%s", digest)
+	}
+	current, _ = current.Update(keyMsg(t, "2"))
+	if batches := current.View(); !strings.Contains(batches, "Written elsewhere") {
+		t.Fatalf("expected r on the Digest to reload the Batches too, got:\n%s", batches)
+	}
+
+	if _, err := st.CreateIssueInBatch(project, "Also written elsewhere", "todo", "low", nil, "", "shared-effort"); err != nil {
+		t.Fatalf("create second outside member: %v", err)
+	}
+
+	// And the other way around: refreshing on the Batches reloads the Digest.
+	current, _ = current.Update(keyMsg(t, "r"))
+	if batches := current.View(); !strings.Contains(batches, "Also written elsewhere") {
+		t.Fatalf("expected r to reload the Batches, got:\n%s", batches)
+	}
+	current, _ = current.Update(keyMsg(t, "1"))
+	if digest := current.View(); !strings.Contains(digest, "Also written elsewhere") {
+		t.Fatalf("expected r on the Batches to reload the Digest too, got:\n%s", digest)
+	}
+}
+
+// Under a tight height the line budget goes to the work: the Wave headings step
+// aside for Issue rows, and whatever the budget cut still says so.
+func TestBatchesTightHeightSpendsLinesOnRowsNotWaveHeadings(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-tight-app", "BTG", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	// Two waves per Batch, so a heading costs as much as a row.
+	for i := range 4 {
+		name := fmt.Sprintf("effort-%02d", i)
+		if _, err := st.CreateBatch(project, name); err != nil {
+			t.Fatalf("create batch: %v", err)
+		}
+		head, err := st.CreateIssueInBatch(project, fmt.Sprintf("Head %d", i), "todo", "high", nil, "", name)
+		if err != nil {
+			t.Fatalf("create head: %v", err)
+		}
+		for j := range 3 {
+			tail, err := st.CreateIssueInBatch(project, fmt.Sprintf("Tail %d-%d", i, j), "todo", "low", nil, "", name)
+			if err != nil {
+				t.Fatalf("create tail: %v", err)
+			}
+			if _, err := st.Edit(project, tail.ID, store.EditIssueOptions{
+				LinkOps: []store.LinkEditOp{{Kind: "blocked_by", Action: "add", Target: head.ID}},
+			}); err != nil {
+				t.Fatalf("block tail: %v", err)
+			}
+		}
+	}
+
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	current, _ = current.Update(keyMsg(t, "2"))
+	view := current.View()
+
+	if lines := strings.Count(view, "\n") + 1; lines > 24 {
+		t.Fatalf("expected the frame to fit the terminal height, got %d lines:\n%s", lines, view)
+	}
+	for i := range 4 {
+		if !strings.Contains(view, fmt.Sprintf("Head %d", i)) {
+			t.Fatalf("expected every Batch to show work rather than a lone Wave heading, got:\n%s", view)
+		}
+	}
+	if !strings.Contains(view, "↓ 3 more") {
+		t.Fatalf("expected the rows the budget cut to be marked, got:\n%s", view)
+	}
+
+	// With room for everything the Wave headings come back.
+	current, _ = current.Update(tea.WindowSizeMsg{Width: 100, Height: 60})
+	if view := current.View(); !strings.Contains(view, "WAVE 2 · WAITING  (3)") {
+		t.Fatalf("expected the Wave headings once the height allows, got:\n%s", view)
+	}
+}
+
+// A collapsed Batch is a single line: the surface grows a section per Batch, so
+// it cannot afford the Digest's blank line under every heading.
+func TestBatchesCollapsedBatchCostsOneLine(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-dense-app", "BDS", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	for _, name := range []string{"effort-a", "effort-b"} {
+		if _, err := st.CreateBatch(project, name); err != nil {
+			t.Fatalf("create batch: %v", err)
+		}
+		if _, err := st.CreateIssueInBatch(project, "Member of "+name, "todo", "medium", nil, "", name); err != nil {
+			t.Fatalf("create member: %v", err)
+		}
+	}
+
+	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	current, _ = current.Update(keyMsg(t, "2"))
+	current, _ = current.Update(keyMsg(t, "h"))
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "h"))
+
+	lines := strings.Split(current.View(), "\n")
+	first, second := -1, -1
+	for i, line := range lines {
+		if strings.Contains(line, "effort-b") {
+			first = i
+		}
+		if strings.Contains(line, "effort-a") {
+			second = i
+		}
+	}
+	if first < 0 || second != first+1 {
+		t.Fatalf("expected collapsed headings to sit on consecutive lines, got:\n%s", strings.Join(lines, "\n"))
+	}
+	// No blank padding hugs either rule: the frame closes straight after the
+	// last heading.
+	if lines[second+1] == "" {
+		t.Fatalf("expected the bottom rule to follow the last heading directly, got:\n%s", strings.Join(lines, "\n"))
 	}
 }
