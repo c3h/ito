@@ -19,16 +19,16 @@ go install github.com/c3h/ito@latest
 ## Quick start
 
 ```sh
-cd your-project
+cd my-app
 ito init
 ito new --title "Ship the login flow"
 ito list
-ito move PROJ-1 in_progress
-ito show PROJ-1
+ito move MYAPP-1 in_progress
+ito show MYAPP-1
 ito                       # open the TUI
 ```
 
-`ito init` derives the project name and issue prefix from the directory. It stores data in `~/.ito/` and never writes inside the repository.
+`ito init` derives the project name and issue prefix from the directory (`my-app` → `MYAPP-1`). It stores data in `~/.ito/` and never writes inside the repository.
 
 Run `ito --help` or `ito <command> --help` to explore the full CLI.
 
