@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +79,51 @@ type batchWaveJSON struct {
 	Ready  bool        `json:"ready"`
 	Done   bool        `json:"done"`
 	Issues []issueJSON `json:"issues"`
+}
+
+func TestVersionFromBuildInfo(t *testing.T) {
+	tests := []struct {
+		name string
+		info *debug.BuildInfo
+		want string
+	}{
+		{
+			name: "module version",
+			info: &debug.BuildInfo{Main: debug.Module{Version: "v1.2.3"}},
+			want: "v1.2.3",
+		},
+		{
+			name: "clean revision",
+			info: &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "1234567890abcdef"}}},
+			want: "1234567890ab",
+		},
+		{
+			name: "dirty revision",
+			info: &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "abcdef1234567890"}, {Key: "vcs.modified", Value: "true"}}},
+			want: "abcdef123456.dirty",
+		},
+		{name: "missing build info", want: "devel"},
+		{name: "development without revision", info: &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, want: "devel"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := versionFromBuildInfo(tt.info); got != tt.want {
+				t.Fatalf("expected %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestRootVersionFlagsPrintOneLine(t *testing.T) {
+	for _, flag := range []string{"--version", "-version"} {
+		result := runITO(t, t.TempDir(), t.TempDir(), flag)
+		if result.exitCode != 0 || result.stderr != "" {
+			t.Fatalf("%s failed with exit %d\nstdout: %s\nstderr: %s", flag, result.exitCode, result.stdout, result.stderr)
+		}
+		if result.stdout != "ito "+buildVersion()+"\n" {
+			t.Fatalf("%s must print one version line, got %q", flag, result.stdout)
+		}
+	}
 }
 
 func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {

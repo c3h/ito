@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -323,6 +324,38 @@ func main() {
 	os.Exit(runCLI(os.Args[1:]))
 }
 
+func buildVersion() string {
+	info, _ := debug.ReadBuildInfo()
+	return versionFromBuildInfo(info)
+}
+
+func versionFromBuildInfo(info *debug.BuildInfo) string {
+	if info == nil {
+		return "devel"
+	}
+	if info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	revision := ""
+	dirty := false
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			dirty = setting.Value == "true"
+		}
+	}
+	if revision == "" {
+		return "devel"
+	}
+	revision = revision[:min(12, len(revision))]
+	if dirty {
+		revision += ".dirty"
+	}
+	return revision
+}
+
 func runCLI(args []string) int {
 	if len(args) == 0 {
 		if !isTerminal(os.Stdin.Fd()) || !isTerminal(os.Stdout.Fd()) {
@@ -348,6 +381,10 @@ func runCLI(args []string) int {
 	}
 	if isHelpArg(args[0]) {
 		printRootHelp(os.Stdout)
+		return 0
+	}
+	if args[0] == "--version" || args[0] == "-version" {
+		fmt.Printf("ito %s\n", buildVersion())
 		return 0
 	}
 

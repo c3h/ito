@@ -259,6 +259,8 @@ The agent has no special protocol with the CLI: it runs in the shell and receive
 
 Philosophy: **the actionable sentence is the product; the exit code is the bonus for automation.**
 
+`ito --version` is a plumbing flag that prints `ito <version>` on one line and exits `0` — the answer to "which binary is on the PATH?" before any surface question.
+
 ### 6.2 Shape of `--json` (success)
 - **Per command:** `list` → an **array** of issue objects; `show` → **one** object; `new`/`move`/`edit` → the **resulting** object (the agent gets the ID/new state without an extra `show`); `rm` → a summary (`{"deleted":1,"id":"AUTH-12"}`); `prune` → a summary (`{"deleted":3}`); `init`/`rename` → a Project object (`{"id":1,"name":"ito","prefix":"ITO","root_path":"/abs/path"}`). In a Project, `root_path` can be `null` when detached.
 - An empty list is a success: without `--json`, it prints a short actionable sentence (e.g.: `no open issues.`); with `--json`, it prints `[]`.
