@@ -8,20 +8,61 @@ import (
 	"github.com/c3h/ito/internal/store"
 )
 
-// batchSection is one Batch rendered as a Digest-style section. The waves come
-// from the shared core derivation (store.ShowBatch) — the TUI never recomputes
-// them — and a cyclic Batch carries the Issues in the cycle instead of waves.
+// batchSection is one Batch rendered as a Digest-style section. Its row groups
+// come from the shared core derivation (store.ShowBatch) — the TUI never
+// recomputes them — and a cyclic Batch carries the Issues in the cycle instead.
 // selected indexes the flattened listed rows (batchRows), so the cursor
-// crosses Wave sub-headings transparently.
+// crosses sub-headings transparently.
 type batchSection struct {
 	batch     store.Batch
-	waves     []store.BatchWave
+	groups    []batchGroup
 	cycle     []string
 	collapsed bool
 	selected  int
 	// top is the scroll offset into the listed rows, kept so the cursor walks to
 	// an edge before the body slides, like the Digest.
 	top int
+}
+
+// batchGroup is one labeled run of rows inside a Batch: a derived Wave, or the
+// waiting members no Wave can place. Flattening both into one list is what lets
+// every height, window and render walk a single sequence of headed groups.
+type batchGroup struct {
+	label string
+	state string
+	// ready renders state in the READY ink instead of dimmed.
+	ready bool
+	// waiting marks the one group that is not a Wave, so it stays out of the
+	// heading's wave count.
+	waiting bool
+	issues  []store.Issue
+}
+
+// batchGroups turns a derived plan into the groups the surface draws: one per
+// Wave, then the members gated outside the Batch when the derivation left any.
+func batchGroups(plan store.BatchPlan) []batchGroup {
+	groups := make([]batchGroup, 0, len(plan.Waves)+1)
+	for _, wave := range plan.Waves {
+		state := "WAITING"
+		if wave.Ready {
+			state = "READY"
+		}
+		groups = append(groups, batchGroup{
+			label:  fmt.Sprintf("WAVE %d", wave.Wave),
+			state:  state,
+			ready:  wave.Ready,
+			issues: wave.Issues,
+		})
+	}
+	if len(plan.Waiting) > 0 {
+		groups = append(groups, batchGroup{
+			label:   "WAITING",
+			state:   "BLOCKED OUTSIDE THE BATCH",
+			waiting: true,
+			issues:  plan.Waiting,
+		})
+	}
+	return groups
 }
 
 // reloadBatches snapshots the Project's Batches, deriving each plan through the
@@ -65,7 +106,7 @@ func (m *model) reloadBatches() error {
 			case err != nil:
 				return err
 			default:
-				section.waves = plan.Waves
+				section.groups = batchGroups(plan)
 			}
 		}
 		if prev, ok := previous[b.Name]; ok {
@@ -139,32 +180,32 @@ func openBatchCount(sections []batchSection) int {
 	return len(sections)
 }
 
-// batchRow is one listed member paired with the index of the Wave it sits
-// under, so the line budget can count the Wave headings the visible rows bring
+// batchRow is one listed member paired with the index of the group it sits
+// under, so the line budget can count the headings the visible rows bring
 // along with them.
 type batchRow struct {
 	issue store.Issue
-	wave  int
+	group int
 }
 
-// batchRows flattens the rows a Batch lists — its open members in wave order —
-// the list the selection cursor walks.
+// batchRows flattens the rows a Batch lists, in group order — the list the
+// selection cursor walks.
 func batchRows(section batchSection) []batchRow {
-	var rows []batchRow
-	for i, wave := range section.waves {
-		for _, issue := range wave.Issues {
-			rows = append(rows, batchRow{issue: issue, wave: i})
+	rows := make([]batchRow, 0, batchRowCount(section))
+	for i, group := range section.groups {
+		for _, issue := range group.issues {
+			rows = append(rows, batchRow{issue: issue, group: i})
 		}
 	}
 	return rows
 }
 
-// batchIssues is the same list as batchRows without the Wave indices, for the
+// batchIssues is the same list as batchRows without the group indices, for the
 // callers that only walk Issues.
 func batchIssues(section batchSection) []store.Issue {
-	var issues []store.Issue
-	for _, wave := range section.waves {
-		issues = append(issues, wave.Issues...)
+	issues := make([]store.Issue, 0, batchRowCount(section))
+	for _, group := range section.groups {
+		issues = append(issues, group.issues...)
 	}
 	return issues
 }
@@ -172,8 +213,8 @@ func batchIssues(section batchSection) []store.Issue {
 // batchRowCount is how many rows a Batch lists, without building them.
 func batchRowCount(section batchSection) int {
 	total := 0
-	for _, wave := range section.waves {
-		total += len(wave.Issues)
+	for _, group := range section.groups {
+		total += len(group.issues)
 	}
 	return total
 }
@@ -216,7 +257,7 @@ func (m *model) focusBatchIssue(id string) {
 }
 
 // displayBatchSections applies the live / filter to the Batch rows with the
-// Digest's matching rules: only matching members stay, empty Waves drop, the
+// Digest's matching rules: only matching members stay, empty groups drop, the
 // selection follows its Issue into the filtered rows, and a collapsed Batch
 // with matches is revealed — mirroring digestSections. The partition order
 // survives, so openBatchCount still splits the result.
@@ -229,25 +270,25 @@ func (m model) displayBatchSections() []batchSection {
 	for _, section := range m.batchSections {
 		selectedID := batchSelectedID(section)
 		filtered := section
-		filtered.waves = nil
+		filtered.groups = nil
 		filtered.selected = 0
 		filtered.top = 0
 		row := 0
-		for _, wave := range section.waves {
-			match := wave
-			match.Issues = nil
-			for _, issue := range wave.Issues {
+		for _, group := range section.groups {
+			match := group
+			match.issues = nil
+			for _, issue := range group.issues {
 				if !issueMatchesFilter(issue, query) {
 					continue
 				}
 				if issue.ID == selectedID {
 					filtered.selected = row
 				}
-				match.Issues = append(match.Issues, issue)
+				match.issues = append(match.issues, issue)
 				row++
 			}
-			if len(match.Issues) > 0 {
-				filtered.waves = append(filtered.waves, match)
+			if len(match.issues) > 0 {
+				filtered.groups = append(filtered.groups, match)
 			}
 		}
 		if row > 0 {
@@ -323,7 +364,7 @@ func (m model) blockCollapsed(block batchBlock) bool {
 }
 
 // blockHeight is the body height an expanded block wants: one line per Batch
-// inside the rollup, and for a Batch every listed row plus a line per Wave
+// inside the rollup, and for a Batch every listed row plus a line per group
 // heading — or the single line a cyclic Batch shows instead.
 func (m model) blockHeight(block batchBlock) int {
 	switch {
@@ -332,7 +373,7 @@ func (m model) blockHeight(block batchBlock) int {
 	case len(block.section.cycle) > 0:
 		return 1
 	}
-	return len(block.rows) + len(block.section.waves)
+	return len(block.rows) + len(block.section.groups)
 }
 
 func (m model) batchesView() string {
@@ -384,8 +425,8 @@ func batchBodyLines(block batchBlock, focused bool, width int) []string {
 		return []string{"    " + styleBlock.Render("⊘ ") +
 			styleText.Render("blocked_by cycle among ") + styleID.Render(strings.Join(block.section.cycle, ", "))}
 	}
-	window, showWaves := batchBodyWindow(block.section, block.rows, block.budget)
-	return withOverflow(window, len(block.rows), batchBody(block, focused, window, showWaves, width))
+	window, showHeadings := batchBodyWindow(block.section, block.rows, block.budget)
+	return withOverflow(window, len(block.rows), batchBody(block, focused, window, showHeadings, width))
 }
 
 // completedBlock renders the rollup: its heading, and — when revealed — one
@@ -405,7 +446,7 @@ func (m model) completedBlock(block batchBlock, collapsed, focused bool, width i
 }
 
 // batchBodyWindow spends an expanded Batch's line budget on Issue rows first:
-// the Wave headings are chrome riding along with the rows they cover, and a
+// the group headings are chrome riding along with the rows they cover, and a
 // budget too tight for them drops the headings rather than the work — a lone
 // heading over no rows says nothing. The overflow indicators are part of the
 // budget too, so rows only vanish silently when not even one row plus a marker
@@ -415,11 +456,11 @@ func batchBodyWindow(section batchSection, rows []batchRow, lineBudget int) (iss
 	if total == 0 || lineBudget <= 0 {
 		return issueWindow{}, false
 	}
-	for _, showWaves := range [2]bool{true, false} {
+	for _, showHeadings := range [2]bool{true, false} {
 		for capacity := min(lineBudget, total); capacity >= 1; capacity-- {
 			window := batchRowWindow(section, total, capacity)
-			if batchBodyWindowLines(rows, window, showWaves) <= lineBudget {
-				return window, showWaves
+			if batchBodyWindowLines(rows, window, showHeadings) <= lineBudget {
+				return window, showHeadings
 			}
 		}
 	}
@@ -439,9 +480,9 @@ func batchRowWindow(section batchSection, total, capacity int) issueWindow {
 	}
 }
 
-// batchBodyWindowLines is the screen height a window costs: its rows, the Wave
+// batchBodyWindowLines is the screen height a window costs: its rows, the group
 // headings they bring along, and the overflow markers.
-func batchBodyWindowLines(rows []batchRow, window issueWindow, showWaves bool) int {
+func batchBodyWindowLines(rows []batchRow, window issueWindow, showHeadings bool) int {
 	lines := window.end - window.start
 	if window.showAbove {
 		lines++
@@ -449,31 +490,31 @@ func batchBodyWindowLines(rows []batchRow, window issueWindow, showWaves bool) i
 	if window.showBelow {
 		lines++
 	}
-	if showWaves {
+	if showHeadings {
 		previous := -1
 		for _, row := range rows[window.start:window.end] {
-			if row.wave != previous {
+			if row.group != previous {
 				lines++
 			}
-			previous = row.wave
+			previous = row.group
 		}
 	}
 	return lines
 }
 
-// batchBody renders the Batch's rows inside window, each Wave heading above the
+// batchBody renders the Batch's rows inside window, each group heading above the
 // first of its rows that survives the window. Done members live only in the
 // heading's progress count.
-func batchBody(block batchBlock, focused bool, window issueWindow, showWaves bool, width int) []string {
+func batchBody(block batchBlock, focused bool, window issueWindow, showHeadings bool, width int) []string {
 	lines := make([]string, 0, window.end-window.start)
 	previous := -1
 	for i := window.start; i < window.end; i++ {
 		row := block.rows[i]
-		if showWaves && row.wave != previous {
-			lines = append(lines, waveHeading(block.section.waves[row.wave]))
+		if showHeadings && row.group != previous {
+			lines = append(lines, batchGroupHeading(block.section.groups[row.group]))
 		}
-		previous = row.wave
-		// Rows sit two columns right of Digest rows, under their Wave heading.
+		previous = row.group
+		// Rows sit two columns right of Digest rows, under their group heading.
 		prefix := "      "
 		if focused && i == block.section.selected {
 			prefix = "    " + styleActive.Render("▸") + " "
@@ -537,25 +578,33 @@ func completedRow(b store.Batch, width int) string {
 }
 
 // batchMeta derives the dim heading meta: members done over total plus the wave
-// count when the plan derived waves (a cyclic or empty Batch has none). A fully
-// done Batch never reaches here — it lives in the completed rollup.
+// count when the plan derived waves (a cyclic Batch, or one whose every open
+// member waits on work outside it, has none). A fully done Batch never reaches
+// here — it lives in the completed rollup.
 func batchMeta(section batchSection) string {
 	b := section.batch
-	if len(section.waves) == 0 {
+	waves := 0
+	for _, group := range section.groups {
+		if !group.waiting {
+			waves++
+		}
+	}
+	if waves == 0 {
 		return fmt.Sprintf("%d/%d done", b.Done, b.Total)
 	}
-	return fmt.Sprintf("%d/%d done · wave 1/%d", b.Done, b.Total, len(section.waves))
+	return fmt.Sprintf("%d/%d done · wave 1/%d", b.Done, b.Total, waves)
 }
 
-// waveHeading renders the quiet Wave sub-heading: the wave name in the label
-// ink, READY in the id colour on Wave 1, WAITING dimmed on the rest.
-func waveHeading(wave store.BatchWave) string {
-	state := styleDim.Render("WAITING")
-	if wave.Ready {
-		state = styleStatus.Render("READY")
+// batchGroupHeading renders the quiet sub-heading over a group's rows: the
+// label in the label ink, the group's state next to it — READY in the id colour
+// on the current Wave, dimmed otherwise — then the rows it covers.
+func batchGroupHeading(group batchGroup) string {
+	state := styleDim.Render(group.state)
+	if group.ready {
+		state = styleStatus.Render(group.state)
 	}
-	return "    " + styleLabel.Render(fmt.Sprintf("WAVE %d", wave.Wave)) +
-		styleDim.Render(" · ") + state + styleDim.Render(fmt.Sprintf("  (%d)", len(wave.Issues)))
+	return "    " + styleLabel.Render(group.label) +
+		styleDim.Render(" · ") + state + styleDim.Render(fmt.Sprintf("  (%d)", len(group.issues)))
 }
 
 // batchesBottomBar shows the same footer and key set as the Digest — the

@@ -181,7 +181,8 @@ type DeleteBatchResult struct {
 
 type BatchPlan struct {
 	Batch
-	Waves []BatchWave `json:"waves"`
+	Waves   []BatchWave `json:"waves"`
+	Waiting []Issue     `json:"waiting"`
 }
 
 type BatchWave struct {
@@ -1148,6 +1149,7 @@ func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (Batch
 
 	waveQuery := batchWaveQuery(batchID, opts.IncludeDone)
 	waves := []BatchWave{}
+	waiting := []Issue{}
 	for waveNumber := 1; ; waveNumber++ {
 		remaining, err := countRemainingBatchMembers(tx, batchID, opts.IncludeDone)
 		if err != nil {
@@ -1157,7 +1159,7 @@ func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (Batch
 			break
 		}
 
-		issues, err := readyBatchWave(tx, p, batchID, waveQuery)
+		issues, err := queryBatchIssues(tx, p, batchID, waveQuery)
 		if err != nil {
 			return BatchPlan{}, err
 		}
@@ -1168,6 +1170,10 @@ func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (Batch
 			}
 			if len(cycle) > 0 {
 				return BatchPlan{}, &BatchCycleError{Issues: cycle}
+			}
+			waiting, err = remainingBatchMembers(tx, p, batchID, opts.IncludeDone)
+			if err != nil {
+				return BatchPlan{}, err
 			}
 			break
 		}
@@ -1188,7 +1194,7 @@ func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (Batch
 		return BatchPlan{}, err
 	}
 	markBatchWaveReadiness(waves)
-	return BatchPlan{Batch: batch, Waves: waves}, nil
+	return BatchPlan{Batch: batch, Waves: waves, Waiting: waiting}, nil
 }
 
 func batchWaveDone(issues []Issue) bool {
@@ -1241,6 +1247,26 @@ WHERE batch_id = ?
 	return remaining, err
 }
 
+// batchMemberQuery projects the Batch members the derivation has not placed in
+// a Wave yet, narrowed by extraWhere — the shape both the per-wave readiness
+// query and the stalled-remainder query share, in the derivation's own order.
+func batchMemberQuery(extraWhere string) string {
+	if extraWhere != "" {
+		extraWhere = `
+  AND ` + extraWhere
+	}
+	return `
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated
+FROM issues
+JOIN projects ON projects.id = issues.project_id
+LEFT JOIN batches ON batches.id = issues.batch_id
+WHERE issues.batch_id = ?
+  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)` + extraWhere + `
+ORDER BY ` + priorityOrderSQL + `,
+issues.updated DESC,
+issues.id ASC`
+}
+
 // batchWaveQuery builds the per-wave readiness query once; it is identical
 // across every wave of a single ShowBatch, so showBatch builds it before the
 // loop. includeDone widens "ready" to the historical, batch-aware done
@@ -1250,20 +1276,11 @@ func batchWaveQuery(batchID int64, includeDone bool) string {
 	if includeDone {
 		readyWhere = readyFrontierWhereSQLWithOptions("issues", historicalBatchCandidateWhereSQL("issues", batchID), batchDonePredicate(batchID))
 	}
-	return `
-SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated
-FROM issues
-JOIN projects ON projects.id = issues.project_id
-LEFT JOIN batches ON batches.id = issues.batch_id
-WHERE issues.batch_id = ?
-  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)
-  AND ` + readyWhere + `
-ORDER BY ` + priorityOrderSQL + `,
-issues.updated DESC,
-issues.id ASC`
+	return batchMemberQuery(readyWhere)
 }
 
-func readyBatchWave(q rowQuerier, p Project, batchID int64, query string) ([]Issue, error) {
+// queryBatchIssues runs one of the batch member queries and hydrates the rows.
+func queryBatchIssues(q rowQuerier, p Project, batchID int64, query string) ([]Issue, error) {
 	rows, err := q.Query(query, batchID)
 	if err != nil {
 		return nil, err
@@ -1285,6 +1302,17 @@ func readyBatchWave(q rowQuerier, p Project, batchID int64, query string) ([]Iss
 		return nil, err
 	}
 	return issues, nil
+}
+
+// remainingBatchMembers is the same set countRemainingBatchMembers counts: the
+// members the derivation never placed. showBatch reads it once, when the wave
+// loop stalls, and they become the waiting group.
+func remainingBatchMembers(q rowQuerier, p Project, batchID int64, includeDone bool) ([]Issue, error) {
+	statusFilter := "issues.status != 'done'"
+	if includeDone {
+		statusFilter = ""
+	}
+	return queryBatchIssues(q, p, batchID, batchMemberQuery(statusFilter))
 }
 
 func findBatchBlockedByCycle(q rowQuerier, batchID int64, includeDone bool) ([]string, error) {

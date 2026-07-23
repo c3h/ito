@@ -72,6 +72,7 @@ type batchShowJSON struct {
 	Total   int             `json:"total"`
 	Done    int             `json:"done"`
 	Waves   []batchWaveJSON `json:"waves"`
+	Waiting []issueJSON     `json:"waiting"`
 }
 
 type batchWaveJSON struct {
@@ -1191,7 +1192,7 @@ func TestBatchListShowsWaveProgressAndDegradesCyclicBatches(t *testing.T) {
 	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "batch-list-waves", "--prefix", "BLW"); result.exitCode != 0 {
 		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
-	for _, name := range []string{"empty", "complete", "refactor", "cycle"} {
+	for _, name := range []string{"empty", "complete", "refactor", "cycle", "stalled"} {
 		if result := runITO(t, repo, itoHome, "batch", "new", name, "--json"); result.exitCode != 0 {
 			t.Fatalf("ito batch new %s failed with exit %d\nstdout: %s\nstderr: %s", name, result.exitCode, result.stdout, result.stderr)
 		}
@@ -1203,6 +1204,8 @@ func TestBatchListShowsWaveProgressAndDegradesCyclicBatches(t *testing.T) {
 		{"new", "--json", "--title", "Cycle one", "--batch", "cycle", "--status", "todo"},
 		{"new", "--json", "--title", "Cycle two", "--batch", "cycle", "--status", "todo"},
 		{"new", "--json", "--title", "Cycle three", "--batch", "cycle", "--status", "todo"},
+		{"new", "--json", "--title", "External gate", "--status", "todo"},
+		{"new", "--json", "--title", "Stalled member", "--batch", "stalled", "--status", "todo"},
 	} {
 		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
 			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
@@ -1213,6 +1216,7 @@ func TestBatchListShowsWaveProgressAndDegradesCyclicBatches(t *testing.T) {
 		{"edit", "--json", "BLW-4", "--block", "BLW-5"},
 		{"edit", "--json", "BLW-5", "--block", "BLW-6"},
 		{"edit", "--json", "BLW-6", "--block", "BLW-4"},
+		{"edit", "--json", "BLW-8", "--block", "BLW-7"},
 	} {
 		if result := runITO(t, repo, itoHome, args...); result.exitCode != 0 {
 			t.Fatalf("ito %v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
@@ -1234,6 +1238,7 @@ func TestBatchListShowsWaveProgressAndDegradesCyclicBatches(t *testing.T) {
 		{name: "complete", total: 1, done: 1, waves: intPtr(0)},
 		{name: "refactor", total: 2, done: 0, waves: intPtr(2)},
 		{name: "cycle", total: 3, done: 0, waves: nil},
+		{name: "stalled", total: 1, done: 0, waves: intPtr(0)},
 	} {
 		batch, ok := findBatchJSON(batches, tt.name)
 		if !ok {
@@ -1278,6 +1283,7 @@ func TestBatchListShowsWaveProgressAndDegradesCyclicBatches(t *testing.T) {
 		"done",
 		"0/2 done · wave 1/2",
 		"0/3 done · cycle",
+		"0/1 done · waiting",
 	} {
 		if !strings.Contains(human.stdout, want) {
 			t.Fatalf("human batch list missing %q in %q", want, human.stdout)
@@ -1887,10 +1893,13 @@ func TestBatchShowDerivesWavesAndMatchesReadyList(t *testing.T) {
 	if err := json.Unmarshal([]byte(shown.stdout), &raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"name", "project", "created", "total", "done", "waves"} {
+	for _, key := range []string{"name", "project", "created", "total", "done", "waves", "waiting"} {
 		if _, ok := raw[key]; !ok {
 			t.Fatalf("batch show JSON missing key %q in %s", key, shown.stdout)
 		}
+	}
+	if plan.Waiting == nil || len(plan.Waiting) != 0 {
+		t.Fatalf("batch show JSON must include an empty waiting array, got %#v", plan.Waiting)
 	}
 	var rawWaves []map[string]json.RawMessage
 	if err := json.Unmarshal(raw["waves"], &rawWaves); err != nil {
@@ -1918,6 +1927,45 @@ func TestBatchShowDerivesWavesAndMatchesReadyList(t *testing.T) {
 	}
 	if !strings.Contains(human.stdout, "refactor ") || !strings.Contains(human.stdout, "1/4") || !strings.Contains(human.stdout, "Wave 1") || !strings.Contains(human.stdout, "ready") || !strings.Contains(human.stdout, "Wave 2") || !strings.Contains(human.stdout, "waiting") {
 		t.Fatalf("human batch show must include progress and wave headings, got %q", human.stdout)
+	}
+}
+
+func TestBatchShowRendersMembersBlockedOutsideTheBatchAsWaiting(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "batch-wait-app", "--prefix", "BWT"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "batch", "new", "release", "--json"); result.exitCode != 0 {
+		t.Fatalf("ito batch new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "External blocker", "--status", "todo"); result.exitCode != 0 {
+		t.Fatalf("ito new external blocker failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Batch member", "--batch", "release", "--status", "todo"); result.exitCode != 0 {
+		t.Fatalf("ito new Batch member failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "edit", "--json", "BWT-2", "--block", "BWT-1"); result.exitCode != 0 {
+		t.Fatalf("ito edit block failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	shown := runITO(t, repo, itoHome, "batch", "show", "release", "--json")
+	if shown.exitCode != 0 || shown.stderr != "" {
+		t.Fatalf("ito batch show failed with exit %d\nstdout: %s\nstderr: %s", shown.exitCode, shown.stdout, shown.stderr)
+	}
+	plan := decodeBatchShow(t, shown.stdout)
+	if len(plan.Waves) != 0 || !stringSlicesEqual(issueIDs(plan.Waiting), []string{"BWT-2"}) {
+		t.Fatalf("expected only BWT-2 in waiting, got %#v", plan)
+	}
+
+	human := runITO(t, repo, itoHome, "batch", "show", "release")
+	if human.exitCode != 0 || human.stderr != "" {
+		t.Fatalf("ito batch show human failed with exit %d\nstdout: %s\nstderr: %s", human.exitCode, human.stdout, human.stderr)
+	}
+	if !strings.Contains(human.stdout, "Waiting · blocked outside the Batch") || !strings.Contains(human.stdout, "BWT-2 [todo low] Batch member") {
+		t.Fatalf("human batch show must render the waiting group and Issue row, got %q", human.stdout)
 	}
 }
 

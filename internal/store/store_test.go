@@ -581,6 +581,101 @@ func TestShowBatchLetsConflictLoserPrecedeBlockedWinner(t *testing.T) {
 	}
 }
 
+func TestShowBatchKeepsMemberBlockedByExternalIssueWaiting(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("external-wait-app", "EWT", filepath.Join(t.TempDir(), "external-wait"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	member := createStoreIssueInBatch(t, st, project, "Externally blocked", "todo", "high", "release")
+	external := createStoreIssue(t, st, project, "External blocker", "todo", "urgent")
+	addStoreLink(t, st, project, member.ID, "blocked_by", external.ID)
+
+	plan, err := st.ShowBatch(project, "release")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 0 {
+		t.Fatalf("expected no derivable waves, got %#v", plan.Waves)
+	}
+	if got := storeIssueIDs(plan.Waiting); !slices.Equal(got, []string{member.ID}) {
+		t.Fatalf("expected externally blocked member in waiting, got %v", got)
+	}
+}
+
+func TestShowBatchKeepsTransitivelyExternalBlockedMembersWaiting(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("transitive-wait-app", "TWT", filepath.Join(t.TempDir(), "transitive-wait"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	dependent := createStoreIssueInBatch(t, st, project, "Dependent member", "todo", "high", "release")
+	blocked := createStoreIssueInBatch(t, st, project, "Externally blocked member", "todo", "medium", "release")
+	external := createStoreIssue(t, st, project, "External blocker", "todo", "urgent")
+	addStoreLink(t, st, project, dependent.ID, "blocked_by", blocked.ID)
+	addStoreLink(t, st, project, blocked.ID, "blocked_by", external.ID)
+
+	plan, err := st.ShowBatch(project, "release")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 0 {
+		t.Fatalf("expected no derivable waves, got %#v", plan.Waves)
+	}
+	if got := storeIssueIDs(plan.Waiting); !slices.Equal(got, []string{dependent.ID, blocked.ID}) {
+		t.Fatalf("expected both transitively blocked members in waiting order, got %v", got)
+	}
+}
+
+func TestShowBatchTreatsDoneExternalBlockerAsSatisfied(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("done-external-app", "DEX", filepath.Join(t.TempDir(), "done-external"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	member := createStoreIssueInBatch(t, st, project, "Unblocked member", "todo", "high", "release")
+	external := createStoreIssue(t, st, project, "Done external blocker", "done", "urgent")
+	addStoreLink(t, st, project, member.ID, "blocked_by", external.ID)
+
+	plan, err := st.ShowBatchWithOptions(project, "release", ShowBatchOptions{IncludeDone: true})
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 1 || !slices.Equal(storeIssueIDs(plan.Waves[0].Issues), []string{member.ID}) {
+		t.Fatalf("expected member in wave 1, got %#v", plan.Waves)
+	}
+	if len(plan.Waiting) != 0 {
+		t.Fatalf("expected no waiting members, got %#v", plan.Waiting)
+	}
+}
+
 func TestShowBatchHonoursExternalBlockersAndDoneProgress(t *testing.T) {
 	db, err := Open(t.TempDir())
 	if err != nil {
@@ -614,6 +709,9 @@ func TestShowBatchHonoursExternalBlockersAndDoneProgress(t *testing.T) {
 	}
 	if got := storeIssueIDs(plan.Waves[0].Issues); !slices.Equal(got, []string{ready.ID}) {
 		t.Fatalf("expected external blocker to keep %s out of wave 1, got %v", blocked.ID, got)
+	}
+	if got := storeIssueIDs(plan.Waiting); !slices.Equal(got, []string{blocked.ID}) {
+		t.Fatalf("expected external blocker to keep %s in waiting, got %v", blocked.ID, got)
 	}
 	for _, issue := range plan.Waves[0].Issues {
 		if issue.ID == done.ID {

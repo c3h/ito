@@ -138,6 +138,43 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 	}
 }
 
+func TestBatchesRendersMembersBlockedOutsideTheBatchAsWaitingGroup(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-external-wait-app", "BEW", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	external, err := st.CreateIssue(project, "External blocker", "todo", "urgent", nil, "")
+	if err != nil {
+		t.Fatalf("create external blocker: %v", err)
+	}
+	member, err := st.CreateIssueInBatch(project, "Batch member", "todo", "medium", nil, "", "release")
+	if err != nil {
+		t.Fatalf("create Batch member: %v", err)
+	}
+	if _, err := st.Edit(project, member.ID, store.EditIssueOptions{
+		LinkOps: []store.LinkEditOp{{Kind: "blocked_by", Action: "add", Target: external.ID}},
+	}); err != nil {
+		t.Fatalf("block member: %v", err)
+	}
+
+	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	view := current.View()
+
+	if !strings.Contains(view, "WAITING · BLOCKED OUTSIDE THE BATCH  (1)") || !strings.Contains(view, member.ID+" Batch member") {
+		t.Fatalf("expected the external waiting group and its member, got:\n%s", view)
+	}
+}
+
 func TestBatchesCountsDoneInHeadingAndCollapsesFullyDoneBatch(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {

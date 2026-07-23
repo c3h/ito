@@ -123,6 +123,12 @@ func (s listStyle) project(value string) string {
 	return s.apply(ansiMagenta+ansiBright, value)
 }
 
+// issueRow is the one-line Issue shape every human listing prints — the Issue
+// list, and the Wave and waiting groups of "ito batch show".
+func (s listStyle) issueRow(i issue) string {
+	return fmt.Sprintf("%s [%s %s] %s", s.issueID(i.ID), s.status(i.Status), s.priority(i.Priority), i.Title)
+}
+
 type stringSliceFlag []string
 
 func (f *stringSliceFlag) String() string {
@@ -213,6 +219,9 @@ type batchListItem struct {
 type batchListRow struct {
 	Batch batch
 	Waves *int
+	// Waiting counts the members no Wave could place: gated by work outside the
+	// Batch. Derived, not stored — see the Wave derivation in the store.
+	Waiting int
 }
 
 type deletedBatch struct {
@@ -230,7 +239,8 @@ type movedBatch struct {
 
 type batchShowItem struct {
 	batch
-	Waves []batchWaveItem `json:"waves"`
+	Waves   []batchWaveItem `json:"waves"`
+	Waiting []issueListItem `json:"waiting"`
 }
 
 type batchWaveItem struct {
@@ -1748,7 +1758,7 @@ Flags:
 	case "batch show":
 		fmt.Println(`usage: ito batch show [--project <name>] [--include-done] [--json] <name>
 
-Shows the Batch's open members grouped by derived Waves, plus done/total progress.
+Shows the Batch's open members grouped by derived Waves and external waiting, plus done/total progress.
 Use --include-done to include historical completed Waves.
 
 Flags:
@@ -1901,8 +1911,9 @@ func batchListRows(st *itostore.Store, p project, batches []batch) ([]batchListR
 		}
 		waves := len(plan.Waves)
 		rows = append(rows, batchListRow{
-			Batch: plan.Batch,
-			Waves: &waves,
+			Batch:   plan.Batch,
+			Waves:   &waves,
+			Waiting: len(plan.Waiting),
 		})
 	}
 	return rows, nil
@@ -1927,15 +1938,16 @@ func printBatchList(rows []batchListRow, jsonMode bool) int {
 		if b.Total == 0 || b.Done != b.Total {
 			progress = fmt.Sprintf("%d/%d done", b.Done, b.Total)
 		}
-		if row.Waves == nil {
-			fmt.Printf("%s %s %s · cycle\n", b.Name, b.Date(), progress)
-			continue
+		state := ""
+		switch {
+		case row.Waves == nil:
+			state = " · cycle"
+		case *row.Waves > 0:
+			state = fmt.Sprintf(" · wave 1/%d", *row.Waves)
+		case row.Waiting > 0:
+			state = " · waiting"
 		}
-		if *row.Waves > 0 {
-			fmt.Printf("%s %s %s · wave 1/%d\n", b.Name, b.Date(), progress, *row.Waves)
-			continue
-		}
-		fmt.Printf("%s %s %s\n", b.Name, b.Date(), progress)
+		fmt.Printf("%s %s %s%s\n", b.Name, b.Date(), progress, state)
 	}
 	return 0
 }
@@ -1975,8 +1987,9 @@ func printMovedBatch(result itostore.BatchMoveResult, jsonMode bool) int {
 func printBatchShow(plan batchPlan, jsonMode bool) int {
 	if jsonMode {
 		item := batchShowItem{
-			batch: plan.Batch,
-			Waves: make([]batchWaveItem, 0, len(plan.Waves)),
+			batch:   plan.Batch,
+			Waves:   make([]batchWaveItem, 0, len(plan.Waves)),
+			Waiting: make([]issueListItem, 0, len(plan.Waiting)),
 		}
 		for _, wave := range plan.Waves {
 			waveItem := batchWaveItem{
@@ -1990,11 +2003,14 @@ func printBatchShow(plan batchPlan, jsonMode bool) int {
 			}
 			item.Waves = append(item.Waves, waveItem)
 		}
+		for _, issue := range plan.Waiting {
+			item.Waiting = append(item.Waiting, issueListJSON(issue))
+		}
 		return printJSON(item, "Batch")
 	}
 
 	fmt.Printf("%s %s %d/%d\n", plan.Name, plan.Date(), plan.Done, plan.Total)
-	if len(plan.Waves) == 0 {
+	if len(plan.Waves) == 0 && len(plan.Waiting) == 0 {
 		return 0
 	}
 	style := newListStyle()
@@ -2006,11 +2022,20 @@ func printBatchShow(plan batchPlan, jsonMode bool) int {
 			state = "ready"
 		}
 		fmt.Printf("\nWave %d · %s\n", wave.Wave, state)
-		for _, issue := range wave.Issues {
-			fmt.Printf("%s [%s %s] %s\n", style.issueID(issue.ID), style.status(issue.Status), style.priority(issue.Priority), issue.Title)
-		}
+		printBatchGroup(style, wave.Issues)
+	}
+	if len(plan.Waiting) > 0 {
+		fmt.Println("\nWaiting · blocked outside the Batch")
+		printBatchGroup(style, plan.Waiting)
 	}
 	return 0
+}
+
+// printBatchGroup prints the members under a Wave or waiting heading.
+func printBatchGroup(style listStyle, issues []issue) {
+	for _, i := range issues {
+		fmt.Println(style.issueRow(i))
+	}
 }
 
 func printIssueDetail(i issue, jsonMode bool) int {
@@ -2066,7 +2091,7 @@ func printIssueList(issues []issue, jsonMode bool, allProjects bool) int {
 		if allProjects {
 			prefix = "  "
 		}
-		fmt.Printf("%s%s [%s %s] %s\n", prefix, style.issueID(i.ID), style.status(i.Status), style.priority(i.Priority), i.Title)
+		fmt.Println(prefix + style.issueRow(i))
 	}
 	return 0
 }
