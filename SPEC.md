@@ -139,7 +139,7 @@ Semantics of the early stages: `backlog` = work that's mapped or still subject t
 ~/.ito/
   ito.db        # SQLite: projects, issues, links, prefix counters
 ```
-(overridable by env, e.g., `ITO_HOME`.)
+(override with `ITO_HOME`.)
 
 Schema sketch (indicative, not final):
 
