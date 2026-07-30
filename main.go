@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	itoconfig "github.com/c3h/ito/internal/config"
 	itostore "github.com/c3h/ito/internal/store"
 	"github.com/c3h/ito/internal/tui"
 	"github.com/mattn/go-isatty"
@@ -280,6 +281,12 @@ type deletedIssues struct {
 	Deleted int `json:"deleted"`
 }
 
+type configDisplay struct {
+	Backend     itoconfig.Backend `json:"backend"`
+	LocalDBPath string            `json:"local_db_path"`
+	RemoteURL   string            `json:"remote_url,omitempty"`
+}
+
 type commandFailure struct {
 	code    int
 	message string
@@ -410,6 +417,8 @@ func runCLI(args []string) int {
 		return runShow(args[1:])
 	case "list":
 		return runList(args[1:])
+	case "config":
+		return runConfig(args[1:])
 	case "batch":
 		return runBatch(args[1:])
 	case "move":
@@ -423,6 +432,48 @@ func runCLI(args []string) int {
 	default:
 		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0]+".", "Run 'ito --help' to see available commands.")
 	}
+}
+
+func runConfig(args []string) int {
+	if wantsHelp(args, nil) {
+		printCommandHelp("config")
+		return 0
+	}
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	fs.BoolVar(&jsonMode, "json", false, "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, nil)
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, nil), exitBadUsage, err.Error(), "run 'ito config --help' to see the accepted flags.")
+	}
+	if len(positionals) != 0 {
+		return fail(jsonMode, exitBadUsage, "ito config takes no positional arguments.", "use only --json.")
+	}
+
+	home, err := itoconfig.HomeDir()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the ito home: %v.", err), "")
+	}
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the config: %v; fix or remove it.", err), "")
+	}
+	display := configDisplay{
+		Backend:     cfg.Backend,
+		LocalDBPath: itoconfig.LocalDBPath(home),
+	}
+	if cfg.Backend == itoconfig.BackendCloud {
+		display.RemoteURL = cfg.Cloud.URL
+	}
+	if jsonMode {
+		return printJSON(display, "config")
+	}
+	fmt.Printf("Backend: %s\nLocal DB: %s\n", display.Backend, display.LocalDBPath)
+	if display.RemoteURL != "" {
+		fmt.Printf("Remote URL: %s\n", display.RemoteURL)
+	}
+	return 0
 }
 
 func runBatch(args []string) int {
@@ -1620,6 +1671,7 @@ Commands:
   init     Registers or re-points the Project for the current directory.
   new      Creates an Issue in the current Project.
   list     Lists Issues.
+  config   Shows the active backend configuration.
   batch    Manages Batches in the current Project.
   show     Shows an Issue by full ID.
   move     Moves an Issue to another status.
@@ -1635,6 +1687,13 @@ Use "ito <command> --help" to see the command's flags.`)
 
 func printCommandHelp(command string) {
 	switch command {
+	case "config":
+		fmt.Println(`usage: ito config [--json]
+
+Shows the active backend, local database path, and remote URL when cloud is active. The cloud token is never printed.
+
+Flags:
+  --json               Prints JSON.`)
 	case "init":
 		fmt.Println(`usage: ito init [--name <name>] [--prefix <PREFIX>] [--reattach <name>] [--json]
 

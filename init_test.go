@@ -162,6 +162,11 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 			contains: []string{"usage: ito list", "--ready", "--batch", "all shows every status, including done", "conflicts_with", "one git worktree per ready Issue"},
 		},
 		{
+			name:     "config help",
+			args:     []string{"config", "--help"},
+			contains: []string{"usage: ito config", "--json", "token is never printed"},
+		},
+		{
 			name:     "batch help",
 			args:     []string{"batch", "--help"},
 			contains: []string{"usage: ito batch <command>", "new", "list", "move", "show", "rename", "rm"},
@@ -218,6 +223,69 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfigDefaultsToLocalWithoutCreatingStore(t *testing.T) {
+	itoHome := t.TempDir()
+	result := runITO(t, t.TempDir(), itoHome, "config")
+	if result.exitCode != 0 || result.stderr != "" {
+		t.Fatalf("ito config failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.stdout, "Backend: local\n") {
+		t.Fatalf("expected local backend, got %q", result.stdout)
+	}
+	if !strings.Contains(result.stdout, "Local DB: "+filepath.Join(itoHome, "ito.db")+"\n") {
+		t.Fatalf("expected local database path, got %q", result.stdout)
+	}
+	if _, err := os.Stat(filepath.Join(itoHome, "ito.db")); !os.IsNotExist(err) {
+		t.Fatalf("ito config must not create the local database, stat error: %v", err)
+	}
+}
+
+func TestConfigCloudOutputNeverPrintsToken(t *testing.T) {
+	itoHome := t.TempDir()
+	token := "super-secret-token"
+	configJSON := fmt.Sprintf(`{"backend":"cloud","cloud":{"url":"libsql://example.turso.io","token":%q}}`, token)
+	if err := os.WriteFile(filepath.Join(itoHome, "config.json"), []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{{"config"}, {"config", "--json"}} {
+		result := runITO(t, t.TempDir(), itoHome, args...)
+		if result.exitCode != 0 || result.stderr != "" {
+			t.Fatalf("%v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		}
+		if strings.Contains(result.stdout, token) || strings.Contains(result.stderr, token) {
+			t.Fatalf("%v exposed the token\nstdout: %s\nstderr: %s", args, result.stdout, result.stderr)
+		}
+		if !strings.Contains(result.stdout, "libsql://example.turso.io") {
+			t.Fatalf("%v omitted the remote URL: %s", args, result.stdout)
+		}
+	}
+
+	jsonResult := runITO(t, t.TempDir(), itoHome, "config", "--json")
+	var display configDisplay
+	if err := json.Unmarshal([]byte(jsonResult.stdout), &display); err != nil {
+		t.Fatalf("config JSON is invalid: %v\nstdout: %s", err, jsonResult.stdout)
+	}
+	if display.Backend != "cloud" || display.LocalDBPath != filepath.Join(itoHome, "ito.db") || display.RemoteURL != "libsql://example.turso.io" {
+		t.Fatalf("unexpected config JSON: %#v", display)
+	}
+}
+
+func TestConfigRejectsMalformedFile(t *testing.T) {
+	itoHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(itoHome, "config.json"), []byte(`{"backend":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runITO(t, t.TempDir(), itoHome, "config")
+	if result.exitCode == 0 {
+		t.Fatalf("expected malformed config to fail\nstdout: %s", result.stdout)
+	}
+	if result.stdout != "" || !strings.Contains(result.stderr, "config.json") || !strings.Contains(result.stderr, "malformed") || !strings.Contains(result.stderr, "fix or remove it") {
+		t.Fatalf("expected actionable malformed-config error\nstdout: %s\nstderr: %s", result.stdout, result.stderr)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	itoconfig "github.com/c3h/ito/internal/config"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -511,13 +512,9 @@ func (s *Store) ResolveProject(rootPath string, inGit bool, explicitName string)
 }
 
 func OpenDefault() (*sql.DB, error) {
-	home := os.Getenv("ITO_HOME")
-	if home == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			return nil, err
-		}
-		home = filepath.Join(userHome, ".ito")
+	home, err := itoconfig.HomeDir()
+	if err != nil {
+		return nil, err
 	}
 	return openAtPath(home)
 }
