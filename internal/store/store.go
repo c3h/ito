@@ -1159,69 +1159,16 @@ func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) 
 }
 
 func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (BatchPlan, error) {
-	batch, batchID, err := findBatchWithProgress(db, p, name)
+	batch, batchID, members, err := queryBatchMembers(db, p, name)
 	if err != nil {
 		return BatchPlan{}, err
 	}
-
-	tx, err := db.Begin()
+	graph, err := loadBatchIssueRelations(db, p.ID, batchID, members)
 	if err != nil {
 		return BatchPlan{}, err
 	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`CREATE TEMP TABLE IF NOT EXISTS ito_wave_done (issue_id TEXT PRIMARY KEY)`); err != nil {
-		return BatchPlan{}, err
-	}
-	if _, err := tx.Exec(`DELETE FROM ito_wave_done`); err != nil {
-		return BatchPlan{}, err
-	}
-	defer tx.Exec(`DROP TABLE IF EXISTS ito_wave_done`)
-
-	waveQuery := batchWaveQuery(batchID, opts.IncludeDone)
-	waves := []BatchWave{}
-	waiting := []Issue{}
-	for waveNumber := 1; ; waveNumber++ {
-		remaining, err := countRemainingBatchMembers(tx, batchID, opts.IncludeDone)
-		if err != nil {
-			return BatchPlan{}, err
-		}
-		if remaining == 0 {
-			break
-		}
-
-		issues, err := queryBatchIssues(tx, p, batchID, waveQuery)
-		if err != nil {
-			return BatchPlan{}, err
-		}
-		if len(issues) == 0 {
-			cycle, err := findBatchBlockedByCycle(tx, batchID, opts.IncludeDone)
-			if err != nil {
-				return BatchPlan{}, err
-			}
-			if len(cycle) > 0 {
-				return BatchPlan{}, &BatchCycleError{Issues: cycle}
-			}
-			waiting, err = remainingBatchMembers(tx, p, batchID, opts.IncludeDone)
-			if err != nil {
-				return BatchPlan{}, err
-			}
-			break
-		}
-
-		waves = append(waves, BatchWave{
-			Wave:   waveNumber,
-			Done:   batchWaveDone(issues),
-			Issues: issues,
-		})
-		for _, issue := range issues {
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO ito_wave_done(issue_id) VALUES (?)`, issue.ID); err != nil {
-				return BatchPlan{}, err
-			}
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
+	waves, waiting, err := deriveBatchWaves(batchID, members, graph, opts)
+	if err != nil {
 		return BatchPlan{}, err
 	}
 	markBatchWaveReadiness(waves)
@@ -1249,140 +1196,360 @@ func markBatchWaveReadiness(waves []BatchWave) {
 	}
 }
 
-func findBatchWithProgress(db *sql.DB, p Project, name string) (Batch, int64, error) {
-	row := db.QueryRow(batchProgressSQL+
-		`WHERE batches.project_id = ? AND batches.name = ?`+batchProgressGroupSQL, p.ID, name)
-	batch, batchID, err := scanBatchProgress(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Batch{}, 0, ErrBatchNotFound
-		}
-		return Batch{}, 0, err
-	}
-	return batch, batchID, nil
-}
-
-func countRemainingBatchMembers(q rowQuerier, batchID int64, includeDone bool) (int, error) {
-	statusFilter := `
-  AND status != 'done'`
-	if includeDone {
-		statusFilter = ""
-	}
-	var remaining int
-	err := q.QueryRow(`
-SELECT count(*)
-FROM issues
-WHERE batch_id = ?
-`+statusFilter+`
-  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)`, batchID).Scan(&remaining)
-	return remaining, err
-}
-
-// batchMemberQuery projects the Batch members the derivation has not placed in
-// a Wave yet, narrowed by extraWhere — the shape both the per-wave readiness
-// query and the stalled-remainder query share, in the derivation's own order.
-func batchMemberQuery(extraWhere string) string {
-	if extraWhere != "" {
-		extraWhere = `
-  AND ` + extraWhere
-	}
-	return `
-SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated
-FROM issues
-JOIN projects ON projects.id = issues.project_id
-LEFT JOIN batches ON batches.id = issues.batch_id
-WHERE issues.batch_id = ?
-  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = issues.id)` + extraWhere + `
-ORDER BY ` + priorityOrderSQL + `,
+// queryBatchMembers combines the Batch lookup, progress calculation and ordered
+// member load. The LEFT JOIN preserves empty Batches while avoiding the
+// separate findBatchWithProgress round-trip previously paid by every ShowBatch.
+func queryBatchMembers(db *sql.DB, p Project, name string) (Batch, int64, []listedIssue, error) {
+	rows, err := db.Query(`
+SELECT batches.id, batches.name, projects.name, batches.created,
+       COALESCE(issues.id, ''), COALESCE(issues.title, ''),
+       COALESCE(issues.status, ''), COALESCE(issues.priority, ''),
+       COALESCE(issues.category, ''), COALESCE(issues.triage_state, ''),
+       COALESCE(issues.body, ''), COALESCE(issues.created, ''),
+       COALESCE(issues.updated, '')
+FROM batches
+JOIN projects ON projects.id = batches.project_id
+LEFT JOIN issues ON issues.batch_id = batches.id
+WHERE batches.project_id = ? AND batches.name = ?
+ORDER BY `+priorityOrderSQL+`,
 issues.updated DESC,
-issues.id ASC`
-}
-
-// batchWaveQuery builds the per-wave readiness query once; it is identical
-// across every wave of a single ShowBatch, so showBatch builds it before the
-// loop. includeDone widens "ready" to the historical, batch-aware done
-// predicate so completed Waves still derive.
-func batchWaveQuery(batchID int64, includeDone bool) string {
-	readyWhere := readyFrontierWhereSQLWithOptions("issues", "issues.status != 'done'", tableDonePredicate("ito_wave_done"))
-	if includeDone {
-		readyWhere = readyFrontierWhereSQLWithOptions("issues", historicalBatchCandidateWhereSQL("issues", batchID), batchDonePredicate(batchID))
-	}
-	return batchMemberQuery(readyWhere)
-}
-
-// queryBatchIssues runs one of the batch member queries and hydrates the rows.
-func queryBatchIssues(q rowQuerier, p Project, batchID int64, query string) ([]Issue, error) {
-	rows, err := q.Query(query, batchID)
+issues.id ASC`, p.ID, name)
 	if err != nil {
-		return nil, err
+		return Batch{}, 0, nil, err
 	}
 	defer rows.Close()
 
-	issues := []Issue{}
+	var batch Batch
+	var batchID int64
+	members := []listedIssue{}
+	foundBatch := false
 	for rows.Next() {
-		found, err := scanIssue(rows)
-		if err != nil {
-			return nil, err
+		foundBatch = true
+		found := Issue{
+			Labels:        []string{},
+			BlockedBy:     []string{},
+			RelatesTo:     []string{},
+			ConflictsWith: []string{},
 		}
-		if err := loadIssueRelations(q, p.ID, &found); err != nil {
-			return nil, err
+		if err := rows.Scan(
+			&batchID, &batch.Name, &batch.Project, &batch.Created,
+			&found.ID, &found.Title, &found.Status, &found.Priority,
+			&found.Category, &found.TriageState, &found.Body,
+			&found.Created, &found.Updated,
+		); err != nil {
+			return Batch{}, 0, nil, err
 		}
-		issues = append(issues, found)
+		if found.ID == "" {
+			continue
+		}
+		found.Project = batch.Project
+		batchName := batch.Name
+		found.Batch = &batchName
+		members = append(members, listedIssue{Issue: found, ProjectID: p.ID})
+		batch.Total++
+		if found.Status == "done" {
+			batch.Done++
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return Batch{}, 0, nil, err
 	}
-	return issues, nil
+	if !foundBatch {
+		return Batch{}, 0, nil, ErrBatchNotFound
+	}
+	return batch, batchID, members, nil
 }
 
-// remainingBatchMembers is the same set countRemainingBatchMembers counts: the
-// members the derivation never placed. showBatch reads it once, when the wave
-// loop stalls, and they become the waiting group.
-func remainingBatchMembers(q rowQuerier, p Project, batchID int64, includeDone bool) ([]Issue, error) {
-	statusFilter := "issues.status != 'done'"
-	if includeDone {
-		statusFilter = ""
-	}
-	return queryBatchIssues(q, p, batchID, batchMemberQuery(statusFilter))
+type batchGraphIssue struct {
+	Status   string
+	Priority string
+	BatchID  sql.NullInt64
 }
 
-func findBatchBlockedByCycle(q rowQuerier, batchID int64, includeDone bool) ([]string, error) {
-	statusFilter := `
-  AND source.status != 'done'
-  AND target.status != 'done'`
-	if includeDone {
-		statusFilter = ""
+type batchIssueGraph struct {
+	issues        map[string]batchGraphIssue
+	blockedBy     map[string][]string
+	conflictsWith map[string][]string
+}
+
+// loadBatchIssueRelations adapts the aggregate list relation loader to the
+// Batch graph. It hydrates all member relations in two queries and carries the
+// status and Batch membership of external blockers/conflict partners needed by
+// the client-side readiness rules.
+func loadBatchIssueRelations(q rowQuerier, projectID, batchID int64, members []listedIssue) (batchIssueGraph, error) {
+	graph := batchIssueGraph{
+		issues:        make(map[string]batchGraphIssue),
+		blockedBy:     make(map[string][]string),
+		conflictsWith: make(map[string][]string),
 	}
-	rows, err := q.Query(`
-SELECT source.id, target.id
+	if len(members) == 0 {
+		return graph, nil
+	}
+
+	memberIndexes := make(map[string]int, len(members))
+	for i := range members {
+		memberIndexes[members[i].ID] = i
+		graph.issues[members[i].ID] = batchGraphIssue{
+			Status:   members[i].Status,
+			Priority: members[i].Priority,
+			BatchID:  sql.NullInt64{Int64: batchID, Valid: true},
+		}
+	}
+
+	if err := func() error {
+		rows, err := q.Query(`
+SELECT issue_labels.issue_id, issue_labels.label
+FROM issue_labels
+JOIN issues ON issues.project_id = issue_labels.project_id AND issues.id = issue_labels.issue_id
+WHERE issue_labels.project_id = ? AND issues.batch_id = ?
+ORDER BY issue_labels.issue_id, issue_labels.label`, projectID, batchID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var issueID, label string
+			if err := rows.Scan(&issueID, &label); err != nil {
+				return err
+			}
+			if i, ok := memberIndexes[issueID]; ok {
+				members[i].Labels = append(members[i].Labels, label)
+			}
+		}
+		return rows.Err()
+	}(); err != nil {
+		return batchIssueGraph{}, err
+	}
+
+	if err := func() error {
+		rows, err := q.Query(`
+WITH batch_members AS (
+  SELECT id
+  FROM issues
+  WHERE project_id = ? AND batch_id = ?
+),
+conflict_partners AS (
+  SELECT CASE
+    WHEN source_id IN (SELECT id FROM batch_members) THEN target_id
+    ELSE source_id
+  END AS id
+  FROM issue_links
+  WHERE project_id = ?
+    AND kind = 'conflicts_with'
+    AND (
+      source_id IN (SELECT id FROM batch_members)
+      OR target_id IN (SELECT id FROM batch_members)
+    )
+)
+SELECT source.id, source.status, source.priority, source.batch_id,
+       target.id, target.status, target.priority, target.batch_id,
+       issue_links.kind
 FROM issue_links
 JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
 JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
-WHERE issue_links.kind = 'blocked_by'
-  AND source.batch_id = ?
-  AND target.batch_id = ?
-`+statusFilter+`
-  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = source.id)
-  AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = target.id)
-ORDER BY source.id, target.id`, batchID, batchID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	graph := map[string][]string{}
-	nodes := map[string]struct{}{}
-	for rows.Next() {
-		var source, target string
-		if err := rows.Scan(&source, &target); err != nil {
-			return nil, err
+WHERE issue_links.project_id = ?
+  AND (
+    source.id IN (SELECT id FROM batch_members)
+    OR (
+      issue_links.kind IN ('relates_to', 'conflicts_with')
+      AND target.id IN (SELECT id FROM batch_members)
+    )
+    OR (
+      issue_links.kind = 'blocked_by'
+      AND source.id IN (SELECT id FROM conflict_partners)
+    )
+  )
+ORDER BY source.id, target.id, issue_links.kind`,
+			projectID, batchID, projectID, projectID)
+		if err != nil {
+			return err
 		}
-		graph[source] = append(graph[source], target)
-		nodes[source] = struct{}{}
-		nodes[target] = struct{}{}
+		defer rows.Close()
+
+		for rows.Next() {
+			var sourceID, targetID, kind string
+			var source, target batchGraphIssue
+			if err := rows.Scan(
+				&sourceID, &source.Status, &source.Priority, &source.BatchID,
+				&targetID, &target.Status, &target.Priority, &target.BatchID,
+				&kind,
+			); err != nil {
+				return err
+			}
+			graph.issues[sourceID] = source
+			graph.issues[targetID] = target
+
+			sourceIndex, sourceIsMember := memberIndexes[sourceID]
+			targetIndex, targetIsMember := memberIndexes[targetID]
+			switch kind {
+			case "blocked_by":
+				graph.blockedBy[sourceID] = append(graph.blockedBy[sourceID], targetID)
+				if sourceIsMember {
+					members[sourceIndex].BlockedBy = append(members[sourceIndex].BlockedBy, targetID)
+				}
+			case "relates_to":
+				if sourceIsMember {
+					members[sourceIndex].RelatesTo = append(members[sourceIndex].RelatesTo, targetID)
+				}
+				if targetIsMember {
+					members[targetIndex].RelatesTo = append(members[targetIndex].RelatesTo, sourceID)
+				}
+			case "conflicts_with":
+				graph.conflictsWith[sourceID] = append(graph.conflictsWith[sourceID], targetID)
+				graph.conflictsWith[targetID] = append(graph.conflictsWith[targetID], sourceID)
+				if sourceIsMember {
+					members[sourceIndex].ConflictsWith = append(members[sourceIndex].ConflictsWith, targetID)
+				}
+				if targetIsMember {
+					members[targetIndex].ConflictsWith = append(members[targetIndex].ConflictsWith, sourceID)
+				}
+			}
+		}
+		return rows.Err()
+	}(); err != nil {
+		return batchIssueGraph{}, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+
+	for i := range members {
+		members[i].BlockedBy = sortIssueIDs(members[i].BlockedBy)
+		members[i].RelatesTo = sortIssueIDs(members[i].RelatesTo)
+		members[i].ConflictsWith = sortIssueIDs(members[i].ConflictsWith)
+	}
+	for id := range graph.blockedBy {
+		sort.Strings(graph.blockedBy[id])
+	}
+	return graph, nil
+}
+
+func deriveBatchWaves(batchID int64, members []listedIssue, graph batchIssueGraph, opts ShowBatchOptions) ([]BatchWave, []Issue, error) {
+	remaining := make(map[string]bool, len(members))
+	for _, member := range members {
+		if opts.IncludeDone || member.Status != "done" {
+			remaining[member.ID] = true
+		}
+	}
+
+	placed := make(map[string]bool, len(remaining))
+	waves := []BatchWave{}
+	for len(remaining) > 0 {
+		issues := []Issue{}
+		for _, member := range members {
+			if remaining[member.ID] && batchIssueReady(member.ID, batchID, placed, graph, opts.IncludeDone) {
+				issues = append(issues, member.Issue)
+			}
+		}
+		if len(issues) == 0 {
+			cycle := findBatchBlockedByCycle(remaining, graph)
+			if len(cycle) > 0 {
+				return nil, nil, &BatchCycleError{Issues: cycle}
+			}
+			waiting := make([]Issue, 0, len(remaining))
+			for _, member := range members {
+				if remaining[member.ID] {
+					waiting = append(waiting, member.Issue)
+				}
+			}
+			return waves, waiting, nil
+		}
+
+		waves = append(waves, BatchWave{
+			Wave:   len(waves) + 1,
+			Done:   batchWaveDone(issues),
+			Issues: issues,
+		})
+		for _, issue := range issues {
+			delete(remaining, issue.ID)
+			placed[issue.ID] = true
+		}
+	}
+	return waves, []Issue{}, nil
+}
+
+func batchIssueReady(id string, batchID int64, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
+	if !batchIssueOtherwiseReady(id, batchID, placed, graph, includeDone) {
+		return false
+	}
+	for _, partnerID := range graph.conflictsWith[id] {
+		partner := graph.issues[partnerID]
+		if (partner.Status == "in_progress" || partner.Status == "in_review") &&
+			!batchIssueDone(partnerID, batchID, placed, graph, includeDone) {
+			return false
+		}
+		if batchIssueOtherwiseReady(partnerID, batchID, placed, graph, includeDone) &&
+			batchIssueBeats(partnerID, id, graph) {
+			return false
+		}
+	}
+	return true
+}
+
+func batchIssueOtherwiseReady(id string, batchID int64, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
+	issue := graph.issues[id]
+	if includeDone {
+		if issue.BatchID.Valid && issue.BatchID.Int64 == batchID {
+			if placed[id] {
+				return false
+			}
+		} else if issue.Status == "done" {
+			return false
+		}
+	} else if issue.Status == "done" {
+		return false
+	}
+	if batchIssueDone(id, batchID, placed, graph, includeDone) {
+		return false
+	}
+	for _, blockerID := range graph.blockedBy[id] {
+		if !batchIssueDone(blockerID, batchID, placed, graph, includeDone) {
+			return false
+		}
+	}
+	return true
+}
+
+func batchIssueDone(id string, batchID int64, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
+	issue := graph.issues[id]
+	if includeDone {
+		if issue.BatchID.Valid && issue.BatchID.Int64 == batchID {
+			return placed[id]
+		}
+		return issue.Status == "done"
+	}
+	return issue.Status == "done" || placed[id]
+}
+
+func batchIssueBeats(leftID, rightID string, graph batchIssueGraph) bool {
+	leftRank := batchPriorityRank(graph.issues[leftID].Priority)
+	rightRank := batchPriorityRank(graph.issues[rightID].Priority)
+	if leftRank != rightRank {
+		return leftRank < rightRank
+	}
+	return issueIDLess(leftID, rightID)
+}
+
+func batchPriorityRank(priority string) int {
+	for i, candidate := range Priorities {
+		if candidate == priority {
+			return i + 1
+		}
+	}
+	return 99
+}
+
+func findBatchBlockedByCycle(remaining map[string]bool, graph batchIssueGraph) []string {
+	cycleGraph := make(map[string][]string)
+	nodes := make(map[string]struct{})
+	for sourceID := range remaining {
+		for _, targetID := range graph.blockedBy[sourceID] {
+			if !remaining[targetID] {
+				continue
+			}
+			cycleGraph[sourceID] = append(cycleGraph[sourceID], targetID)
+			nodes[sourceID] = struct{}{}
+			nodes[targetID] = struct{}{}
+		}
+		sort.Strings(cycleGraph[sourceID])
 	}
 
 	visited := map[string]bool{}
@@ -1393,11 +1560,10 @@ ORDER BY source.id, target.id`, batchID, batchID)
 		visited[id] = true
 		inStack[id] = len(stack)
 		stack = append(stack, id)
-		for _, next := range graph[id] {
+		for _, next := range cycleGraph[id] {
 			if index, ok := inStack[next]; ok {
 				cycle := append([]string{}, stack[index:]...)
-				sortIssueIDs(cycle)
-				return cycle
+				return sortIssueIDs(cycle)
 			}
 			if !visited[next] {
 				if cycle := visit(next); len(cycle) > 0 {
@@ -1418,11 +1584,11 @@ ORDER BY source.id, target.id`, batchID, batchID)
 	for _, id := range ids {
 		if !visited[id] {
 			if cycle := visit(id); len(cycle) > 0 {
-				return cycle, nil
+				return cycle
 			}
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 func updateProjectRoot(db *sql.DB, p Project) (Project, error) {
@@ -2255,10 +2421,6 @@ func tableDonePredicate(doneTable string) donePredicate {
 	return func(issueAlias string) string { return doneStatusWhereSQL(issueAlias, doneTable) }
 }
 
-func batchDonePredicate(batchID int64) donePredicate {
-	return func(issueAlias string) string { return historicalBatchDoneStatusWhereSQL(issueAlias, batchID) }
-}
-
 func readyFrontierWhereSQLWithOptions(issueAlias, statusWhere string, isDone donePredicate) string {
 	return otherwiseReadyWhereSQL(issueAlias, statusWhere, isDone) + `
 AND NOT EXISTS (
@@ -2287,18 +2449,6 @@ WHERE ready_conflict.project_id = ` + issueAlias + `.project_id
   AND ` + otherwiseReadyWhereSQL("ready_partner", strings.ReplaceAll(statusWhere, issueAlias+".", "ready_partner."), isDone) + `
   AND ` + readyConflictPartnerBeatsSQL("ready_partner", issueAlias) + `
 )`
-}
-
-func historicalBatchCandidateWhereSQL(issueAlias string, batchID int64) string {
-	id := strconv.FormatInt(batchID, 10)
-	return `((` + issueAlias + `.batch_id = ` + id + ` AND NOT EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = ` + issueAlias + `.id))
-  OR (COALESCE(` + issueAlias + `.batch_id, -1) != ` + id + ` AND ` + issueAlias + `.status != 'done'))`
-}
-
-func historicalBatchDoneStatusWhereSQL(issueAlias string, batchID int64) string {
-	id := strconv.FormatInt(batchID, 10)
-	return `((` + issueAlias + `.batch_id = ` + id + ` AND EXISTS (SELECT 1 FROM ito_wave_done WHERE ito_wave_done.issue_id = ` + issueAlias + `.id))
-  OR (COALESCE(` + issueAlias + `.batch_id, -1) != ` + id + ` AND ` + issueAlias + `.status = 'done'))`
 }
 
 func otherwiseReadyWhereSQL(issueAlias, statusWhere string, isDone donePredicate) string {

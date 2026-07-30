@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1074,6 +1075,126 @@ func TestShowBatchReportsBlockedByCycle(t *testing.T) {
 	}
 	if !slices.Equal(cycle.Issues, []string{first.ID, second.ID, third.ID}) {
 		t.Fatalf("expected cycle issues to name every member, got %#v", cycle.Issues)
+	}
+}
+
+func TestShowBatchClientDerivationHonoursDoneAndOpenExternalBlockersInBothModes(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("external-modes-app", "EMA", filepath.Join(t.TempDir(), "external-modes"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	ready := createStoreIssueInBatch(t, st, project, "Done external blocker", "todo", "high", "release")
+	waiting := createStoreIssueInBatch(t, st, project, "Open external blocker", "todo", "medium", "release")
+	doneExternal := createStoreIssue(t, st, project, "Done outside", "done", "urgent")
+	openExternal := createStoreIssue(t, st, project, "Open outside", "todo", "urgent")
+	addStoreLink(t, st, project, ready.ID, "blocked_by", doneExternal.ID)
+	addStoreLink(t, st, project, waiting.ID, "blocked_by", openExternal.ID)
+
+	for _, includeDone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("include_done_%t", includeDone), func(t *testing.T) {
+			plan, err := st.ShowBatchWithOptions(project, "release", ShowBatchOptions{IncludeDone: includeDone})
+			if err != nil {
+				t.Fatalf("show batch: %v", err)
+			}
+			if len(plan.Waves) != 1 || !slices.Equal(storeIssueIDs(plan.Waves[0].Issues), []string{ready.ID}) {
+				t.Fatalf("waves = %#v, want only %s", plan.Waves, ready.ID)
+			}
+			if got := storeIssueIDs(plan.Waiting); !slices.Equal(got, []string{waiting.ID}) {
+				t.Fatalf("waiting = %v, want %s", got, waiting.ID)
+			}
+			if got := plan.Waves[0].Issues[0].BlockedBy; !slices.Equal(got, []string{doneExternal.ID}) {
+				t.Fatalf("ready member blocked_by = %v, want %s", got, doneExternal.ID)
+			}
+			if got := plan.Waiting[0].BlockedBy; !slices.Equal(got, []string{openExternal.ID}) {
+				t.Fatalf("waiting member blocked_by = %v, want %s", got, openExternal.ID)
+			}
+		})
+	}
+}
+
+func TestShowBatchClientDerivationCycleDependsOnIncludeDone(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("historical-cycle-app", "HCA", filepath.Join(t.TempDir(), "historical-cycle"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	done := createStoreIssueInBatch(t, st, project, "Done half", "done", "medium", "release")
+	open := createStoreIssueInBatch(t, st, project, "Open half", "todo", "medium", "release")
+	addStoreLink(t, st, project, done.ID, "blocked_by", open.ID)
+	addStoreLink(t, st, project, open.ID, "blocked_by", done.ID)
+
+	plan, err := st.ShowBatch(project, "release")
+	if err != nil {
+		t.Fatalf("show batch without done: %v", err)
+	}
+	if len(plan.Waves) != 1 || !slices.Equal(storeIssueIDs(plan.Waves[0].Issues), []string{open.ID}) {
+		t.Fatalf("default waves = %#v, want only open member", plan.Waves)
+	}
+
+	_, err = st.ShowBatchWithOptions(project, "release", ShowBatchOptions{IncludeDone: true})
+	var cycle *BatchCycleError
+	if !errors.As(err, &cycle) {
+		t.Fatalf("expected historical BatchCycleError, got %v", err)
+	}
+	if !slices.Equal(cycle.Issues, []string{done.ID, open.ID}) {
+		t.Fatalf("cycle issues = %v, want %s and %s", cycle.Issues, done.ID, open.ID)
+	}
+}
+
+func TestShowBatchClientDerivationPreservesSQLOrderingTies(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	project, err := st.CreateProject("ordering-app", "ORD", filepath.Join(t.TempDir(), "ordering"))
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "release"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	for range 11 {
+		createStoreIssueInBatch(t, st, project, "Ordering tie", "todo", "medium", "release")
+	}
+	if _, err := db.Exec(`UPDATE issues SET updated = ? WHERE project_id = ?`, "2026-07-30T12:00:00Z", project.ID); err != nil {
+		t.Fatalf("force ordering tie: %v", err)
+	}
+
+	plan, err := st.ShowBatch(project, "release")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 1 {
+		t.Fatalf("waves = %d, want 1", len(plan.Waves))
+	}
+	want := []string{
+		"ORD-1", "ORD-10", "ORD-11", "ORD-2", "ORD-3", "ORD-4",
+		"ORD-5", "ORD-6", "ORD-7", "ORD-8", "ORD-9",
+	}
+	if got := storeIssueIDs(plan.Waves[0].Issues); !slices.Equal(got, want) {
+		t.Fatalf("tied wave order = %v, want %v", got, want)
 	}
 }
 

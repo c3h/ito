@@ -2092,6 +2092,14 @@ func printCreatedBatch(b batch, jsonMode bool) int {
 func batchListRows(st *itostore.Store, p project, batches []batch) ([]batchListRow, error) {
 	rows := make([]batchListRow, 0, len(batches))
 	for _, b := range batches {
+		// ShowBatch hides completed members by default, so a fully done Batch
+		// always has zero visible Waves. Preserve that output without paying
+		// three aggregate reads for history the list does not display.
+		if b.Total > 0 && b.Done == b.Total {
+			waves := 0
+			rows = append(rows, batchListRow{Batch: b, Waves: &waves})
+			continue
+		}
 		plan, err := st.ShowBatch(p, b.Name)
 		if err != nil {
 			var cycle *itostore.BatchCycleError
