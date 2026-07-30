@@ -284,7 +284,7 @@ func openAtPath(home string) (*sql.DB, error) {
 	}
 	dsn := fmt.Sprintf(
 		"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)",
-		filepath.Join(home, "ito.db"),
+		itoconfig.LocalDBPath(home),
 	)
 	return sql.Open("sqlite", dsn)
 }
@@ -526,6 +526,11 @@ func OpenDefault() (*sql.DB, error) {
 
 type openDBFunc func(driverName, dataSourceName string) (*sql.DB, error)
 
+// CloudDSN is the single place the libsql credential encoding lives.
+func CloudDSN(url, token string) string {
+	return url + "?authToken=" + token
+}
+
 func openBackend(cfg itoconfig.Config, home string, openDB openDBFunc) (*sql.DB, error) {
 	switch cfg.Backend {
 	case itoconfig.BackendLocal:
@@ -534,7 +539,7 @@ func openBackend(cfg itoconfig.Config, home string, openDB openDBFunc) (*sql.DB,
 		if cfg.Cloud == nil || cfg.Cloud.URL == "" || cfg.Cloud.Token == "" {
 			return nil, errors.New("cloud backend requires url and token")
 		}
-		db, err := openDB("libsql", cfg.Cloud.URL+"?authToken="+cfg.Cloud.Token)
+		db, err := openDB("libsql", CloudDSN(cfg.Cloud.URL, cfg.Cloud.Token))
 		if err != nil {
 			return nil, fmt.Errorf("open cloud database %q: %w", cfg.Cloud.URL, err)
 		}

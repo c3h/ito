@@ -28,7 +28,7 @@ var migrationTables = []migrationTable{
 type cloudDatabaseOpener func(url, token string) (*sql.DB, error)
 
 func openCloudDatabase(url, token string) (*sql.DB, error) {
-	return sql.Open("libsql", url+"?authToken="+token)
+	return sql.Open("libsql", itostore.CloudDSN(url, token))
 }
 
 func migrateCloud(url, token string, force bool, openCloud cloudDatabaseOpener) error {
@@ -79,9 +79,6 @@ func migrateLocal(force bool, openCloud cloudDatabaseOpener) error {
 	if cfg.Backend == itoconfig.BackendLocal {
 		return fmt.Errorf("the active backend is already local; run 'ito migrate cloud --url <url> --token <token>' first")
 	}
-	if cfg.Cloud == nil || cfg.Cloud.URL == "" || cfg.Cloud.Token == "" {
-		return fmt.Errorf("the cloud backend config is missing its url or token; fix ~/.ito/config.json or start over with 'ito migrate cloud'")
-	}
 
 	home, err := itoconfig.HomeDir()
 	if err != nil {
@@ -93,20 +90,17 @@ func migrateLocal(force bool, openCloud cloudDatabaseOpener) error {
 	}
 	defer src.Close()
 
-	dst, err := sql.Open("sqlite", itoconfig.LocalDBPath(home))
+	dst, err := itostore.Open(home)
 	if err != nil {
 		return fmt.Errorf("could not open the local destination: %s", redactSecret(err.Error(), cfg.Cloud.Token))
 	}
 	defer dst.Close()
 
-	if err := itostore.Migrate(dst); err != nil {
-		return fmt.Errorf("could not initialize the local destination: %s", redactSecret(err.Error(), cfg.Cloud.Token))
-	}
 	if err := copyDatabase(src, dst, force); err != nil {
 		return fmt.Errorf("could not copy the cloud database to local: %s", redactSecret(err.Error(), cfg.Cloud.Token))
 	}
 	if err := itoconfig.Write(itoconfig.Config{Backend: itoconfig.BackendLocal}); err != nil {
-		return fmt.Errorf("could not activate the local backend: %s", redactSecret(err.Error(), cfg.Cloud.Token))
+		return fmt.Errorf("could not activate the local backend: %w", err)
 	}
 	return nil
 }
@@ -115,22 +109,21 @@ func copyDatabase(src, dst *sql.DB, force bool) error {
 	if err := ensureDestinationReady(dst, force); err != nil {
 		return err
 	}
+	copied := make(map[string]int64, len(migrationTables))
 	for _, table := range migrationTables {
-		if err := copyTable(src, dst, table); err != nil {
+		count, err := copyTable(src, dst, table)
+		if err != nil {
 			return err
 		}
+		copied[table.name] = count
 	}
 	for _, table := range migrationTables {
-		srcCount, err := tableRowCount(src, table.name)
-		if err != nil {
-			return fmt.Errorf("could not count source table %q: %w", table.name, err)
-		}
 		dstCount, err := tableRowCount(dst, table.name)
 		if err != nil {
 			return fmt.Errorf("could not count destination table %q: %w", table.name, err)
 		}
-		if srcCount != dstCount {
-			return fmt.Errorf("row count mismatch for table %q: source has %d rows and destination has %d", table.name, srcCount, dstCount)
+		if copied[table.name] != dstCount {
+			return fmt.Errorf("row count mismatch for table %q: source has %d rows and destination has %d", table.name, copied[table.name], dstCount)
 		}
 	}
 	if _, err := dst.Exec(`INSERT INTO issues_fts(issues_fts) VALUES (?)`, "rebuild"); err != nil {
@@ -140,94 +133,98 @@ func copyDatabase(src, dst *sql.DB, force bool) error {
 }
 
 func ensureDestinationReady(dst *sql.DB, force bool) error {
+	if force {
+		for i := len(migrationTables) - 1; i >= 0; i-- {
+			table := migrationTables[i]
+			if _, err := dst.Exec(`DELETE FROM ` + table.name); err != nil {
+				return fmt.Errorf("could not clear destination table %q: %w", table.name, err)
+			}
+		}
+		return nil
+	}
 	for _, table := range migrationTables {
 		count, err := tableRowCount(dst, table.name)
 		if err != nil {
 			return fmt.Errorf("could not inspect destination table %q: %w", table.name, err)
 		}
-		if count > 0 && !force {
+		if count > 0 {
 			return fmt.Errorf("destination table %q contains %d rows; rerun with --force to replace the destination", table.name, count)
-		}
-	}
-	if !force {
-		return nil
-	}
-	for i := len(migrationTables) - 1; i >= 0; i-- {
-		table := migrationTables[i]
-		if _, err := dst.Exec(`DELETE FROM ` + table.name); err != nil {
-			return fmt.Errorf("could not clear destination table %q: %w", table.name, err)
 		}
 	}
 	return nil
 }
 
-func copyTable(src, dst *sql.DB, table migrationTable) error {
-	columnList := strings.Join(table.columns, ", ")
-	for offset := 0; ; offset += migrationBatchSize {
-		query := fmt.Sprintf(
-			"SELECT %s FROM %s ORDER BY %s LIMIT ? OFFSET ?",
-			columnList,
-			table.name,
-			table.orderBy,
-		)
-		rows, err := src.Query(query, migrationBatchSize, offset)
-		if err != nil {
-			return fmt.Errorf("could not read source table %q: %w", table.name, err)
-		}
-		batch, err := scanMigrationBatch(rows, len(table.columns))
-		rows.Close()
-		if err != nil {
-			return fmt.Errorf("could not read source table %q: %w", table.name, err)
-		}
+// copyTable streams the source table in one query, inserting client-side
+// batches as it scans (OFFSET pagination would re-scan copied rows each page).
+// It returns the number of rows copied.
+func copyTable(src, dst *sql.DB, table migrationTable) (int64, error) {
+	query := fmt.Sprintf(
+		"SELECT %s FROM %s ORDER BY %s",
+		strings.Join(table.columns, ", "),
+		table.name,
+		table.orderBy,
+	)
+	rows, err := src.Query(query)
+	if err != nil {
+		return 0, fmt.Errorf("could not read source table %q: %w", table.name, err)
+	}
+	defer rows.Close()
+
+	var copied int64
+	batch := make([][]any, 0, migrationBatchSize)
+	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
 		if err := insertMigrationBatch(dst, table, batch); err != nil {
 			return fmt.Errorf("could not write destination table %q: %w", table.name, err)
 		}
-		if len(batch) < migrationBatchSize {
-			return nil
-		}
+		copied += int64(len(batch))
+		batch = batch[:0]
+		return nil
 	}
-}
-
-func scanMigrationBatch(rows *sql.Rows, columnCount int) ([][]any, error) {
-	var batch [][]any
 	for rows.Next() {
-		values := make([]any, columnCount)
-		destinations := make([]any, columnCount)
+		values := make([]any, len(table.columns))
+		destinations := make([]any, len(table.columns))
 		for i := range values {
 			destinations[i] = &values[i]
 		}
 		if err := rows.Scan(destinations...); err != nil {
-			return nil, err
+			return 0, fmt.Errorf("could not read source table %q: %w", table.name, err)
 		}
+		// Copy []byte values: the driver may reuse the buffer on the next scan.
 		for i, value := range values {
 			if bytes, ok := value.([]byte); ok {
 				values[i] = append([]byte(nil), bytes...)
 			}
 		}
 		batch = append(batch, values)
+		if len(batch) == migrationBatchSize {
+			if err := flush(); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return 0, fmt.Errorf("could not read source table %q: %w", table.name, err)
 	}
-	return batch, nil
+	if err := flush(); err != nil {
+		return 0, err
+	}
+	return copied, nil
 }
 
 func insertMigrationBatch(dst *sql.DB, table migrationTable, batch [][]any) error {
 	rowPlaceholders := "(" + strings.TrimSuffix(strings.Repeat("?, ", len(table.columns)), ", ") + ")"
-	valueGroups := make([]string, len(batch))
 	args := make([]any, 0, len(batch)*len(table.columns))
-	for i, row := range batch {
-		valueGroups[i] = rowPlaceholders
+	for _, row := range batch {
 		args = append(args, row...)
 	}
 	query := fmt.Sprintf(
 		"INSERT INTO %s (%s) VALUES %s",
 		table.name,
 		strings.Join(table.columns, ", "),
-		strings.Join(valueGroups, ", "),
+		strings.TrimSuffix(strings.Repeat(rowPlaceholders+", ", len(batch)), ", "),
 	)
 	_, err := dst.Exec(query, args...)
 	return err

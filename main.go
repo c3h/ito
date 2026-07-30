@@ -483,21 +483,7 @@ func runMigrateCloud(args []string) int {
 	if err := migrateCloud(url, token, force, openCloudDatabase); err != nil {
 		return fail(jsonMode, exitGeneric, err.Error(), "check the local database and cloud credentials, then retry.")
 	}
-
-	home, err := itoconfig.HomeDir()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("the migration succeeded but the ito home could not be resolved: %v", err), "run 'ito config' to inspect the active backend.")
-	}
-	display := configDisplay{
-		Backend:     itoconfig.BackendCloud,
-		LocalDBPath: itoconfig.LocalDBPath(home),
-		RemoteURL:   url,
-	}
-	if jsonMode {
-		return printJSON(display, "migration result")
-	}
-	fmt.Printf("migrated to cloud at %s.\n", url)
-	return 0
+	return reportMigration(jsonMode, itoconfig.BackendCloud, url)
 }
 
 func runMigrateLocal(args []string) int {
@@ -522,19 +508,27 @@ func runMigrateLocal(args []string) int {
 	if err := migrateLocal(force, openCloudDatabase); err != nil {
 		return fail(jsonMode, exitGeneric, err.Error(), "check the cloud credentials and local database; the retained local database usually requires --force.")
 	}
+	return reportMigration(jsonMode, itoconfig.BackendLocal, "")
+}
 
+func reportMigration(jsonMode bool, backend itoconfig.Backend, remoteURL string) int {
 	home, err := itoconfig.HomeDir()
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("the migration succeeded but the ito home could not be resolved: %v", err), "run 'ito config' to inspect the active backend.")
 	}
 	display := configDisplay{
-		Backend:     itoconfig.BackendLocal,
+		Backend:     backend,
 		LocalDBPath: itoconfig.LocalDBPath(home),
+		RemoteURL:   remoteURL,
 	}
 	if jsonMode {
 		return printJSON(display, "migration result")
 	}
-	fmt.Printf("migrated to local at %s.\n", display.LocalDBPath)
+	if backend == itoconfig.BackendCloud {
+		fmt.Printf("migrated to cloud at %s.\n", remoteURL)
+	} else {
+		fmt.Printf("migrated to local at %s.\n", display.LocalDBPath)
+	}
 	return 0
 }
 
