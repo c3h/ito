@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	itoconfig "github.com/c3h/ito/internal/config"
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -512,11 +513,39 @@ func (s *Store) ResolveProject(rootPath string, inGit bool, explicitName string)
 }
 
 func OpenDefault() (*sql.DB, error) {
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return nil, err
+	}
 	home, err := itoconfig.HomeDir()
 	if err != nil {
 		return nil, err
 	}
-	return openAtPath(home)
+	return openBackend(cfg, home, sql.Open)
+}
+
+type openDBFunc func(driverName, dataSourceName string) (*sql.DB, error)
+
+func openBackend(cfg itoconfig.Config, home string, openDB openDBFunc) (*sql.DB, error) {
+	switch cfg.Backend {
+	case itoconfig.BackendLocal:
+		return openAtPath(home)
+	case itoconfig.BackendCloud:
+		if cfg.Cloud == nil || cfg.Cloud.URL == "" || cfg.Cloud.Token == "" {
+			return nil, errors.New("cloud backend requires url and token")
+		}
+		db, err := openDB("libsql", cfg.Cloud.URL+"?authToken="+cfg.Cloud.Token)
+		if err != nil {
+			return nil, fmt.Errorf("open cloud database %q: %w", cfg.Cloud.URL, err)
+		}
+		if err := Migrate(db); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("initialize cloud database %q: %w", cfg.Cloud.URL, err)
+		}
+		return db, nil
+	default:
+		return nil, fmt.Errorf("unsupported backend %q", cfg.Backend)
+	}
 }
 
 func Migrate(db *sql.DB) error {

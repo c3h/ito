@@ -3,12 +3,128 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	itoconfig "github.com/c3h/ito/internal/config"
 	_ "modernc.org/sqlite"
 )
+
+func TestOpenBackendKeepsLocalFileDSN(t *testing.T) {
+	home := t.TempDir()
+	cloudOpened := false
+	db, err := openBackend(
+		itoconfig.Config{Backend: itoconfig.BackendLocal},
+		home,
+		func(string, string) (*sql.DB, error) {
+			cloudOpened = true
+			return nil, errors.New("unexpected cloud open")
+		},
+	)
+	if err != nil {
+		t.Fatalf("open local backend: %v", err)
+	}
+	defer db.Close()
+
+	if cloudOpened {
+		t.Fatal("local backend used cloud opener")
+	}
+	var sequence int
+	var name, path string
+	if err := db.QueryRow(`PRAGMA database_list`).Scan(&sequence, &name, &path); err != nil {
+		t.Fatalf("read local database path: %v", err)
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("resolve local database home: %v", err)
+	}
+	if want := filepath.Join(resolvedHome, "ito.db"); path != want {
+		t.Fatalf("local database path = %q, want %q", path, want)
+	}
+}
+
+func TestOpenBackendCloudUsesLibSQLAndMigrates(t *testing.T) {
+	var driverName, dataSourceName string
+	db, err := openBackend(
+		itoconfig.Config{
+			Backend: itoconfig.BackendCloud,
+			Cloud:   &itoconfig.Cloud{URL: "libsql://example.turso.io", Token: "secret"},
+		},
+		t.TempDir(),
+		func(driver, dsn string) (*sql.DB, error) {
+			driverName = driver
+			dataSourceName = dsn
+			return sql.Open("sqlite", filepath.Join(t.TempDir(), "cloud.db"))
+		},
+	)
+	if err != nil {
+		t.Fatalf("open cloud backend: %v", err)
+	}
+	defer db.Close()
+
+	if driverName != "libsql" {
+		t.Fatalf("cloud driver = %q, want %q", driverName, "libsql")
+	}
+	if want := "libsql://example.turso.io?authToken=secret"; dataSourceName != want {
+		t.Fatalf("cloud DSN = %q, want %q", dataSourceName, want)
+	}
+	for _, localOnly := range []string{"_txlock", "journal_mode", "busy_timeout"} {
+		if strings.Contains(dataSourceName, localOnly) {
+			t.Fatalf("cloud DSN contains local-only setting %q", localOnly)
+		}
+	}
+	assertSchemaVersion(t, db, 3)
+}
+
+func TestOpenBackendCloudRequiresURLAndToken(t *testing.T) {
+	tests := []struct {
+		name  string
+		cloud *itoconfig.Cloud
+	}{
+		{name: "missing cloud config"},
+		{name: "missing URL", cloud: &itoconfig.Cloud{Token: "secret"}},
+		{name: "missing token", cloud: &itoconfig.Cloud{URL: "libsql://example.turso.io"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opened := false
+			_, err := openBackend(
+				itoconfig.Config{Backend: itoconfig.BackendCloud, Cloud: tt.cloud},
+				t.TempDir(),
+				func(string, string) (*sql.DB, error) {
+					opened = true
+					return nil, errors.New("unexpected open")
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), "cloud backend requires url and token") {
+				t.Fatalf("expected missing cloud credentials error, got %v", err)
+			}
+			if opened {
+				t.Fatal("opened cloud database with incomplete credentials")
+			}
+		})
+	}
+}
+
+func TestOpenDefaultRejectsIncompleteCloudConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ITO_HOME", home)
+	if err := os.WriteFile(
+		itoconfig.Path(home),
+		[]byte(`{"backend":"cloud","cloud":{"url":"libsql://example.turso.io"}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenDefault(); err == nil || !strings.Contains(err.Error(), "cloud backend requires url and token") {
+		t.Fatalf("expected incomplete cloud config error, got %v", err)
+	}
+}
 
 func TestMigrateFreshDatabaseReachesBatchSchemaVersion(t *testing.T) {
 	db, err := Open(t.TempDir())
