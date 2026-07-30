@@ -1994,6 +1994,127 @@ ORDER BY 1`, issue.ID, projectID, issue.ID, issue.ID)
 	return nil
 }
 
+type listedIssue struct {
+	Issue
+	ProjectID int64
+}
+
+type issueRelationKey struct {
+	ProjectID int64
+	IssueID   string
+}
+
+// loadListedIssueRelations hydrates every listed Issue with one labels query
+// and one links query. Link rows are distributed by the composite project/Issue
+// key so all-project listings cannot mix relations between Projects.
+func loadListedIssueRelations(q rowQuerier, issues []listedIssue) error {
+	if len(issues) == 0 {
+		return nil
+	}
+
+	issueIndexes := make(map[issueRelationKey]int, len(issues))
+	projectIDs := make([]int64, 0)
+	seenProjects := make(map[int64]struct{})
+	for i := range issues {
+		issues[i].Labels = []string{}
+		issues[i].BlockedBy = []string{}
+		issues[i].RelatesTo = []string{}
+		issues[i].ConflictsWith = []string{}
+
+		issueIndexes[issueRelationKey{ProjectID: issues[i].ProjectID, IssueID: issues[i].ID}] = i
+		if _, seen := seenProjects[issues[i].ProjectID]; !seen {
+			seenProjects[issues[i].ProjectID] = struct{}{}
+			projectIDs = append(projectIDs, issues[i].ProjectID)
+		}
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(projectIDs)), ",")
+	args := make([]any, len(projectIDs))
+	for i, projectID := range projectIDs {
+		args[i] = projectID
+	}
+
+	if err := func() error {
+		rows, err := q.Query(`
+SELECT project_id, issue_id, label
+FROM issue_labels
+WHERE project_id IN (`+placeholders+`)
+ORDER BY project_id, issue_id, label`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var projectID int64
+			var issueID, label string
+			if err := rows.Scan(&projectID, &issueID, &label); err != nil {
+				return err
+			}
+			if i, ok := issueIndexes[issueRelationKey{ProjectID: projectID, IssueID: issueID}]; ok {
+				issues[i].Labels = append(issues[i].Labels, label)
+			}
+		}
+		return rows.Err()
+	}(); err != nil {
+		return err
+	}
+
+	if err := func() error {
+		rows, err := q.Query(`
+SELECT issue_links.project_id, source_id, target_id, kind
+FROM issue_links
+JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
+JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
+WHERE issue_links.project_id IN (`+placeholders+`)
+  AND kind IN ('blocked_by', 'relates_to', 'conflicts_with')`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var projectID int64
+			var sourceID, targetID, kind string
+			if err := rows.Scan(&projectID, &sourceID, &targetID, &kind); err != nil {
+				return err
+			}
+			sourceIndex, sourceListed := issueIndexes[issueRelationKey{ProjectID: projectID, IssueID: sourceID}]
+			targetIndex, targetListed := issueIndexes[issueRelationKey{ProjectID: projectID, IssueID: targetID}]
+			switch kind {
+			case "blocked_by":
+				if sourceListed {
+					issues[sourceIndex].BlockedBy = append(issues[sourceIndex].BlockedBy, targetID)
+				}
+			case "relates_to":
+				if sourceListed {
+					issues[sourceIndex].RelatesTo = append(issues[sourceIndex].RelatesTo, targetID)
+				}
+				if targetListed {
+					issues[targetIndex].RelatesTo = append(issues[targetIndex].RelatesTo, sourceID)
+				}
+			case "conflicts_with":
+				if sourceListed {
+					issues[sourceIndex].ConflictsWith = append(issues[sourceIndex].ConflictsWith, targetID)
+				}
+				if targetListed {
+					issues[targetIndex].ConflictsWith = append(issues[targetIndex].ConflictsWith, sourceID)
+				}
+			}
+		}
+		return rows.Err()
+	}(); err != nil {
+		return err
+	}
+
+	for i := range issues {
+		issues[i].BlockedBy = sortIssueIDs(issues[i].BlockedBy)
+		issues[i].RelatesTo = sortIssueIDs(issues[i].RelatesTo)
+		issues[i].ConflictsWith = sortIssueIDs(issues[i].ConflictsWith)
+	}
+	return nil
+}
+
 func listIssues(db *sql.DB, options ListOptions) ([]Issue, error) {
 	where := []string{}
 	args := []any{}
@@ -2085,13 +2206,9 @@ issues.id ASC`
 	}
 	defer rows.Close()
 
-	type rowIssue struct {
-		Issue
-		ProjectID int64
-	}
-	rowIssues := []rowIssue{}
+	rowIssues := []listedIssue{}
 	for rows.Next() {
-		found := rowIssue{
+		found := listedIssue{
 			Issue: Issue{
 				Labels:        []string{},
 				BlockedBy:     []string{},
@@ -2112,11 +2229,12 @@ issues.id ASC`
 		return nil, err
 	}
 
+	if err := loadListedIssueRelations(db, rowIssues); err != nil {
+		return nil, err
+	}
+
 	issues := make([]Issue, 0, len(rowIssues))
 	for _, rowIssue := range rowIssues {
-		if err := loadIssueRelations(db, rowIssue.ProjectID, &rowIssue.Issue); err != nil {
-			return nil, err
-		}
 		issues = append(issues, rowIssue.Issue)
 	}
 	return issues, nil

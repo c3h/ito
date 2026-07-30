@@ -516,6 +516,84 @@ func TestListIssuesIncludeDoneLiftsTheDefaultFilter(t *testing.T) {
 	}
 }
 
+func TestListIssuesAggregatesRelationsAcrossProjects(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := New(db)
+	firstProject, err := st.CreateProject("first-list-app", "FLA", filepath.Join(t.TempDir(), "first"))
+	if err != nil {
+		t.Fatalf("create first project: %v", err)
+	}
+	secondProject, err := st.CreateProject("second-list-app", "SLA", filepath.Join(t.TempDir(), "second"))
+	if err != nil {
+		t.Fatalf("create second project: %v", err)
+	}
+
+	firstIssues := make([]Issue, 10)
+	for i := range firstIssues {
+		labels := []string(nil)
+		if i == 0 {
+			labels = []string{"research", "bug", "docs"}
+		}
+		firstIssues[i], err = st.CreateIssue(firstProject, "First project issue", "todo", "medium", labels, "")
+		if err != nil {
+			t.Fatalf("create first-project issue %d: %v", i+1, err)
+		}
+	}
+	secondIssues := make([]Issue, 3)
+	for i := range secondIssues {
+		labels := []string(nil)
+		if i == 1 {
+			labels = []string{"tests", "feature"}
+		}
+		secondIssues[i], err = st.CreateIssue(secondProject, "Second project issue", "todo", "medium", labels, "")
+		if err != nil {
+			t.Fatalf("create second-project issue %d: %v", i+1, err)
+		}
+	}
+
+	addStoreLink(t, st, firstProject, firstIssues[0].ID, "blocked_by", firstIssues[9].ID)
+	addStoreLink(t, st, firstProject, firstIssues[0].ID, "blocked_by", firstIssues[1].ID)
+	addStoreLink(t, st, firstProject, firstIssues[1].ID, "relates_to", firstIssues[2].ID)
+	addStoreLink(t, st, firstProject, firstIssues[0].ID, "conflicts_with", firstIssues[2].ID)
+	addStoreLink(t, st, secondProject, secondIssues[2].ID, "blocked_by", secondIssues[0].ID)
+	addStoreLink(t, st, secondProject, secondIssues[2].ID, "relates_to", secondIssues[1].ID)
+	addStoreLink(t, st, secondProject, secondIssues[1].ID, "conflicts_with", secondIssues[0].ID)
+
+	aggregated, err := st.ListIssues(ListOptions{AllProjects: true, IncludeDone: true})
+	if err != nil {
+		t.Fatalf("list all-project Issues: %v", err)
+	}
+	if len(aggregated) != len(firstIssues)+len(secondIssues) {
+		t.Fatalf("listed %d Issues, want %d", len(aggregated), len(firstIssues)+len(secondIssues))
+	}
+
+	projectIDs := map[string]int64{
+		firstProject.Name:  firstProject.ID,
+		secondProject.Name: secondProject.ID,
+	}
+	for _, actual := range aggregated {
+		expected := Issue{ID: actual.ID}
+		if err := loadIssueRelations(db, projectIDs[actual.Project], &expected); err != nil {
+			t.Fatalf("load per-Issue relations for %s: %v", actual.ID, err)
+		}
+		if !slices.Equal(actual.Labels, expected.Labels) ||
+			!slices.Equal(actual.BlockedBy, expected.BlockedBy) ||
+			!slices.Equal(actual.RelatesTo, expected.RelatesTo) ||
+			!slices.Equal(actual.ConflictsWith, expected.ConflictsWith) {
+			t.Fatalf("aggregate relations for %s = labels %#v, blocked-by %#v, relates-to %#v, conflicts-with %#v; per-Issue = labels %#v, blocked-by %#v, relates-to %#v, conflicts-with %#v",
+				actual.ID,
+				actual.Labels, actual.BlockedBy, actual.RelatesTo, actual.ConflictsWith,
+				expected.Labels, expected.BlockedBy, expected.RelatesTo, expected.ConflictsWith,
+			)
+		}
+	}
+}
+
 func TestListIssuesReadyHonoursConflictsWith(t *testing.T) {
 	tests := []struct {
 		name  string
