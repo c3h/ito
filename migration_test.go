@@ -220,6 +220,148 @@ func TestMigrateCloudCommandValidationAndBackendGuard(t *testing.T) {
 	}
 }
 
+func TestMigrateLocalRefusesAlreadyLocal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ITO_HOME", home)
+	if err := itoconfig.Write(itoconfig.Config{Backend: itoconfig.BackendLocal}); err != nil {
+		t.Fatal(err)
+	}
+
+	openedCloud := false
+	err := migrateLocal(false, func(string, string) (*sql.DB, error) {
+		openedCloud = true
+		return nil, fmt.Errorf("cloud opener should not be called")
+	})
+	if err == nil || !strings.Contains(err.Error(), "active backend is already local") ||
+		!strings.Contains(err.Error(), "ito migrate cloud") {
+		t.Fatalf("expected actionable already-local error, got %v", err)
+	}
+	if openedCloud {
+		t.Fatal("opened the cloud database while the backend was already local")
+	}
+}
+
+func TestMigrateLocalForceReplacesDestinationAndDropsCloudCredentials(t *testing.T) {
+	home := t.TempDir()
+	srcPath := filepath.Join(t.TempDir(), "cloud.db")
+	t.Setenv("ITO_HOME", home)
+
+	src := openMigrationTestDatabase(t, srcPath)
+	seedMigrationTestDatabase(t, src, "SRC", 3)
+	src.Close()
+	dst := openMigrationTestDatabase(t, itoconfig.LocalDBPath(home))
+	seedMigrationTestDatabase(t, dst, "OLD", 2)
+	dst.Close()
+	if err := itoconfig.Write(itoconfig.Config{
+		Backend: itoconfig.BackendCloud,
+		Cloud:   &itoconfig.Cloud{URL: "libsql://example.turso.io", Token: "secret"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := migrateLocal(false, sqliteCloudOpener(srcPath))
+	if err == nil || !strings.Contains(err.Error(), "rerun with --force") {
+		t.Fatalf("expected non-empty local destination error, got %v", err)
+	}
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Backend != itoconfig.BackendCloud || cfg.Cloud == nil {
+		t.Fatalf("failed migration changed config: %#v", cfg)
+	}
+
+	if err := migrateLocal(true, sqliteCloudOpener(srcPath)); err != nil {
+		t.Fatalf("migrate local with force: %v", err)
+	}
+	cfg, err = itoconfig.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Backend != itoconfig.BackendLocal || cfg.Cloud != nil {
+		t.Fatalf("unexpected local config: %#v", cfg)
+	}
+	configData, err := os.ReadFile(itoconfig.Path(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configData), "cloud") ||
+		strings.Contains(string(configData), "libsql://example.turso.io") ||
+		strings.Contains(string(configData), "secret") {
+		t.Fatalf("local config retained cloud credentials: %s", configData)
+	}
+	info, err := os.Stat(itoconfig.Path(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config permissions = %04o, want 0600", info.Mode().Perm())
+	}
+
+	sourceAfter := openMigrationTestDatabase(t, srcPath)
+	localAfter := openMigrationTestDatabase(t, itoconfig.LocalDBPath(home))
+	defer sourceAfter.Close()
+	defer localAfter.Close()
+	for _, table := range migrationTables {
+		srcCount, err := tableRowCount(sourceAfter, table.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		localCount, err := tableRowCount(localAfter, table.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if localCount != srcCount {
+			t.Fatalf("%s count = %d, want %d", table.name, localCount, srcCount)
+		}
+	}
+	var oldProjects int
+	if err := localAfter.QueryRow(`SELECT count(*) FROM projects WHERE prefix = ?`, "OLD").Scan(&oldProjects); err != nil {
+		t.Fatal(err)
+	}
+	if oldProjects != 0 {
+		t.Fatal("forced local migration retained old destination data")
+	}
+}
+
+func TestMigrateLocalRedactsCloudToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ITO_HOME", home)
+	if err := itoconfig.Write(itoconfig.Config{
+		Backend: itoconfig.BackendCloud,
+		Cloud:   &itoconfig.Cloud{URL: "libsql://example.turso.io", Token: "active-secret"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := migrateLocal(false, func(string, string) (*sql.DB, error) {
+		return nil, fmt.Errorf("connection rejected token active-secret")
+	})
+	if err == nil || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("expected redacted cloud error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "active-secret") {
+		t.Fatalf("migration error exposed the token: %v", err)
+	}
+}
+
+func TestMigrateLocalCommandValidationAndBackendGuard(t *testing.T) {
+	home := t.TempDir()
+	repo := t.TempDir()
+
+	positional := runITO(t, repo, home, "migrate", "local", "extra")
+	if positional.exitCode != exitBadUsage || !strings.Contains(positional.stderr, "takes no positional arguments") {
+		t.Fatalf("unexpected positional result: %#v", positional)
+	}
+
+	alreadyLocal := runITO(t, repo, home, "migrate", "local")
+	if alreadyLocal.exitCode != exitGeneric ||
+		!strings.Contains(alreadyLocal.stderr, "active backend is already local") ||
+		!strings.Contains(alreadyLocal.stderr, "usually requires --force") {
+		t.Fatalf("unexpected already-local result: %#v", alreadyLocal)
+	}
+}
+
 func TestMigrateHelp(t *testing.T) {
 	home := t.TempDir()
 	repo := t.TempDir()
@@ -229,11 +371,15 @@ func TestMigrateHelp(t *testing.T) {
 	}{
 		{
 			args: []string{"migrate", "--help"},
-			want: []string{"usage: ito migrate <command>", "cloud"},
+			want: []string{"usage: ito migrate <command>", "cloud", "local"},
 		},
 		{
 			args: []string{"migrate", "cloud", "--help"},
 			want: []string{"usage: ito migrate cloud", "--url", "--token", "--force"},
+		},
+		{
+			args: []string{"migrate", "local", "--help"},
+			want: []string{"usage: ito migrate local", "--force", "--json"},
 		},
 	}
 	for _, tt := range tests {

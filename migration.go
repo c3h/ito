@@ -71,6 +71,46 @@ func migrateCloud(url, token string, force bool, openCloud cloudDatabaseOpener) 
 	return nil
 }
 
+func migrateLocal(force bool, openCloud cloudDatabaseOpener) error {
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return fmt.Errorf("could not read the config: %w", err)
+	}
+	if cfg.Backend == itoconfig.BackendLocal {
+		return fmt.Errorf("the active backend is already local; run 'ito migrate cloud --url <url> --token <token>' first")
+	}
+	if cfg.Cloud == nil || cfg.Cloud.URL == "" || cfg.Cloud.Token == "" {
+		return fmt.Errorf("the cloud backend config is missing its url or token; fix ~/.ito/config.json or start over with 'ito migrate cloud'")
+	}
+
+	home, err := itoconfig.HomeDir()
+	if err != nil {
+		return fmt.Errorf("could not resolve the ito home: %w", err)
+	}
+	src, err := openCloud(cfg.Cloud.URL, cfg.Cloud.Token)
+	if err != nil {
+		return fmt.Errorf("could not open the cloud source: %s", redactSecret(err.Error(), cfg.Cloud.Token))
+	}
+	defer src.Close()
+
+	dst, err := sql.Open("sqlite", itoconfig.LocalDBPath(home))
+	if err != nil {
+		return fmt.Errorf("could not open the local destination: %s", redactSecret(err.Error(), cfg.Cloud.Token))
+	}
+	defer dst.Close()
+
+	if err := itostore.Migrate(dst); err != nil {
+		return fmt.Errorf("could not initialize the local destination: %s", redactSecret(err.Error(), cfg.Cloud.Token))
+	}
+	if err := copyDatabase(src, dst, force); err != nil {
+		return fmt.Errorf("could not copy the cloud database to local: %s", redactSecret(err.Error(), cfg.Cloud.Token))
+	}
+	if err := itoconfig.Write(itoconfig.Config{Backend: itoconfig.BackendLocal}); err != nil {
+		return fmt.Errorf("could not activate the local backend: %s", redactSecret(err.Error(), cfg.Cloud.Token))
+	}
+	return nil
+}
+
 func copyDatabase(src, dst *sql.DB, force bool) error {
 	if err := ensureDestinationReady(dst, force); err != nil {
 		return err

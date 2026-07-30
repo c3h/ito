@@ -444,6 +444,8 @@ func runMigrate(args []string) int {
 	switch args[0] {
 	case "cloud":
 		return runMigrateCloud(args[1:])
+	case "local":
+		return runMigrateLocal(args[1:])
 	default:
 		return fail(wantsJSON(args[1:], nil), exitBadUsage, "unknown migrate command: "+args[0]+".", "Run 'ito migrate --help' to see available commands.")
 	}
@@ -495,6 +497,44 @@ func runMigrateCloud(args []string) int {
 		return printJSON(display, "migration result")
 	}
 	fmt.Printf("migrated to cloud at %s.\n", url)
+	return 0
+}
+
+func runMigrateLocal(args []string) int {
+	valueFlags := commandValueFlags("migrate local")
+	if wantsHelp(args, valueFlags) {
+		printCommandHelp("migrate local")
+		return 0
+	}
+	fs := flag.NewFlagSet("migrate local", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var force bool
+	var jsonMode bool
+	fs.BoolVar(&force, "force", false, "")
+	fs.BoolVar(&jsonMode, "json", false, "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, valueFlags)
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, valueFlags), exitBadUsage, err.Error(), "run 'ito migrate local --help' to see the accepted flags.")
+	}
+	if len(positionals) != 0 {
+		return fail(jsonMode, exitBadUsage, "ito migrate local takes no positional arguments.", "use only --force or --json.")
+	}
+	if err := migrateLocal(force, openCloudDatabase); err != nil {
+		return fail(jsonMode, exitGeneric, err.Error(), "check the cloud credentials and local database; the retained local database usually requires --force.")
+	}
+
+	home, err := itoconfig.HomeDir()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("the migration succeeded but the ito home could not be resolved: %v", err), "run 'ito config' to inspect the active backend.")
+	}
+	display := configDisplay{
+		Backend:     itoconfig.BackendLocal,
+		LocalDBPath: itoconfig.LocalDBPath(home),
+	}
+	if jsonMode {
+		return printJSON(display, "migration result")
+	}
+	fmt.Printf("migrated to local at %s.\n", display.LocalDBPath)
 	return 0
 }
 
@@ -1643,6 +1683,8 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "search": {}, "label": {}, "batch": {}}
 	case "migrate cloud":
 		return map[string]struct{}{"url": {}, "token": {}}
+	case "migrate local":
+		return nil
 	case "batch new", "batch list", "batch move", "batch rename", "batch rm", "batch show":
 		return map[string]struct{}{"project": {}}
 	case "move":
@@ -1768,6 +1810,7 @@ Moves the store between local and cloud backends, with exactly one backend activ
 
 Commands:
   cloud    Copies the local store to cloud and activates it.
+  local    Copies the cloud store to local and activates it.
 
 Use "ito migrate <command> --help" to see the command's flags.`)
 	case "migrate cloud":
@@ -1780,6 +1823,15 @@ Flags:
   --url <url>          Cloud database URL.
   --token <token>      Cloud authentication token.
   --force              Replaces data in a non-empty destination.
+  --json               Prints JSON.`)
+	case "migrate local":
+		fmt.Println(`usage: ito migrate local [--force] [--json]
+
+Copies the cloud store to the local database and activates it only after row counts validate.
+The cloud database is retained unchanged. The retained local database usually requires --force.
+
+Flags:
+  --force              Replaces data in a non-empty local destination.
   --json               Prints JSON.`)
 	case "init":
 		fmt.Println(`usage: ito init [--name <name>] [--prefix <PREFIX>] [--reattach <name>] [--json]
