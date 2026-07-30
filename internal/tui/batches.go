@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/c3h/ito/internal/store"
 )
@@ -38,6 +39,16 @@ type batchGroup struct {
 	issues  []store.Issue
 }
 
+type batchReload struct {
+	batches []store.Batch
+	plans   []batchPlanResult
+}
+
+type batchPlanResult struct {
+	plan store.BatchPlan
+	err  error
+}
+
 // batchGroups turns a derived plan into the groups the surface draws: one per
 // Wave, then the members gated outside the Batch when the derivation left any.
 func batchGroups(plan store.BatchPlan) []batchGroup {
@@ -65,15 +76,40 @@ func batchGroups(plan store.BatchPlan) []batchGroup {
 	return groups
 }
 
-// reloadBatches snapshots the Project's Batches, deriving each plan through the
-// core. Batches with open work come first, newest-first among themselves, and
-// the fully done ones follow — the surface rolls those into one section, so
-// their order only decides how the rollup lists them. A blocked_by cycle is
-// captured per Batch so one bad graph never blanks the surface. Across reloads
-// the focus follows its Batch by name (landing on the rollup when that Batch
-// just completed), a manual collapse toggle survives, and each selection keeps
-// its Issue by ID, falling back to clamping.
-func (m *model) reloadBatches() error {
+// loadBatches snapshots the Project's Batches, deriving each open plan through
+// the core concurrently. Fully done Batches are skipped because the surface
+// only reads their summary.
+func (m *model) loadBatches() (batchReload, error) {
+	batches, err := m.store.ListBatches(m.project)
+	if err != nil {
+		return batchReload{}, err
+	}
+
+	plans := make([]batchPlanResult, len(batches))
+	var loads sync.WaitGroup
+	for i, batch := range batches {
+		if batchDone(batch) {
+			continue
+		}
+		loads.Add(1)
+		go func() {
+			defer loads.Done()
+			plans[i].plan, plans[i].err = m.store.ShowBatch(m.project, batch.Name)
+		}()
+	}
+	loads.Wait()
+	return batchReload{batches: batches, plans: plans}, nil
+}
+
+// reloadBatches applies a loaded snapshot. Batches with open work come first,
+// newest-first among themselves, and the fully done ones follow — the surface
+// rolls those into one section, so their order only decides how the rollup
+// lists them. A blocked_by cycle is captured per Batch so one bad graph never
+// blanks the surface. Across reloads the focus follows its Batch by name
+// (landing on the rollup when that Batch just completed), a manual collapse
+// toggle survives, and each selection keeps its Issue by ID, falling back to
+// clamping.
+func (m *model) reloadBatches(reload batchReload) error {
 	previous := make(map[string]batchSection, len(m.batchSections))
 	for _, section := range m.batchSections {
 		previous[section.batch.Name] = section
@@ -84,21 +120,17 @@ func (m *model) reloadBatches() error {
 		focusedName = focused.batch.Name
 	}
 
-	batches, err := m.store.ListBatches(m.project)
-	if err != nil {
-		return err
-	}
 	// Partitioned as it is built: ListBatches is newest-first, so appending to
 	// one of the two halves keeps that order inside each.
-	open := make([]batchSection, 0, len(batches))
+	open := make([]batchSection, 0, len(reload.batches))
 	var completed []batchSection
-	for _, b := range batches {
+	for i, b := range reload.batches {
 		section := batchSection{batch: b}
 		done := batchDone(b)
 		// A fully done Batch lists no open member, so it only ever reaches the
 		// completed rollup — deriving its plan would be work nothing reads.
 		if !done {
-			plan, err := m.store.ShowBatch(m.project, b.Name)
+			plan, err := reload.plans[i].plan, reload.plans[i].err
 			var cycleErr *store.BatchCycleError
 			switch {
 			case errors.As(err, &cycleErr):

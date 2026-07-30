@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/c3h/ito/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
@@ -792,18 +793,50 @@ func (m *model) switchToSelectedProject() {
 	m.reload()
 }
 
-// reload re-reads every surface from the store in one pass: the model holds a
-// single snapshot, so a refresh from any view leaves the Digest, the Board and
-// the Batches consistent with each other — switching tabs never lands on a
-// surface that was left behind. Both loads always run; the first failure is the
-// one reported, and a failing load leaves its previous rows on screen.
+// reload re-reads every surface from the store in one pass, loading the Digest
+// and Batches concurrently before applying either result. A refresh from any
+// view leaves the Digest, the Board and the Batches updated together —
+// switching tabs never lands on a surface that was left behind. Both loads
+// always run; the first failure is the one reported, and a failing load leaves
+// its previous rows on screen.
 func (m *model) reload() {
-	digestErr := m.reloadDigest()
-	batchErr := m.reloadBatches()
+	var (
+		digestIssues []store.Issue
+		digestErr    error
+		batches      batchReload
+		batchErr     error
+	)
+	var loads sync.WaitGroup
+	loads.Add(2)
+	go func() {
+		defer loads.Done()
+		digestIssues, digestErr = m.loadDigest()
+	}()
+	go func() {
+		defer loads.Done()
+		batches, batchErr = m.loadBatches()
+	}()
+	loads.Wait()
+
+	if digestErr == nil {
+		digestErr = m.reloadDigest(digestIssues)
+	}
+	if batchErr == nil {
+		batchErr = m.reloadBatches(batches)
+	}
 	m.loadErr = cmp.Or(digestErr, batchErr)
 }
 
-func (m *model) reloadDigest() error {
+func (m *model) loadDigest() ([]store.Issue, error) {
+	// One query for every status: a single snapshot, so a concurrent write can
+	// never show an Issue in two sections (or in none) within the same reload.
+	return m.store.ListIssues(store.ListOptions{
+		ProjectID:   m.project.ID,
+		IncludeDone: true,
+	})
+}
+
+func (m *model) reloadDigest(all []store.Issue) error {
 	focusedLabel := ""
 	if m.focusIndex >= 0 && m.focusIndex < len(m.sections) {
 		focusedLabel = m.sections[m.focusIndex].Label
@@ -818,15 +851,6 @@ func (m *model) reloadDigest() error {
 	}
 	detailID := m.detailIssue.ID
 
-	// One query for every status: a single snapshot, so a concurrent write can
-	// never show an Issue in two sections (or in none) within the same reload.
-	all, err := m.store.ListIssues(store.ListOptions{
-		ProjectID:   m.project.ID,
-		IncludeDone: true,
-	})
-	if err != nil {
-		return err
-	}
 	byStatus := make(map[string][]store.Issue, len(store.Statuses))
 	for _, issue := range all {
 		byStatus[issue.Status] = append(byStatus[issue.Status], issue)
