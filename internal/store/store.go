@@ -152,6 +152,7 @@ type Issue struct {
 	Priority      string   `json:"priority"`
 	Category      string   `json:"category"`
 	TriageState   string   `json:"triage_state"`
+	Branch        string   `json:"branch"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -236,6 +237,8 @@ type EditIssueOptions struct {
 	Category       string
 	TriageStateSet bool
 	TriageState    string
+	BranchSet      bool
+	Branch         string
 	BodySet        bool
 	Body           string
 	BatchSet       bool
@@ -565,6 +568,7 @@ func openBackend(cfg itoconfig.Config, home string, openDB openDBFunc) (*sql.DB,
 		if err != nil {
 			return nil, fmt.Errorf("open cloud database %q: %w", cfg.Cloud.URL, err)
 		}
+		db.SetMaxIdleConns(maxIdleConns)
 		if schemaCacheCurrent(home, cfg.Cloud.URL) {
 			return db, nil
 		}
@@ -586,6 +590,7 @@ var migrations = []struct {
 	{version: 1, apply: migrateV1},
 	{version: 2, apply: migrateV2},
 	{version: 3, apply: migrateV3},
+	{version: 4, apply: migrateV4},
 }
 
 var latestSchemaVersion = migrations[len(migrations)-1].version
@@ -776,6 +781,11 @@ func migrateV3(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+func migrateV4(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE issues ADD COLUMN branch TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func columnExists(q rowQuerier, table, column string) (bool, error) {
@@ -1236,7 +1246,7 @@ func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (Batch
 	// A Batch with nothing left to place derives to an empty plan, so stop
 	// before the relation read rather than pay for it and throw the result
 	// away — the shape every completed Batch has on every listing and refresh.
-	if !batchHasOpenWork(members, opts.IncludeDone) {
+	if batch.Total == 0 || (!opts.IncludeDone && batch.Complete()) {
 		return BatchPlan{Batch: batch, Waves: []BatchWave{}, Waiting: []Issue{}}, nil
 	}
 	graph, err := loadBatchIssueRelations(db, p.ID, batchID, members)
@@ -1249,16 +1259,6 @@ func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (Batch
 	}
 	markBatchWaveReadiness(waves)
 	return BatchPlan{Batch: batch, Waves: waves, Waiting: waiting}, nil
-}
-
-// batchHasOpenWork reports whether the derivation has any member to place under
-// opts: false for an empty Batch, and for a fully done one unless the caller is
-// replaying history.
-func batchHasOpenWork(members []listedIssue, includeDone bool) bool {
-	if includeDone {
-		return len(members) > 0
-	}
-	return slices.ContainsFunc(members, func(m listedIssue) bool { return m.Status != "done" })
 }
 
 func batchWaveDone(issues []Issue) bool {
@@ -1291,8 +1291,8 @@ SELECT batches.id, batches.name, projects.name, batches.created,
        COALESCE(issues.id, ''), COALESCE(issues.title, ''),
        COALESCE(issues.status, ''), COALESCE(issues.priority, ''),
        COALESCE(issues.category, ''), COALESCE(issues.triage_state, ''),
-       COALESCE(issues.body, ''), COALESCE(issues.created, ''),
-       COALESCE(issues.updated, '')
+       COALESCE(issues.branch, ''), COALESCE(issues.body, ''),
+       COALESCE(issues.created, ''), COALESCE(issues.updated, '')
 FROM batches
 JOIN projects ON projects.id = batches.project_id
 LEFT JOIN issues ON issues.batch_id = batches.id
@@ -1320,8 +1320,8 @@ issues.id ASC`, p.ID, name)
 		if err := rows.Scan(
 			&batchID, &batch.Name, &batch.Project, &batch.Created,
 			&found.ID, &found.Title, &found.Status, &found.Priority,
-			&found.Category, &found.TriageState, &found.Body,
-			&found.Created, &found.Updated,
+			&found.Category, &found.TriageState, &found.Branch,
+			&found.Body, &found.Created, &found.Updated,
 		); err != nil {
 			return Batch{}, 0, nil, err
 		}
@@ -1725,9 +1725,9 @@ func insertIssue(db *sql.DB, p Project, title, status, priority, category, triag
 	}
 
 	result, err = tx.Exec(`
-INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, body, created, updated, batch_id)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, created.ID, created.Title, created.Status, created.Priority, created.Category, created.TriageState, created.Body, created.Created, created.Updated, batchID)
+INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, branch, body, created, updated, batch_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, created.ID, created.Title, created.Status, created.Priority, created.Category, created.TriageState, created.Branch, created.Body, created.Created, created.Updated, batchID)
 	if err != nil {
 		return Issue{}, err
 	}
@@ -1876,12 +1876,12 @@ func editIssue(db *sql.DB, p Project, id string, options EditIssueOptions) (Issu
 	defer tx.Rollback()
 
 	var rowID int64
-	var currentTitle, currentPriority, currentCategory, currentTriageState, currentBody string
+	var currentTitle, currentPriority, currentCategory, currentTriageState, currentBranch, currentBody string
 	var currentBatchID sql.NullInt64
 	if err := tx.QueryRow(`
-SELECT row_id, title, priority, category, triage_state, body, batch_id
+SELECT row_id, title, priority, category, triage_state, branch, body, batch_id
 FROM issues
-WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &currentPriority, &currentCategory, &currentTriageState, &currentBody, &currentBatchID); err != nil {
+WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &currentPriority, &currentCategory, &currentTriageState, &currentBranch, &currentBody, &currentBatchID); err != nil {
 		return Issue{}, false, err
 	}
 
@@ -1951,6 +1951,10 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 	if options.TriageStateSet {
 		nextTriageState = options.TriageState
 	}
+	nextBranch := currentBranch
+	if options.BranchSet {
+		nextBranch = options.Branch
+	}
 	nextBody := currentBody
 	if options.BodySet {
 		nextBody = options.Body
@@ -1971,7 +1975,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 		}
 	}
 
-	scalarChanged := nextTitle != currentTitle || nextPriority != currentPriority || nextCategory != currentCategory || nextTriageState != currentTriageState || nextBody != currentBody
+	scalarChanged := nextTitle != currentTitle || nextPriority != currentPriority || nextCategory != currentCategory || nextTriageState != currentTriageState || nextBranch != currentBranch || nextBody != currentBody
 	batchChanged := nextBatchID.Valid != currentBatchID.Valid || (nextBatchID.Valid && nextBatchID.Int64 != currentBatchID.Int64)
 	labelsChanged := !labelSetMatches(currentLabels, nextLabels)
 	linksChanged := !stringSetMatches(currentLinks, nextLinks)
@@ -1981,8 +1985,8 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 		now := time.Now().UTC().Format(time.RFC3339)
 		result, err := tx.Exec(`
 UPDATE issues
-SET title = ?, priority = ?, category = ?, triage_state = ?, body = ?, batch_id = ?, updated = ?
-WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTriageState, nextBody, nextBatchID, now, p.ID, id)
+SET title = ?, priority = ?, category = ?, triage_state = ?, branch = ?, body = ?, batch_id = ?, updated = ?
+WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTriageState, nextBranch, nextBody, nextBatchID, now, p.ID, id)
 		if err != nil {
 			return Issue{}, false, err
 		}
@@ -2126,7 +2130,7 @@ func deleteIssueRowsTx(tx *sql.Tx, p Project, matches []issueDeletionRow) (int, 
 
 func findIssueByID(q rowQuerier, p Project, id string) (Issue, bool, error) {
 	row := q.QueryRow(`
-SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, issues.branch, batches.name, issues.body, issues.created, issues.updated
 FROM issues
 JOIN projects ON projects.id = issues.project_id
 LEFT JOIN batches ON batches.id = issues.batch_id
@@ -2146,7 +2150,7 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 }
 
 // scanIssue reads an issue column list — id, project name, title, status,
-// priority, category, triage state, batch name, body, created, updated — from a
+// priority, category, triage state, branch, batch name, body, created, updated — from a
 // row or rows cursor, leaving relations for loadIssueRelations. Queries that
 // project the same columns in a different order scan them themselves.
 func scanIssue(s interface{ Scan(dest ...any) error }) (Issue, error) {
@@ -2157,7 +2161,7 @@ func scanIssue(s interface{ Scan(dest ...any) error }) (Issue, error) {
 		ConflictsWith: []string{},
 	}
 	var batch sql.NullString
-	if err := s.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Category, &found.TriageState, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
+	if err := s.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Category, &found.TriageState, &found.Branch, &batch, &found.Body, &found.Created, &found.Updated); err != nil {
 		return Issue{}, err
 	}
 	if batch.Valid {
@@ -2228,7 +2232,7 @@ func loadListedIssueRelations(q rowQuerier, issues []listedIssue) error {
 	}
 
 	issueIndexes := make(map[issueRelationKey]int, len(issues))
-	projectIDs := make([]int64, 0, len(issues))
+	args := make([]any, 0, len(issues))
 	for i := range issues {
 		issues[i].Labels = []string{}
 		issues[i].BlockedBy = []string{}
@@ -2236,15 +2240,10 @@ func loadListedIssueRelations(q rowQuerier, issues []listedIssue) error {
 		issues[i].ConflictsWith = []string{}
 
 		issueIndexes[issueRelationKey{ProjectID: issues[i].ProjectID, IssueID: issues[i].ID}] = i
-		projectIDs = append(projectIDs, issues[i].ProjectID)
+		args = append(args, issues[i].ProjectID)
 	}
-	projectIDs = dedupe(projectIDs)
-
-	placeholders := sqlPlaceholders(len(projectIDs))
-	args := make([]any, len(projectIDs))
-	for i, projectID := range projectIDs {
-		args[i] = projectID
-	}
+	args = dedupe(args)
+	placeholders := sqlPlaceholders(len(args))
 
 	if err := forEachRow(q, `
 SELECT project_id, issue_id, label
@@ -2388,7 +2387,7 @@ WHERE issue_labels.project_id = issues.project_id
 	}
 
 	query := `
-SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, batches.name, issues.body, issues.created, issues.updated, issues.project_id
+SELECT issues.id, projects.name, issues.title, issues.status, issues.priority, issues.category, issues.triage_state, issues.branch, batches.name, issues.body, issues.created, issues.updated, issues.project_id
 FROM issues
 JOIN projects ON projects.id = issues.project_id
 LEFT JOIN batches ON batches.id = issues.batch_id`
@@ -2428,7 +2427,7 @@ issues.id ASC`
 			},
 		}
 		var batch sql.NullString
-		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Category, &found.TriageState, &batch, &found.Body, &found.Created, &found.Updated, &found.ProjectID); err != nil {
+		if err := rows.Scan(&found.ID, &found.Project, &found.Title, &found.Status, &found.Priority, &found.Category, &found.TriageState, &found.Branch, &batch, &found.Body, &found.Created, &found.Updated, &found.ProjectID); err != nil {
 			return nil, err
 		}
 		if batch.Valid {
@@ -2464,7 +2463,7 @@ WHERE in_flight_conflict.project_id = ` + issueAlias + `.project_id
   AND in_flight_conflict.kind = 'conflicts_with'
   AND (in_flight_conflict.source_id = ` + issueAlias + `.id OR in_flight_conflict.target_id = ` + issueAlias + `.id)
   AND in_flight_partner.status IN ('in_progress', 'in_review')
-  AND NOT ` + doneStatusWhereSQL("in_flight_partner") + `
+  AND in_flight_partner.status != 'done'
 )
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS ready_conflict
@@ -2490,12 +2489,8 @@ JOIN issues AS ` + blockerAlias + ` ON ` + blockerAlias + `.project_id = ` + blo
 WHERE ` + blockerAlias + `_link.project_id = ` + issueAlias + `.project_id
   AND ` + blockerAlias + `_link.source_id = ` + issueAlias + `.id
   AND ` + blockerAlias + `_link.kind = 'blocked_by'
-  AND NOT ` + doneStatusWhereSQL(blockerAlias) + `
+  AND ` + blockerAlias + `.status != 'done'
 )`
-}
-
-func doneStatusWhereSQL(issueAlias string) string {
-	return issueAlias + `.status = 'done'`
 }
 
 func readyConflictPartnerBeatsSQL(partnerAlias, issueAlias string) string {

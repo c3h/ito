@@ -49,6 +49,10 @@ const detailBodyWidth = 80
 // the detail view, so the titles line up across link rows.
 const linkIDWidth = 8
 
+// detailLabelWidth is the gutter the detail view's field labels occupy, so
+// branch, created and updated share one column whichever of them renders.
+const detailLabelWidth = 13
+
 type viewMode string
 
 const (
@@ -105,6 +109,7 @@ type model struct {
 	filterQuery    string
 	commandOpen    bool
 	commandQuery   string
+	prSyncNote     string
 	loadErr        error
 	width          int
 	height         int
@@ -155,14 +160,19 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
+	case prSyncMsg:
+		m.applyPRSync(msg)
 	case tea.KeyMsg:
+		m.prSyncNote = ""
 		if m.filterOpen {
 			return m, editInlineInput(&m.filterOpen, &m.filterQuery, msg)
 		}
 		if m.commandOpen {
 			if msg.Type == tea.KeyEnter {
-				return m.runSelectedCommandAction()
+				cmd = m.runSelectedCommandAction()
+				break
 			}
 			return m, editInlineInput(&m.commandOpen, &m.commandQuery, msg)
 		}
@@ -221,7 +231,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			if m.mode != viewLabels {
-				m.reload()
+				cmd = m.refresh()
 			}
 		case "p":
 			if m.mode == viewIssue {
@@ -275,7 +285,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	}
 	m.syncScroll()
-	return m, nil
+	return m, cmd
 }
 
 // syncScroll advances each section's scroll offset to the window the View is
@@ -597,6 +607,9 @@ func (m model) surfaceBottomBar(matched, total int, keys ...[2]string) string {
 	if m.commandOpen {
 		return m.commandBottomBar()
 	}
+	if m.prSyncNote != "" {
+		return " " + styleDim.Render(m.prSyncNote)
+	}
 	return statusBar(keys...)
 }
 
@@ -703,10 +716,10 @@ func renderCommandAction(action commandAction) string {
 	return styleKey.Render(action.Shortcut) + "  " + styleText.Render(action.Name)
 }
 
-func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
+func (m *model) runSelectedCommandAction() tea.Cmd {
 	actions := m.filteredCommandActions()
 	if len(actions) == 0 {
-		return m, nil
+		return nil
 	}
 	m.commandOpen = false
 	m.commandQuery = ""
@@ -724,11 +737,11 @@ func (m model) runSelectedCommandAction() (tea.Model, tea.Cmd) {
 	case "switch project":
 		m.openProjectPicker()
 	case "refresh":
-		m.reload()
+		return m.refresh()
 	case "quit":
-		return m, tea.Quit
+		return tea.Quit
 	}
-	return m, nil
+	return nil
 }
 
 func (m model) updateProjectPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -798,8 +811,9 @@ func (m *model) switchToSelectedProject() {
 // view leaves the Digest, the Board and the Batches updated together —
 // switching tabs never lands on a surface that was left behind. Both loads
 // always run; the first failure is the one reported, and a failing load leaves
-// its previous rows on screen.
-func (m *model) reload() {
+// its previous rows on screen. It returns the Digest snapshot it read so a
+// caller that needs the flat Issue list does not rebuild it from the sections.
+func (m *model) reload() []store.Issue {
 	var (
 		digestIssues []store.Issue
 		digestErr    error
@@ -825,6 +839,36 @@ func (m *model) reload() {
 		batchErr = m.reloadBatches(batches)
 	}
 	m.loadErr = cmp.Or(digestErr, batchErr)
+	return digestIssues
+}
+
+// refresh re-reads every surface and schedules the PR sync against the Issues
+// that reload just returned.
+func (m *model) refresh() tea.Cmd {
+	return syncPRsCmd(m.project, m.reload())
+}
+
+// applyPRSync writes the moves gh reported and notes how many landed. A message
+// for a Project the user has since left is dropped before any write.
+func (m *model) applyPRSync(msg prSyncMsg) {
+	if msg.Project.ID != m.project.ID {
+		return
+	}
+	updated := 0
+	for _, move := range msg.Moves {
+		result, err := m.store.Move(msg.Project, move.ID, move.Status)
+		if err != nil {
+			m.loadErr = err
+			continue
+		}
+		if result.Changed {
+			updated++
+		}
+	}
+	if updated > 0 {
+		m.reload()
+		m.prSyncNote = fmt.Sprintf("PR sync: %d updated", updated)
+	}
 }
 
 func (m *model) loadDigest() ([]store.Issue, error) {
@@ -1564,6 +1608,9 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 		meta,
 		"",
 	}
+	if issue.Branch != "" {
+		top = append(top, metaLine("branch", issue.Branch), "")
+	}
 
 	var links []string
 	for _, id := range issue.BlockedBy {
@@ -1581,8 +1628,8 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 	}
 
 	top = append(top,
-		" "+styleDim.Render("created")+"      "+styleText.Render(issue.Created),
-		" "+styleDim.Render("updated")+"      "+styleText.Render(issue.Updated),
+		metaLine("created", issue.Created),
+		metaLine("updated", issue.Updated),
 		"",
 		fullRule(width),
 		"",
@@ -1842,6 +1889,13 @@ func styledPriorityWord(priority string) string {
 	default:
 		return stylePriorityWordLow.Render(priority)
 	}
+}
+
+// metaLine renders one of the Issue detail's scalar fields, every label padded
+// to the same gutter so the values line up whichever fields the Issue carries.
+func metaLine(label, value string) string {
+	pad := strings.Repeat(" ", max(1, detailLabelWidth-runeLen(label)))
+	return " " + styleDim.Render(label) + pad + styleText.Render(value)
 }
 
 // linkLine renders a link row: a dim label, the linked id in cyan, then the

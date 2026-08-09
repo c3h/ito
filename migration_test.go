@@ -45,6 +45,13 @@ func TestCopyDatabaseCopiesAllTablesInBatches(t *testing.T) {
 	if matches != 205 {
 		t.Fatalf("search matches = %d, want 205", matches)
 	}
+	var branch string
+	if err := dst.QueryRow(`SELECT branch FROM issues WHERE id = 'SRC-1'`).Scan(&branch); err != nil {
+		t.Fatalf("read copied branch: %v", err)
+	}
+	if branch != "feat/migration-1" {
+		t.Fatalf("copied branch = %q, want %q", branch, "feat/migration-1")
+	}
 }
 
 func TestCopyDatabaseRefusesNonEmptyDestinationAndForceReplacesIt(t *testing.T) {
@@ -430,9 +437,9 @@ func seedMigrationTestDatabase(t *testing.T, db *sql.DB, prefix string, issueCou
 	for i := 1; i <= issueCount; i++ {
 		id := fmt.Sprintf("%s-%d", prefix, i)
 		if _, err := tx.Exec(`
-INSERT INTO issues(row_id, project_id, id, title, status, priority, body, created, updated, batch_id, category, triage_state)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, i, 1, id, fmt.Sprintf("Migration issue %d", i), "todo", "medium", "copy body", "2026-07-29T12:00:00Z", "2026-07-29T12:00:00Z", 1, "enhancement", "ready-for-agent"); err != nil {
+INSERT INTO issues(row_id, project_id, id, title, status, priority, body, created, updated, batch_id, category, triage_state, branch)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, i, 1, id, fmt.Sprintf("Migration issue %d", i), "todo", "medium", "copy body", "2026-07-29T12:00:00Z", "2026-07-29T12:00:00Z", 1, "enhancement", "ready-for-agent", fmt.Sprintf("feat/migration-%d", i)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, i, fmt.Sprintf("Migration issue %d", i), "copy body"); err != nil {

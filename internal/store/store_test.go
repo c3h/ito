@@ -77,7 +77,7 @@ func TestOpenBackendCloudUsesLibSQLAndMigrates(t *testing.T) {
 			t.Fatalf("cloud DSN contains local-only setting %q", localOnly)
 		}
 	}
-	assertSchemaVersion(t, db, 3)
+	assertSchemaVersion(t, db, 4)
 }
 
 func TestOpenBackendCloudSkipsMigrateWhenSchemaCacheCurrent(t *testing.T) {
@@ -94,7 +94,7 @@ func TestOpenBackendCloudSkipsMigrateWhenSchemaCacheCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first cloud open: %v", err)
 	}
-	assertSchemaVersion(t, first, 3)
+	assertSchemaVersion(t, first, 4)
 	first.Close()
 
 	// The cache is warm, so a second open must not touch the schema at all:
@@ -122,7 +122,7 @@ func TestOpenBackendCloudSkipsMigrateWhenSchemaCacheCurrent(t *testing.T) {
 		t.Fatalf("third cloud open: %v", err)
 	}
 	defer third.Close()
-	assertSchemaVersion(t, third, 3)
+	assertSchemaVersion(t, third, 4)
 }
 
 func TestOpenBackendCloudRequiresURLAndToken(t *testing.T) {
@@ -179,10 +179,11 @@ func TestMigrateFreshDatabaseReachesBatchSchemaVersion(t *testing.T) {
 	}
 	defer db.Close()
 
-	assertSchemaVersion(t, db, 3)
+	assertSchemaVersion(t, db, 4)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
+	assertColumnExists(t, db, "issues", "branch")
 	if _, err := db.Exec(`INSERT INTO batches(project_id, name, created) VALUES (1, 'orphan', '2026-06-12T10:00:00Z')`); err == nil {
 		t.Fatal("expected foreign key to reject a Batch without a Project")
 	}
@@ -253,10 +254,11 @@ VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '
 		t.Fatalf("migrate v1 database: %v", err)
 	}
 
-	assertSchemaVersion(t, db, 3)
+	assertSchemaVersion(t, db, 4)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
+	assertColumnExists(t, db, "issues", "branch")
 	var title string
 	if err := db.QueryRow(`SELECT title FROM issues WHERE id = 'LEG-1'`).Scan(&title); err != nil {
 		t.Fatalf("legacy issue was not preserved: %v", err)
@@ -266,6 +268,113 @@ VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '
 	}
 	if _, err := db.Exec(`INSERT INTO batches(project_id, name, created) VALUES (1, 'refactor', '2026-06-12T11:00:00Z')`); err != nil {
 		t.Fatalf("insert batch after migration: %v", err)
+	}
+}
+
+func TestMigrateV4AddsBranchToV3Database(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "v3.db"))
+	if err != nil {
+		t.Fatalf("open v3 database: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version(version) VALUES (3);
+CREATE TABLE issues (
+  row_id       INTEGER PRIMARY KEY,
+  project_id   INTEGER NOT NULL,
+  id           TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  priority     TEXT NOT NULL,
+  body         TEXT NOT NULL DEFAULT '',
+  created      TEXT NOT NULL,
+  updated      TEXT NOT NULL,
+  batch_id     INTEGER,
+  category     TEXT NOT NULL DEFAULT 'uncategorized',
+  triage_state TEXT NOT NULL DEFAULT 'needs-triage'
+);
+INSERT INTO issues(project_id, id, title, status, priority, body, created, updated)
+VALUES (1, 'VTH-1', 'Existing issue', 'todo', 'medium', '', '2026-08-09T10:00:00Z', '2026-08-09T10:00:00Z');
+`); err != nil {
+		t.Fatalf("seed v3 database: %v", err)
+	}
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate v3 database: %v", err)
+	}
+	assertSchemaVersion(t, db, 4)
+	assertColumnExists(t, db, "issues", "branch")
+	var branch string
+	if err := db.QueryRow(`SELECT branch FROM issues WHERE id = 'VTH-1'`).Scan(&branch); err != nil {
+		t.Fatalf("read migrated branch: %v", err)
+	}
+	if branch != "" {
+		t.Fatalf("migrated branch = %q, want empty", branch)
+	}
+}
+
+func TestIssueBranchRoundTripsThroughCreateEditListAndShow(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	st := New(db)
+	project, err := st.CreateProject("branch-app", "BRA", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	created, err := st.CreateIssue(project, "Track branch", "in_progress", "medium", nil, "")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if created.Branch != "" {
+		t.Fatalf("created branch = %q, want empty", created.Branch)
+	}
+
+	edited, err := st.Edit(project, created.ID, EditIssueOptions{BranchSet: true, Branch: "feat/branch-sync"})
+	if err != nil {
+		t.Fatalf("edit branch: %v", err)
+	}
+	if edited.Issue.Branch != "feat/branch-sync" {
+		t.Fatalf("edited branch = %q", edited.Issue.Branch)
+	}
+	listed, err := st.ListIssues(ListOptions{ProjectID: project.ID, IncludeDone: true})
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Branch != "feat/branch-sync" {
+		t.Fatalf("listed issues = %#v", listed)
+	}
+	shown, err := st.FindIssue(project, created.ID)
+	if err != nil {
+		t.Fatalf("show issue: %v", err)
+	}
+	if shown.Branch != "feat/branch-sync" {
+		t.Fatalf("shown branch = %q", shown.Branch)
+	}
+	if _, err := st.CreateBatch(project, "sync"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	if _, err := st.Edit(project, created.ID, EditIssueOptions{BatchSet: true, Batch: "sync"}); err != nil {
+		t.Fatalf("assign batch: %v", err)
+	}
+	plan, err := st.ShowBatch(project, "sync")
+	if err != nil {
+		t.Fatalf("show batch: %v", err)
+	}
+	if len(plan.Waves) != 1 || len(plan.Waves[0].Issues) != 1 || plan.Waves[0].Issues[0].Branch != "feat/branch-sync" {
+		t.Fatalf("batch member branch not threaded, plan = %#v", plan.Waves)
+	}
+
+	cleared, err := st.Edit(project, created.ID, EditIssueOptions{BranchSet: true, Branch: ""})
+	if err != nil {
+		t.Fatalf("clear branch: %v", err)
+	}
+	if cleared.Issue.Branch != "" {
+		t.Fatalf("cleared branch = %q, want empty", cleared.Issue.Branch)
 	}
 }
 

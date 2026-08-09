@@ -259,6 +259,7 @@ type issueListItem struct {
 	Priority      string   `json:"priority"`
 	Category      string   `json:"category"`
 	TriageState   string   `json:"triage_state"`
+	Branch        string   `json:"branch"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -297,10 +298,10 @@ func (e commandFailure) Error() string {
 	return e.message
 }
 
-// openMigratedStore opens the central store, returning a ready *sql.DB (the
-// caller defers Close) or a typed *commandFailure carrying the exact
-// code/message/hint. OpenDefault already migrates whichever backend it opens.
-func openMigratedStore() (*sql.DB, *itostore.Store, *commandFailure) {
+// openStore opens the central store, returning a ready *sql.DB (the caller
+// defers Close) or a typed *commandFailure carrying the exact code/message/hint.
+// OpenDefault already migrates whichever backend it opens.
+func openStore() (*sql.DB, *itostore.Store, *commandFailure) {
 	db, err := itostore.OpenDefault()
 	if err != nil {
 		return nil, nil, &commandFailure{exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions."}
@@ -376,7 +377,7 @@ func runCLI(args []string) int {
 			printRootHelp(os.Stdout)
 			return 0
 		}
-		db, st, openFail := openMigratedStore()
+		db, st, openFail := openStore()
 		if openFail != nil {
 			return fail(false, openFail.code, openFail.message, openFail.hint)
 		}
@@ -616,7 +617,7 @@ func runBatchNew(args []string) int {
 		return failInvalidBatchName(jsonMode, name)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -654,7 +655,7 @@ func runBatchList(args []string) int {
 		return fail(jsonMode, exitBadUsage, "ito batch list takes no positional arguments.", "use flags like --project or --json.")
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -701,7 +702,7 @@ func runBatchMove(args []string) int {
 		return failInvalidProjectName(jsonMode, projectName)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -744,7 +745,7 @@ func runBatchRename(args []string) int {
 		return failInvalidBatchName(jsonMode, newName)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -787,7 +788,7 @@ func runBatchRM(args []string) int {
 	}
 	name := positionals[0]
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -828,7 +829,7 @@ func runBatchShow(args []string) int {
 		return fail(jsonMode, exitBadUsage, "ito batch show takes exactly one name.", "use: ito batch show <name>.")
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -887,7 +888,7 @@ func runInit(args []string) int {
 		return failInvalidProjectName(jsonMode, name)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1004,7 +1005,7 @@ func runRename(args []string) int {
 		return failInvalidProjectName(jsonMode, newName)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1096,7 +1097,7 @@ func runNew(args []string) int {
 		return fail(jsonMode, exitBadUsage, "--batch requires a non-empty Batch name on new.", "omit --batch to create the Issue outside any Batch.")
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1144,7 +1145,7 @@ func runShow(args []string) int {
 		return failInvalidProjectName(jsonMode, projectName)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1197,7 +1198,7 @@ func runMove(args []string) int {
 		return failInvalidProjectName(jsonMode, projectName)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1239,6 +1240,7 @@ func runEdit(args []string) int {
 	var priority string
 	var category string
 	var triageState string
+	var branch string
 	var body string
 	var batchName string
 	var labelOps []labelEditOp
@@ -1249,6 +1251,7 @@ func runEdit(args []string) int {
 	fs.StringVar(&priority, "priority", "", "")
 	fs.StringVar(&category, "category", "", "")
 	fs.StringVar(&triageState, "triage-state", "", "")
+	fs.StringVar(&branch, "branch", "", "")
 	fs.StringVar(&body, "body", "", "")
 	fs.StringVar(&batchName, "batch", "", "")
 	fs.Var(labelEditFlag{kind: "add", ops: &labelOps}, "add-label", "")
@@ -1286,14 +1289,16 @@ func runEdit(args []string) int {
 			options.CategorySet = true
 		case "triage-state":
 			options.TriageStateSet = true
+		case "branch":
+			options.BranchSet = true
 		case "body":
 			options.BodySet = true
 		case "batch":
 			options.BatchSet = true
 		}
 	})
-	if !options.TitleSet && !options.PrioritySet && !options.CategorySet && !options.TriageStateSet && !options.BodySet && !options.BatchSet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
-		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --category, --triage-state, --body, --batch, --add-label, --block, --relate or --conflict.")
+	if !options.TitleSet && !options.PrioritySet && !options.CategorySet && !options.TriageStateSet && !options.BranchSet && !options.BodySet && !options.BatchSet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
+		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --category, --triage-state, --branch, --body, --batch, --add-label, --block, --relate or --conflict.")
 	}
 	if options.TitleSet {
 		if strings.TrimSpace(title) == "" {
@@ -1318,6 +1323,9 @@ func runEdit(args []string) int {
 			return fail(jsonMode, exitBadUsage, fmt.Sprintf("invalid triage state %q.", triageState), "use "+triageList+".")
 		}
 		options.TriageState = triageState
+	}
+	if options.BranchSet {
+		options.Branch = branch
 	}
 	if options.BodySet {
 		if body == "-" {
@@ -1346,7 +1354,7 @@ func runEdit(args []string) int {
 		}
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1414,7 +1422,7 @@ func runRm(args []string) int {
 		return failInvalidProjectName(jsonMode, projectName)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1472,7 +1480,7 @@ func runPrune(args []string) int {
 		return failInvalidProjectName(jsonMode, projectName)
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1558,7 +1566,7 @@ func runList(args []string) int {
 		}
 	}
 
-	db, st, openFail := openMigratedStore()
+	db, st, openFail := openStore()
 	if openFail != nil {
 		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
 	}
@@ -1681,7 +1689,7 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "edit":
 		return map[string]struct{}{
-			"project": {}, "title": {}, "priority": {}, "category": {}, "triage-state": {}, "body": {},
+			"project": {}, "title": {}, "priority": {}, "category": {}, "triage-state": {}, "branch": {}, "body": {},
 			"batch":     {},
 			"add-label": {}, "remove-label": {},
 			"block": {}, "unblock": {}, "relate": {}, "unrelate": {}, "conflict": {}, "unconflict": {},
@@ -1962,7 +1970,7 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "edit":
-		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--body <text>|-] [--batch <name>|--batch ""] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--branch <name>|--branch ""] [--body <text>|-] [--batch <name>|--batch ""] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
 
 Edits an Issue. Requires at least one change.
 Status is changed with ito move; triage state is changed here because it describes review/readiness metadata, not execution progress.
@@ -1972,6 +1980,7 @@ Flags:
   --priority <priority>    %s.
   --category <category>    %s.
   --triage-state <state>   %s.
+  --branch <name>|""       Set the working branch, or clear it with "".
   --body <text>|-          New markdown body. Use "-" to read stdin.
   --batch <name>|""        Move into a Batch, or clear membership with "".
   --add-label <label>      Adds a Label. Repeatable.
@@ -2237,6 +2246,9 @@ func printIssueDetail(i issue, jsonMode bool) int {
 	fmt.Printf("Priority: %s\n", i.Priority)
 	fmt.Printf("Category: %s\n", i.Category)
 	fmt.Printf("Triage state: %s\n", i.TriageState)
+	if i.Branch != "" {
+		fmt.Printf("Branch: %s\n", i.Branch)
+	}
 	fmt.Printf("Batch: %s\n", formatOptionalString(i.Batch))
 	fmt.Printf("Created: %s\n", i.Created)
 	fmt.Printf("Updated: %s\n", i.Updated)
@@ -2293,6 +2305,7 @@ func issueListJSON(i issue) issueListItem {
 		Priority:      i.Priority,
 		Category:      i.Category,
 		TriageState:   i.TriageState,
+		Branch:        i.Branch,
 		Labels:        i.Labels,
 		BlockedBy:     i.BlockedBy,
 		RelatesTo:     i.RelatesTo,

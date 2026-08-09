@@ -20,7 +20,7 @@ type migrationTable struct {
 var migrationTables = []migrationTable{
 	{name: "projects", columns: []string{"id", "name", "root_path", "prefix", "last_id"}, orderBy: "id"},
 	{name: "batches", columns: []string{"id", "project_id", "name", "created"}, orderBy: "id"},
-	{name: "issues", columns: []string{"row_id", "project_id", "id", "title", "status", "priority", "body", "created", "updated", "batch_id", "category", "triage_state"}, orderBy: "row_id"},
+	{name: "issues", columns: []string{"row_id", "project_id", "id", "title", "status", "priority", "body", "created", "updated", "batch_id", "category", "triage_state", "branch"}, orderBy: "row_id"},
 	{name: "issue_links", columns: []string{"project_id", "source_id", "target_id", "kind"}, orderBy: "project_id, source_id, target_id, kind"},
 	{name: "issue_labels", columns: []string{"project_id", "issue_id", "label"}, orderBy: "project_id, issue_id, label"},
 }

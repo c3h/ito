@@ -33,6 +33,7 @@ type issueJSON struct {
 	Priority      string   `json:"priority"`
 	Category      string   `json:"category"`
 	TriageState   string   `json:"triage_state"`
+	Branch        string   `json:"branch"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -204,7 +205,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "edit help",
 			args:     []string{"edit", "--help"},
-			contains: []string{"usage: ito edit", "--title", "--priority", "--batch", "--add-label", "--block", "--relate", "--conflict", "--unconflict"},
+			contains: []string{"usage: ito edit", "--title", "--priority", "--branch", "--batch", "--add-label", "--block", "--relate", "--conflict", "--unconflict"},
 		},
 	}
 
@@ -839,6 +840,41 @@ func TestIssueTriageMetadataCreateEditListAndShow(t *testing.T) {
 	defaultIssue := decodeIssue(t, runITO(t, repo, itoHome, "show", "--json", "TRI-2").stdout)
 	if defaultIssue.Category != "research" || defaultIssue.TriageState != "ready-for-human" {
 		t.Fatalf("explicit metadata on second issue lost, got %#v", defaultIssue)
+	}
+}
+
+func TestEditBranchAppearsInShowAndCanBeCleared(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "branch-app", "--prefix", "BRC"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Track branch"); result.exitCode != 0 {
+		t.Fatalf("ito new failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+
+	edited := runITO(t, repo, itoHome, "edit", "--json", "BRC-1", "--branch", "feat/pr-sync")
+	if edited.exitCode != 0 {
+		t.Fatalf("ito edit --branch failed with exit %d\nstdout: %s\nstderr: %s", edited.exitCode, edited.stdout, edited.stderr)
+	}
+	if issue := decodeIssue(t, edited.stdout); issue.Branch != "feat/pr-sync" {
+		t.Fatalf("edited branch = %q", issue.Branch)
+	}
+	human := runITO(t, repo, itoHome, "show", "BRC-1")
+	if human.exitCode != 0 || !strings.Contains(human.stdout, "Branch: feat/pr-sync") {
+		t.Fatalf("human show omitted branch\nstdout: %s\nstderr: %s", human.stdout, human.stderr)
+	}
+
+	cleared := runITO(t, repo, itoHome, "edit", "--json", "BRC-1", "--branch", "")
+	if cleared.exitCode != 0 {
+		t.Fatalf("ito edit --branch empty failed with exit %d\nstdout: %s\nstderr: %s", cleared.exitCode, cleared.stdout, cleared.stderr)
+	}
+	if issue := decodeIssue(t, cleared.stdout); issue.Branch != "" {
+		t.Fatalf("cleared branch = %q, want empty", issue.Branch)
+	}
+	if shown := runITO(t, repo, itoHome, "show", "BRC-1"); strings.Contains(shown.stdout, "Branch:") {
+		t.Fatalf("human show rendered an unset branch\nstdout: %s", shown.stdout)
 	}
 }
 
@@ -2520,7 +2556,7 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-
 	if err := json.Unmarshal([]byte(result.stdout), &raw); err != nil {
 		t.Fatalf("stdout is not a JSON object: %v\nstdout: %s", err, result.stdout)
 	}
-	expectedKeys := []string{"id", "project", "title", "status", "priority", "category", "triage_state", "labels", "blocked_by", "relates_to", "conflicts_with", "batch", "body", "created", "updated"}
+	expectedKeys := []string{"id", "project", "title", "status", "priority", "category", "triage_state", "branch", "labels", "blocked_by", "relates_to", "conflicts_with", "batch", "body", "created", "updated"}
 	if len(raw) != len(expectedKeys) {
 		t.Fatalf("expected exactly keys %v, got %v in %s", expectedKeys, raw, result.stdout)
 	}

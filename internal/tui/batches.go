@@ -408,10 +408,9 @@ func (m model) batchesView() string {
 	if len(m.batchSections) == 0 {
 		// The surface keys all act on Batch rows, so the empty state trims the
 		// bottom bar to the keys that still do something.
-		bar := m.batchesBottomBar(0, 0)
-		if !m.filterOpen && !m.commandOpen {
-			bar = statusBar([2]string{"r", "refresh"}, [2]string{":", "cmd"}, [2]string{"q", "quit"})
-		}
+		bar := m.surfaceBottomBar(0, 0,
+			[2]string{"r", "refresh"}, [2]string{":", "cmd"}, [2]string{"q", "quit"},
+		)
 		return surfaceFrame(header(m.project.Name, 0, width, viewBatches),
 			emptyState("no Batches yet", "ito batch new <name>", "to plan one"), bar, width)
 	}

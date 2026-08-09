@@ -1446,6 +1446,8 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 		t.Fatalf("create target issue: %v", err)
 	}
 	if _, err := st.Edit(project, target.ID, store.EditIssueOptions{
+		BranchSet: true,
+		Branch:    "feat/issue-detail",
 		LinkOps: []store.LinkEditOp{
 			{Kind: "blocked_by", Action: "add", Target: blocker.ID},
 			{Kind: "relates_to", Action: "add", Target: related.ID},
@@ -1462,6 +1464,7 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 	for _, want := range []string{
 		"ito · " + target.ID + " · Read-only detail view",
 		"todo   ·   urgent   ·   docs  feature",
+		"branch       feat/issue-detail",
 		"blocked by   " + blocker.ID + "   Extract store read path",
 		"relates to   " + related.ID + "   Render the Board later",
 		"conflicts with   " + conflicting.ID + "   Avoid parallel Board work",
