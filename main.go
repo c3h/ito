@@ -297,17 +297,13 @@ func (e commandFailure) Error() string {
 	return e.message
 }
 
-// openMigratedStore opens the central store and runs the migration, returning a
-// ready *sql.DB (the caller defers Close) or a typed *commandFailure carrying
-// the exact code/message/hint. On migrate failure it closes the DB first.
+// openMigratedStore opens the central store, returning a ready *sql.DB (the
+// caller defers Close) or a typed *commandFailure carrying the exact
+// code/message/hint. OpenDefault already migrates whichever backend it opens.
 func openMigratedStore() (*sql.DB, *itostore.Store, *commandFailure) {
 	db, err := itostore.OpenDefault()
 	if err != nil {
 		return nil, nil, &commandFailure{exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions."}
-	}
-	if err := itostore.Migrate(db); err != nil {
-		db.Close()
-		return nil, nil, &commandFailure{exitGeneric, fmt.Sprintf("could not migrate the central store: %v", err), "check that the ito.db file is a valid SQLite database."}
 	}
 	return db, itostore.New(db), nil
 }
@@ -2092,14 +2088,6 @@ func printCreatedBatch(b batch, jsonMode bool) int {
 func batchListRows(st *itostore.Store, p project, batches []batch) ([]batchListRow, error) {
 	rows := make([]batchListRow, 0, len(batches))
 	for _, b := range batches {
-		// ShowBatch hides completed members by default, so a fully done Batch
-		// always has zero visible Waves. Preserve that output without paying
-		// three aggregate reads for history the list does not display.
-		if b.Total > 0 && b.Done == b.Total {
-			waves := 0
-			rows = append(rows, batchListRow{Batch: b, Waves: &waves})
-			continue
-		}
 		plan, err := st.ShowBatch(p, b.Name)
 		if err != nil {
 			var cycle *itostore.BatchCycleError
@@ -2135,7 +2123,7 @@ func printBatchList(rows []batchListRow, jsonMode bool) int {
 	for _, row := range rows {
 		b := row.Batch
 		progress := "done"
-		if b.Total == 0 || b.Done != b.Total {
+		if !b.Complete() {
 			progress = fmt.Sprintf("%d/%d done", b.Done, b.Total)
 		}
 		state := ""

@@ -2,11 +2,13 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,13 +58,17 @@ var (
 	priorityOrderSQL = orderCase("issues.priority", Priorities)
 )
 
+// unknownOrderRank sorts a value outside its enumeration last, in SQL and in
+// the client-side derivations that have to agree with it.
+const unknownOrderRank = 99
+
 func orderCase(column string, values []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CASE %s", column)
 	for i, value := range values {
 		fmt.Fprintf(&b, " WHEN '%s' THEN %d", value, i+1)
 	}
-	b.WriteString(" ELSE 99 END")
+	fmt.Fprintf(&b, " ELSE %d END", unknownOrderRank)
 	return b.String()
 }
 
@@ -176,6 +182,13 @@ func (b Batch) Date() string {
 	return parsed.UTC().Format("2006-01-02")
 }
 
+// Complete reports that every member is done, which an empty Batch is not: it
+// has nothing to finish. The CLI and the TUI both branch on it, so the two
+// surfaces cannot disagree about which Batches are behind them.
+func (b Batch) Complete() bool {
+	return b.Total > 0 && b.Done == b.Total
+}
+
 type DeleteBatchResult struct {
 	Name           string
 	MembersCleared int
@@ -272,13 +285,17 @@ type Store struct {
 	db *sql.DB
 }
 
-// openAtPath opens (creating the directory if needed) the SQLite store under
-// home. _txlock=immediate makes db.Begin() emit BEGIN IMMEDIATE so write
-// transactions take the write lock up front, avoiding lock-upgrade deadlocks
-// (read-then-write would otherwise fail with SQLITE_BUSY). WAL improves
-// read/write concurrency. The _pragma settings apply to every pooled
-// connection, unlike a single post-open db.Exec.
-func openAtPath(home string) (*sql.DB, error) {
+// maxIdleConns keeps enough pooled connections warm for the widest concurrent
+// read the surfaces issue, so a burst does not churn connections.
+const maxIdleConns = 16
+
+// Open opens (creating the directory if needed) the SQLite store under home and
+// brings it to the latest schema. _txlock=immediate makes db.Begin() emit BEGIN
+// IMMEDIATE so write transactions take the write lock up front, avoiding
+// lock-upgrade deadlocks (read-then-write would otherwise fail with
+// SQLITE_BUSY). WAL improves read/write concurrency. The _pragma settings apply
+// to every pooled connection, unlike a single post-open db.Exec.
+func Open(home string) (*sql.DB, error) {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return nil, err
 	}
@@ -286,14 +303,14 @@ func openAtPath(home string) (*sql.DB, error) {
 		"file:%s?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)",
 		itoconfig.LocalDBPath(home),
 	)
-	return sql.Open("sqlite", dsn)
-}
-
-func Open(home string) (*sql.DB, error) {
-	db, err := openAtPath(home)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
+	// Concurrent readers — the TUI derives every open Batch at once — otherwise
+	// overflow the default idle pool of two and pay a file open plus the DSN
+	// pragmas for each surplus connection, on every refresh.
+	db.SetMaxIdleConns(maxIdleConns)
 	if err := Migrate(db); err != nil {
 		db.Close()
 		return nil, err
@@ -531,10 +548,15 @@ func CloudDSN(url, token string) string {
 	return url + "?authToken=" + token
 }
 
+// openBackend returns a ready-to-use, fully migrated database. On the cloud
+// backend every statement is a network round-trip, so the migration is skipped
+// entirely when the local schema cache says this database is already at the
+// latest version; a stale cache (e.g. after wiping the remote database) is
+// cleared by deleting the cache file under ITO_HOME.
 func openBackend(cfg itoconfig.Config, home string, openDB openDBFunc) (*sql.DB, error) {
 	switch cfg.Backend {
 	case itoconfig.BackendLocal:
-		return openAtPath(home)
+		return Open(home)
 	case itoconfig.BackendCloud:
 		if cfg.Cloud == nil || cfg.Cloud.URL == "" || cfg.Cloud.Token == "" {
 			return nil, errors.New("cloud backend requires url and token")
@@ -543,14 +565,70 @@ func openBackend(cfg itoconfig.Config, home string, openDB openDBFunc) (*sql.DB,
 		if err != nil {
 			return nil, fmt.Errorf("open cloud database %q: %w", cfg.Cloud.URL, err)
 		}
+		if schemaCacheCurrent(home, cfg.Cloud.URL) {
+			return db, nil
+		}
 		if err := Migrate(db); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("initialize cloud database %q: %w", cfg.Cloud.URL, err)
 		}
+		MarkSchemaCurrent(home, cfg.Cloud.URL)
 		return db, nil
 	default:
 		return nil, fmt.Errorf("unsupported backend %q", cfg.Backend)
 	}
+}
+
+var migrations = []struct {
+	version int
+	apply   func(*sql.Tx) error
+}{
+	{version: 1, apply: migrateV1},
+	{version: 2, apply: migrateV2},
+	{version: 3, apply: migrateV3},
+}
+
+var latestSchemaVersion = migrations[len(migrations)-1].version
+
+// The schema cache remembers, per cloud database URL, that the remote schema
+// already reached latestSchemaVersion, so subsequent opens skip the Migrate
+// round-trips entirely. It is a pure optimization: deleting the file merely
+// re-runs the (idempotent) migration on the next open.
+type schemaCache struct {
+	URL     string `json:"url"`
+	Version int    `json:"version"`
+}
+
+func schemaCachePath(home string) string {
+	return filepath.Join(home, "schema-cache.json")
+}
+
+func schemaCacheCurrent(home, url string) bool {
+	data, err := os.ReadFile(schemaCachePath(home))
+	if err != nil {
+		return false
+	}
+	var cache schemaCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return false
+	}
+	return cache.URL == url && cache.Version == latestSchemaVersion
+}
+
+// MarkSchemaCurrent records that the cloud database at url is fully migrated.
+// It is exported so the cloud-migration command can pre-warm the cache right
+// after it migrates the destination. It reports nothing because there is
+// nothing to handle: failing to write the cache only costs one redundant
+// Migrate on the next open.
+func MarkSchemaCurrent(home, url string) {
+	data, err := json.Marshal(schemaCache{URL: url, Version: latestSchemaVersion})
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(schemaCachePath(home), data, 0o600)
 }
 
 func Migrate(db *sql.DB) error {
@@ -560,14 +638,6 @@ func Migrate(db *sql.DB) error {
 	version, err := currentSchemaVersion(db)
 	if err != nil {
 		return err
-	}
-	migrations := []struct {
-		version int
-		apply   func(*sql.Tx) error
-	}{
-		{version: 1, apply: migrateV1},
-		{version: 2, apply: migrateV2},
-		{version: 3, apply: migrateV3},
 	}
 	for _, migration := range migrations {
 		if version >= migration.version {
@@ -1163,16 +1233,32 @@ func showBatch(db *sql.DB, p Project, name string, opts ShowBatchOptions) (Batch
 	if err != nil {
 		return BatchPlan{}, err
 	}
+	// A Batch with nothing left to place derives to an empty plan, so stop
+	// before the relation read rather than pay for it and throw the result
+	// away — the shape every completed Batch has on every listing and refresh.
+	if !batchHasOpenWork(members, opts.IncludeDone) {
+		return BatchPlan{Batch: batch, Waves: []BatchWave{}, Waiting: []Issue{}}, nil
+	}
 	graph, err := loadBatchIssueRelations(db, p.ID, batchID, members)
 	if err != nil {
 		return BatchPlan{}, err
 	}
-	waves, waiting, err := deriveBatchWaves(batchID, members, graph, opts)
+	waves, waiting, err := deriveBatchWaves(members, graph, opts)
 	if err != nil {
 		return BatchPlan{}, err
 	}
 	markBatchWaveReadiness(waves)
 	return BatchPlan{Batch: batch, Waves: waves, Waiting: waiting}, nil
+}
+
+// batchHasOpenWork reports whether the derivation has any member to place under
+// opts: false for an empty Batch, and for a fully done one unless the caller is
+// replaying history.
+func batchHasOpenWork(members []listedIssue, includeDone bool) bool {
+	if includeDone {
+		return len(members) > 0
+	}
+	return slices.ContainsFunc(members, func(m listedIssue) bool { return m.Status != "done" })
 }
 
 func batchWaveDone(issues []Issue) bool {
@@ -1196,9 +1282,9 @@ func markBatchWaveReadiness(waves []BatchWave) {
 	}
 }
 
-// queryBatchMembers combines the Batch lookup, progress calculation and ordered
-// member load. The LEFT JOIN preserves empty Batches while avoiding the
-// separate findBatchWithProgress round-trip previously paid by every ShowBatch.
+// queryBatchMembers reads the Batch, its progress and its ordered members in
+// one statement. The LEFT JOIN keeps an empty Batch findable — it comes back as
+// a single row whose Issue columns are blank.
 func queryBatchMembers(db *sql.DB, p Project, name string) (Batch, int64, []listedIssue, error) {
 	rows, err := db.Query(`
 SELECT batches.id, batches.name, projects.name, batches.created,
@@ -1260,10 +1346,14 @@ issues.id ASC`, p.ID, name)
 	return batch, batchID, members, nil
 }
 
+// batchGraphIssue is what the readiness rules need to know about an Issue the
+// derivation touches — a member, or an external blocker or conflict partner.
+// InBatch is what separates the two: a member's completion is decided by the
+// derivation (has an earlier Wave placed it?), an outsider's by its status.
 type batchGraphIssue struct {
 	Status   string
 	Priority string
-	BatchID  sql.NullInt64
+	InBatch  bool
 }
 
 type batchIssueGraph struct {
@@ -1272,10 +1362,11 @@ type batchIssueGraph struct {
 	conflictsWith map[string][]string
 }
 
-// loadBatchIssueRelations adapts the aggregate list relation loader to the
-// Batch graph. It hydrates all member relations in two queries and carries the
-// status and Batch membership of external blockers/conflict partners needed by
-// the client-side readiness rules.
+// loadBatchIssueRelations hydrates every member's relations in two queries and,
+// alongside them, the status and Batch membership of the external blockers and
+// conflict partners the readiness rules consult. It scopes its own queries to
+// the Batch but distributes the rows through the same helpers as the aggregate
+// list loader.
 func loadBatchIssueRelations(q rowQuerier, projectID, batchID int64, members []listedIssue) (batchIssueGraph, error) {
 	graph := batchIssueGraph{
 		issues:        make(map[string]batchGraphIssue),
@@ -1286,44 +1377,39 @@ func loadBatchIssueRelations(q rowQuerier, projectID, batchID int64, members []l
 		return graph, nil
 	}
 
-	memberIndexes := make(map[string]int, len(members))
+	memberIndexes := make(map[issueRelationKey]int, len(members))
+	memberArgs := make([]any, 0, len(members)+1)
+	memberArgs = append(memberArgs, projectID)
 	for i := range members {
-		memberIndexes[members[i].ID] = i
+		memberIndexes[issueRelationKey{ProjectID: projectID, IssueID: members[i].ID}] = i
+		memberArgs = append(memberArgs, members[i].ID)
 		graph.issues[members[i].ID] = batchGraphIssue{
 			Status:   members[i].Status,
 			Priority: members[i].Priority,
-			BatchID:  sql.NullInt64{Int64: batchID, Valid: true},
+			InBatch:  true,
 		}
 	}
 
-	if err := func() error {
-		rows, err := q.Query(`
-SELECT issue_labels.issue_id, issue_labels.label
+	// Scoped to the member IDs already in hand rather than joined back to
+	// issues: the join reads every label row in the Project to keep a handful.
+	if err := forEachRow(q, `
+SELECT issue_id, label
 FROM issue_labels
-JOIN issues ON issues.project_id = issue_labels.project_id AND issues.id = issue_labels.issue_id
-WHERE issue_labels.project_id = ? AND issues.batch_id = ?
-ORDER BY issue_labels.issue_id, issue_labels.label`, projectID, batchID)
-		if err != nil {
+WHERE project_id = ? AND issue_id IN (`+sqlPlaceholders(len(members))+`)
+ORDER BY issue_id, label`, memberArgs, func(rows *sql.Rows) error {
+		var issueID, label string
+		if err := rows.Scan(&issueID, &label); err != nil {
 			return err
 		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var issueID, label string
-			if err := rows.Scan(&issueID, &label); err != nil {
-				return err
-			}
-			if i, ok := memberIndexes[issueID]; ok {
-				members[i].Labels = append(members[i].Labels, label)
-			}
+		if i, ok := memberIndexes[issueRelationKey{ProjectID: projectID, IssueID: issueID}]; ok {
+			members[i].Labels = append(members[i].Labels, label)
 		}
-		return rows.Err()
-	}(); err != nil {
+		return nil
+	}); err != nil {
 		return batchIssueGraph{}, err
 	}
 
-	if err := func() error {
-		rows, err := q.Query(`
+	if err := forEachRow(q, `
 WITH batch_members AS (
   SELECT id
   FROM issues
@@ -1361,68 +1447,40 @@ WHERE issue_links.project_id = ?
     )
   )
 ORDER BY source.id, target.id, issue_links.kind`,
-			projectID, batchID, projectID, projectID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-
-		for rows.Next() {
+		[]any{projectID, batchID, projectID, projectID}, func(rows *sql.Rows) error {
 			var sourceID, targetID, kind string
 			var source, target batchGraphIssue
+			var sourceBatchID, targetBatchID sql.NullInt64
 			if err := rows.Scan(
-				&sourceID, &source.Status, &source.Priority, &source.BatchID,
-				&targetID, &target.Status, &target.Priority, &target.BatchID,
+				&sourceID, &source.Status, &source.Priority, &sourceBatchID,
+				&targetID, &target.Status, &target.Priority, &targetBatchID,
 				&kind,
 			); err != nil {
 				return err
 			}
+			source.InBatch = sourceBatchID.Valid && sourceBatchID.Int64 == batchID
+			target.InBatch = targetBatchID.Valid && targetBatchID.Int64 == batchID
 			graph.issues[sourceID] = source
 			graph.issues[targetID] = target
 
-			sourceIndex, sourceIsMember := memberIndexes[sourceID]
-			targetIndex, targetIsMember := memberIndexes[targetID]
 			switch kind {
 			case "blocked_by":
 				graph.blockedBy[sourceID] = append(graph.blockedBy[sourceID], targetID)
-				if sourceIsMember {
-					members[sourceIndex].BlockedBy = append(members[sourceIndex].BlockedBy, targetID)
-				}
-			case "relates_to":
-				if sourceIsMember {
-					members[sourceIndex].RelatesTo = append(members[sourceIndex].RelatesTo, targetID)
-				}
-				if targetIsMember {
-					members[targetIndex].RelatesTo = append(members[targetIndex].RelatesTo, sourceID)
-				}
 			case "conflicts_with":
 				graph.conflictsWith[sourceID] = append(graph.conflictsWith[sourceID], targetID)
 				graph.conflictsWith[targetID] = append(graph.conflictsWith[targetID], sourceID)
-				if sourceIsMember {
-					members[sourceIndex].ConflictsWith = append(members[sourceIndex].ConflictsWith, targetID)
-				}
-				if targetIsMember {
-					members[targetIndex].ConflictsWith = append(members[targetIndex].ConflictsWith, sourceID)
-				}
 			}
-		}
-		return rows.Err()
-	}(); err != nil {
+			distributeIssueLink(members, memberIndexes, projectID, sourceID, targetID, kind)
+			return nil
+		}); err != nil {
 		return batchIssueGraph{}, err
 	}
 
-	for i := range members {
-		members[i].BlockedBy = sortIssueIDs(members[i].BlockedBy)
-		members[i].RelatesTo = sortIssueIDs(members[i].RelatesTo)
-		members[i].ConflictsWith = sortIssueIDs(members[i].ConflictsWith)
-	}
-	for id := range graph.blockedBy {
-		sort.Strings(graph.blockedBy[id])
-	}
+	sortListedIssueRelations(members)
 	return graph, nil
 }
 
-func deriveBatchWaves(batchID int64, members []listedIssue, graph batchIssueGraph, opts ShowBatchOptions) ([]BatchWave, []Issue, error) {
+func deriveBatchWaves(members []listedIssue, graph batchIssueGraph, opts ShowBatchOptions) ([]BatchWave, []Issue, error) {
 	remaining := make(map[string]bool, len(members))
 	for _, member := range members {
 		if opts.IncludeDone || member.Status != "done" {
@@ -1435,7 +1493,7 @@ func deriveBatchWaves(batchID int64, members []listedIssue, graph batchIssueGrap
 	for len(remaining) > 0 {
 		issues := []Issue{}
 		for _, member := range members {
-			if remaining[member.ID] && batchIssueReady(member.ID, batchID, placed, graph, opts.IncludeDone) {
+			if remaining[member.ID] && batchIssueReady(member.ID, placed, graph, opts.IncludeDone) {
 				issues = append(issues, member.Issue)
 			}
 		}
@@ -1466,17 +1524,17 @@ func deriveBatchWaves(batchID int64, members []listedIssue, graph batchIssueGrap
 	return waves, []Issue{}, nil
 }
 
-func batchIssueReady(id string, batchID int64, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
-	if !batchIssueOtherwiseReady(id, batchID, placed, graph, includeDone) {
+func batchIssueReady(id string, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
+	if !batchIssueOtherwiseReady(id, placed, graph, includeDone) {
 		return false
 	}
 	for _, partnerID := range graph.conflictsWith[id] {
 		partner := graph.issues[partnerID]
 		if (partner.Status == "in_progress" || partner.Status == "in_review") &&
-			!batchIssueDone(partnerID, batchID, placed, graph, includeDone) {
+			!batchIssueDone(partnerID, placed, graph, includeDone) {
 			return false
 		}
-		if batchIssueOtherwiseReady(partnerID, batchID, placed, graph, includeDone) &&
+		if batchIssueOtherwiseReady(partnerID, placed, graph, includeDone) &&
 			batchIssueBeats(partnerID, id, graph) {
 			return false
 		}
@@ -1484,34 +1542,24 @@ func batchIssueReady(id string, batchID int64, placed map[string]bool, graph bat
 	return true
 }
 
-func batchIssueOtherwiseReady(id string, batchID int64, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
-	issue := graph.issues[id]
-	if includeDone {
-		if issue.BatchID.Valid && issue.BatchID.Int64 == batchID {
-			if placed[id] {
-				return false
-			}
-		} else if issue.Status == "done" {
-			return false
-		}
-	} else if issue.Status == "done" {
-		return false
-	}
-	if batchIssueDone(id, batchID, placed, graph, includeDone) {
+func batchIssueOtherwiseReady(id string, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
+	if batchIssueDone(id, placed, graph, includeDone) {
 		return false
 	}
 	for _, blockerID := range graph.blockedBy[id] {
-		if !batchIssueDone(blockerID, batchID, placed, graph, includeDone) {
+		if !batchIssueDone(blockerID, placed, graph, includeDone) {
 			return false
 		}
 	}
 	return true
 }
 
-func batchIssueDone(id string, batchID int64, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
+func batchIssueDone(id string, placed map[string]bool, graph batchIssueGraph, includeDone bool) bool {
 	issue := graph.issues[id]
 	if includeDone {
-		if issue.BatchID.Valid && issue.BatchID.Int64 == batchID {
+		// Replaying history: a member counts as done once an earlier Wave placed
+		// it, whatever its status says today; an outsider still counts by status.
+		if issue.InBatch {
 			return placed[id]
 		}
 		return issue.Status == "done"
@@ -1528,13 +1576,13 @@ func batchIssueBeats(leftID, rightID string, graph batchIssueGraph) bool {
 	return issueIDLess(leftID, rightID)
 }
 
+// batchPriorityRank mirrors orderCase's ranking so a client-side tie-break and
+// the SQL ORDER BY agree, unknown priorities included.
 func batchPriorityRank(priority string) int {
-	for i, candidate := range Priorities {
-		if candidate == priority {
-			return i + 1
-		}
+	if i := slices.Index(Priorities, priority); i >= 0 {
+		return i + 1
 	}
-	return 99
+	return unknownOrderRank
 }
 
 func findBatchBlockedByCycle(remaining map[string]bool, graph batchIssueGraph) []string {
@@ -1666,7 +1714,7 @@ func insertIssue(db *sql.DB, p Project, title, status, priority, category, triag
 		Priority:      priority,
 		Category:      category,
 		TriageState:   triageState,
-		Labels:        dedupeStrings(labels),
+		Labels:        dedupe(labels),
 		BlockedBy:     []string{},
 		RelatesTo:     []string{},
 		ConflictsWith: []string{},
@@ -2097,9 +2145,10 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id)
 	return found, true, nil
 }
 
-// scanIssue reads the shared issue column list — id, project name, title,
-// status, priority, category, triage state, batch name, body, created, updated
-// — from a row or rows cursor, leaving relations for loadIssueRelations.
+// scanIssue reads an issue column list — id, project name, title, status,
+// priority, category, triage state, batch name, body, created, updated — from a
+// row or rows cursor, leaving relations for loadIssueRelations. Queries that
+// project the same columns in a different order scan them themselves.
 func scanIssue(s interface{ Scan(dest ...any) error }) (Issue, error) {
 	found := Issue{
 		Labels:        []string{},
@@ -2179,8 +2228,7 @@ func loadListedIssueRelations(q rowQuerier, issues []listedIssue) error {
 	}
 
 	issueIndexes := make(map[issueRelationKey]int, len(issues))
-	projectIDs := make([]int64, 0)
-	seenProjects := make(map[int64]struct{})
+	projectIDs := make([]int64, 0, len(issues))
 	for i := range issues {
 		issues[i].Labels = []string{}
 		issues[i].BlockedBy = []string{}
@@ -2188,97 +2236,94 @@ func loadListedIssueRelations(q rowQuerier, issues []listedIssue) error {
 		issues[i].ConflictsWith = []string{}
 
 		issueIndexes[issueRelationKey{ProjectID: issues[i].ProjectID, IssueID: issues[i].ID}] = i
-		if _, seen := seenProjects[issues[i].ProjectID]; !seen {
-			seenProjects[issues[i].ProjectID] = struct{}{}
-			projectIDs = append(projectIDs, issues[i].ProjectID)
-		}
+		projectIDs = append(projectIDs, issues[i].ProjectID)
 	}
+	projectIDs = dedupe(projectIDs)
 
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(projectIDs)), ",")
+	placeholders := sqlPlaceholders(len(projectIDs))
 	args := make([]any, len(projectIDs))
 	for i, projectID := range projectIDs {
 		args[i] = projectID
 	}
 
-	if err := func() error {
-		rows, err := q.Query(`
+	if err := forEachRow(q, `
 SELECT project_id, issue_id, label
 FROM issue_labels
 WHERE project_id IN (`+placeholders+`)
-ORDER BY project_id, issue_id, label`, args...)
-		if err != nil {
+ORDER BY project_id, issue_id, label`, args, func(rows *sql.Rows) error {
+		var projectID int64
+		var issueID, label string
+		if err := rows.Scan(&projectID, &issueID, &label); err != nil {
 			return err
 		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var projectID int64
-			var issueID, label string
-			if err := rows.Scan(&projectID, &issueID, &label); err != nil {
-				return err
-			}
-			if i, ok := issueIndexes[issueRelationKey{ProjectID: projectID, IssueID: issueID}]; ok {
-				issues[i].Labels = append(issues[i].Labels, label)
-			}
+		if i, ok := issueIndexes[issueRelationKey{ProjectID: projectID, IssueID: issueID}]; ok {
+			issues[i].Labels = append(issues[i].Labels, label)
 		}
-		return rows.Err()
-	}(); err != nil {
+		return nil
+	}); err != nil {
 		return err
 	}
 
-	if err := func() error {
-		rows, err := q.Query(`
+	if err := forEachRow(q, `
 SELECT issue_links.project_id, source_id, target_id, kind
 FROM issue_links
 JOIN issues AS source ON source.project_id = issue_links.project_id AND source.id = issue_links.source_id
 JOIN issues AS target ON target.project_id = issue_links.project_id AND target.id = issue_links.target_id
 WHERE issue_links.project_id IN (`+placeholders+`)
-  AND kind IN ('blocked_by', 'relates_to', 'conflicts_with')`, args...)
-		if err != nil {
+  AND kind IN ('blocked_by', 'relates_to', 'conflicts_with')`, args, func(rows *sql.Rows) error {
+		var projectID int64
+		var sourceID, targetID, kind string
+		if err := rows.Scan(&projectID, &sourceID, &targetID, &kind); err != nil {
 			return err
 		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var projectID int64
-			var sourceID, targetID, kind string
-			if err := rows.Scan(&projectID, &sourceID, &targetID, &kind); err != nil {
-				return err
-			}
-			sourceIndex, sourceListed := issueIndexes[issueRelationKey{ProjectID: projectID, IssueID: sourceID}]
-			targetIndex, targetListed := issueIndexes[issueRelationKey{ProjectID: projectID, IssueID: targetID}]
-			switch kind {
-			case "blocked_by":
-				if sourceListed {
-					issues[sourceIndex].BlockedBy = append(issues[sourceIndex].BlockedBy, targetID)
-				}
-			case "relates_to":
-				if sourceListed {
-					issues[sourceIndex].RelatesTo = append(issues[sourceIndex].RelatesTo, targetID)
-				}
-				if targetListed {
-					issues[targetIndex].RelatesTo = append(issues[targetIndex].RelatesTo, sourceID)
-				}
-			case "conflicts_with":
-				if sourceListed {
-					issues[sourceIndex].ConflictsWith = append(issues[sourceIndex].ConflictsWith, targetID)
-				}
-				if targetListed {
-					issues[targetIndex].ConflictsWith = append(issues[targetIndex].ConflictsWith, sourceID)
-				}
-			}
-		}
-		return rows.Err()
-	}(); err != nil {
+		distributeIssueLink(issues, issueIndexes, projectID, sourceID, targetID, kind)
+		return nil
+	}); err != nil {
 		return err
 	}
 
+	sortListedIssueRelations(issues)
+	return nil
+}
+
+// distributeIssueLink hands one link row to whichever listed Issues it touches.
+// relates_to and conflicts_with are symmetric, so each endpoint carries the
+// other; blocked_by only ever hangs off its source. Every loader distributes
+// rows through here, so the Batch, list and detail surfaces cannot disagree
+// about what an Issue is linked to.
+func distributeIssueLink(issues []listedIssue, indexes map[issueRelationKey]int, projectID int64, sourceID, targetID, kind string) {
+	sourceIndex, sourceListed := indexes[issueRelationKey{ProjectID: projectID, IssueID: sourceID}]
+	targetIndex, targetListed := indexes[issueRelationKey{ProjectID: projectID, IssueID: targetID}]
+	switch kind {
+	case "blocked_by":
+		if sourceListed {
+			issues[sourceIndex].BlockedBy = append(issues[sourceIndex].BlockedBy, targetID)
+		}
+	case "relates_to":
+		if sourceListed {
+			issues[sourceIndex].RelatesTo = append(issues[sourceIndex].RelatesTo, targetID)
+		}
+		if targetListed {
+			issues[targetIndex].RelatesTo = append(issues[targetIndex].RelatesTo, sourceID)
+		}
+	case "conflicts_with":
+		if sourceListed {
+			issues[sourceIndex].ConflictsWith = append(issues[sourceIndex].ConflictsWith, targetID)
+		}
+		if targetListed {
+			issues[targetIndex].ConflictsWith = append(issues[targetIndex].ConflictsWith, sourceID)
+		}
+	}
+}
+
+// sortListedIssueRelations puts every hydrated relation in the canonical Issue
+// ID order the surfaces render.
+func sortListedIssueRelations(issues []listedIssue) {
 	for i := range issues {
 		issues[i].BlockedBy = sortIssueIDs(issues[i].BlockedBy)
 		issues[i].RelatesTo = sortIssueIDs(issues[i].RelatesTo)
 		issues[i].ConflictsWith = sortIssueIDs(issues[i].ConflictsWith)
 	}
-	return nil
 }
 
 func listIssues(db *sql.DB, options ListOptions) ([]Issue, error) {
@@ -2407,22 +2452,7 @@ issues.id ASC`
 }
 
 func readyFrontierWhereSQL(issueAlias string) string {
-	return readyFrontierWhereSQLWithOptions(issueAlias, issueAlias+".status IN ('backlog', 'todo')", tableDonePredicate(""))
-}
-
-// donePredicate builds the SQL that decides whether the issue at issueAlias
-// counts as "done". The non-historical path keys off the status column (and an
-// optional wave-done temp table); the historical batch path keys off batch
-// membership instead, so threading it as a function lets one set of frontier
-// builders serve both.
-type donePredicate func(issueAlias string) string
-
-func tableDonePredicate(doneTable string) donePredicate {
-	return func(issueAlias string) string { return doneStatusWhereSQL(issueAlias, doneTable) }
-}
-
-func readyFrontierWhereSQLWithOptions(issueAlias, statusWhere string, isDone donePredicate) string {
-	return otherwiseReadyWhereSQL(issueAlias, statusWhere, isDone) + `
+	return otherwiseReadyWhereSQL(issueAlias) + `
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS in_flight_conflict
 JOIN issues AS in_flight_partner ON in_flight_partner.project_id = in_flight_conflict.project_id
@@ -2434,7 +2464,7 @@ WHERE in_flight_conflict.project_id = ` + issueAlias + `.project_id
   AND in_flight_conflict.kind = 'conflicts_with'
   AND (in_flight_conflict.source_id = ` + issueAlias + `.id OR in_flight_conflict.target_id = ` + issueAlias + `.id)
   AND in_flight_partner.status IN ('in_progress', 'in_review')
-  AND NOT ` + isDone("in_flight_partner") + `
+  AND NOT ` + doneStatusWhereSQL("in_flight_partner") + `
 )
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS ready_conflict
@@ -2446,30 +2476,26 @@ JOIN issues AS ready_partner ON ready_partner.project_id = ready_conflict.projec
 WHERE ready_conflict.project_id = ` + issueAlias + `.project_id
   AND ready_conflict.kind = 'conflicts_with'
   AND (ready_conflict.source_id = ` + issueAlias + `.id OR ready_conflict.target_id = ` + issueAlias + `.id)
-  AND ` + otherwiseReadyWhereSQL("ready_partner", strings.ReplaceAll(statusWhere, issueAlias+".", "ready_partner."), isDone) + `
+  AND ` + otherwiseReadyWhereSQL("ready_partner") + `
   AND ` + readyConflictPartnerBeatsSQL("ready_partner", issueAlias) + `
 )`
 }
 
-func otherwiseReadyWhereSQL(issueAlias, statusWhere string, isDone donePredicate) string {
+func otherwiseReadyWhereSQL(issueAlias string) string {
 	blockerAlias := issueAlias + "_blocker"
-	return statusWhere + `
-AND NOT ` + isDone(issueAlias) + `
+	return issueAlias + `.status IN ('backlog', 'todo')
 AND NOT EXISTS (
 SELECT 1 FROM issue_links AS ` + blockerAlias + `_link
 JOIN issues AS ` + blockerAlias + ` ON ` + blockerAlias + `.project_id = ` + blockerAlias + `_link.project_id AND ` + blockerAlias + `.id = ` + blockerAlias + `_link.target_id
 WHERE ` + blockerAlias + `_link.project_id = ` + issueAlias + `.project_id
   AND ` + blockerAlias + `_link.source_id = ` + issueAlias + `.id
   AND ` + blockerAlias + `_link.kind = 'blocked_by'
-  AND NOT ` + isDone(blockerAlias) + `
+  AND NOT ` + doneStatusWhereSQL(blockerAlias) + `
 )`
 }
 
-func doneStatusWhereSQL(issueAlias, doneTable string) string {
-	if doneTable == "" {
-		return issueAlias + `.status = 'done'`
-	}
-	return `(` + issueAlias + `.status = 'done' OR EXISTS (SELECT 1 FROM ` + doneTable + ` WHERE ` + doneTable + `.issue_id = ` + issueAlias + `.id))`
+func doneStatusWhereSQL(issueAlias string) string {
+	return issueAlias + `.status = 'done'`
 }
 
 func readyConflictPartnerBeatsSQL(partnerAlias, issueAlias string) string {
@@ -2491,6 +2517,23 @@ func issueNumberSQL(issueAlias string) string {
 type rowQuerier interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
+}
+
+// forEachRow runs a query and hands every row to scan, owning the cursor's
+// lifetime so callers are left with the scan body and nothing else.
+func forEachRow(q rowQuerier, query string, args []any, scan func(*sql.Rows) error) error {
+	rows, err := q.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
 func stringColumn(q rowQuerier, query string, args ...any) ([]string, error) {
@@ -2656,11 +2699,11 @@ func valueExists(q rowQuerier, query string, args ...any) (bool, error) {
 	return true, nil
 }
 
-// dedupeStrings returns a new slice with duplicates removed, preserving the
-// first occurrence's order. Always non-nil.
-func dedupeStrings(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	deduped := make([]string, 0, len(values))
+// dedupe returns a new slice with duplicates removed, preserving the first
+// occurrence's order. Always non-nil.
+func dedupe[T comparable](values []T) []T {
+	seen := make(map[T]struct{}, len(values))
+	deduped := make([]T, 0, len(values))
 	for _, value := range values {
 		if _, ok := seen[value]; ok {
 			continue
@@ -2669,4 +2712,9 @@ func dedupeStrings(values []string) []string {
 		deduped = append(deduped, value)
 	}
 	return deduped
+}
+
+// sqlPlaceholders renders the "?, ?, ?" list an IN clause binds n values with.
+func sqlPlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }

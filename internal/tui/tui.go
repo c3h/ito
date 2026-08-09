@@ -803,7 +803,7 @@ func (m *model) reload() {
 	var (
 		digestIssues []store.Issue
 		digestErr    error
-		batches      batchReload
+		batches      []batchLoad
 		batchErr     error
 	)
 	var loads sync.WaitGroup

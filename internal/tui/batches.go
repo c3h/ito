@@ -39,14 +39,13 @@ type batchGroup struct {
 	issues  []store.Issue
 }
 
-type batchReload struct {
-	batches []store.Batch
-	plans   []batchPlanResult
-}
-
-type batchPlanResult struct {
-	plan store.BatchPlan
-	err  error
+// batchLoad pairs a Batch with the plan derived for it, so the two can never
+// drift apart on the way from the loader to the surface. A completed Batch
+// carries no plan: the surface only reads its summary.
+type batchLoad struct {
+	batch store.Batch
+	plan  store.BatchPlan
+	err   error
 }
 
 // batchGroups turns a derived plan into the groups the surface draws: one per
@@ -79,26 +78,27 @@ func batchGroups(plan store.BatchPlan) []batchGroup {
 // loadBatches snapshots the Project's Batches, deriving each open plan through
 // the core concurrently. Fully done Batches are skipped because the surface
 // only reads their summary.
-func (m *model) loadBatches() (batchReload, error) {
+func (m *model) loadBatches() ([]batchLoad, error) {
 	batches, err := m.store.ListBatches(m.project)
 	if err != nil {
-		return batchReload{}, err
+		return nil, err
 	}
 
-	plans := make([]batchPlanResult, len(batches))
+	loaded := make([]batchLoad, len(batches))
 	var loads sync.WaitGroup
 	for i, batch := range batches {
-		if batchDone(batch) {
+		loaded[i].batch = batch
+		if batch.Complete() {
 			continue
 		}
 		loads.Add(1)
 		go func() {
 			defer loads.Done()
-			plans[i].plan, plans[i].err = m.store.ShowBatch(m.project, batch.Name)
+			loaded[i].plan, loaded[i].err = m.store.ShowBatch(m.project, batch.Name)
 		}()
 	}
 	loads.Wait()
-	return batchReload{batches: batches, plans: plans}, nil
+	return loaded, nil
 }
 
 // reloadBatches applies a loaded snapshot. Batches with open work come first,
@@ -109,7 +109,7 @@ func (m *model) loadBatches() (batchReload, error) {
 // (landing on the rollup when that Batch just completed), a manual collapse
 // toggle survives, and each selection keeps its Issue by ID, falling back to
 // clamping.
-func (m *model) reloadBatches(reload batchReload) error {
+func (m *model) reloadBatches(loaded []batchLoad) error {
 	previous := make(map[string]batchSection, len(m.batchSections))
 	for _, section := range m.batchSections {
 		previous[section.batch.Name] = section
@@ -122,26 +122,25 @@ func (m *model) reloadBatches(reload batchReload) error {
 
 	// Partitioned as it is built: ListBatches is newest-first, so appending to
 	// one of the two halves keeps that order inside each.
-	open := make([]batchSection, 0, len(reload.batches))
+	open := make([]batchSection, 0, len(loaded))
 	var completed []batchSection
-	for i, b := range reload.batches {
-		section := batchSection{batch: b}
-		done := batchDone(b)
+	for _, b := range loaded {
+		section := batchSection{batch: b.batch}
+		done := b.batch.Complete()
 		// A fully done Batch lists no open member, so it only ever reaches the
 		// completed rollup — deriving its plan would be work nothing reads.
 		if !done {
-			plan, err := reload.plans[i].plan, reload.plans[i].err
 			var cycleErr *store.BatchCycleError
 			switch {
-			case errors.As(err, &cycleErr):
+			case errors.As(b.err, &cycleErr):
 				section.cycle = cycleErr.Issues
-			case err != nil:
-				return err
+			case b.err != nil:
+				return b.err
 			default:
-				section.groups = batchGroups(plan)
+				section.groups = batchGroups(b.plan)
 			}
 		}
-		if prev, ok := previous[b.Name]; ok {
+		if prev, ok := previous[b.batch.Name]; ok {
 			section.collapsed = prev.collapsed
 			section.selected = restoredBatchSelection(prev, section)
 		}
@@ -197,15 +196,11 @@ func restoredBatchSelection(prev, next batchSection) int {
 	return min(max(prev.selected, 0), max(0, len(issues)-1))
 }
 
-func batchDone(b store.Batch) bool {
-	return b.Total > 0 && b.Done == b.Total
-}
-
 // openBatchCount is where the completed Batches begin: reloadBatches keeps the
 // ones with open work first, so everything from this index on is fully done.
 func openBatchCount(sections []batchSection) int {
 	for i, section := range sections {
-		if batchDone(section.batch) {
+		if section.batch.Complete() {
 			return i
 		}
 	}

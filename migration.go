@@ -59,6 +59,8 @@ func migrateCloud(url, token string, force bool, openCloud cloudDatabaseOpener) 
 	if err := itostore.Migrate(dst); err != nil {
 		return fmt.Errorf("could not initialize the cloud destination: %s", redactSecret(err.Error(), token))
 	}
+	// Best-effort cache pre-warm; a miss only costs one redundant Migrate later.
+	itostore.MarkSchemaCurrent(home, url)
 	if err := copyDatabase(src, dst, force); err != nil {
 		return fmt.Errorf("could not copy the local database to cloud: %s", redactSecret(err.Error(), token))
 	}

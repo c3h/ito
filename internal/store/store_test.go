@@ -80,6 +80,51 @@ func TestOpenBackendCloudUsesLibSQLAndMigrates(t *testing.T) {
 	assertSchemaVersion(t, db, 3)
 }
 
+func TestOpenBackendCloudSkipsMigrateWhenSchemaCacheCurrent(t *testing.T) {
+	home := t.TempDir()
+	cfg := itoconfig.Config{
+		Backend: itoconfig.BackendCloud,
+		Cloud:   &itoconfig.Cloud{URL: "libsql://example.turso.io", Token: "secret"},
+	}
+	freshCloudDB := func(string, string) (*sql.DB, error) {
+		return sql.Open("sqlite", filepath.Join(t.TempDir(), "cloud.db"))
+	}
+
+	first, err := openBackend(cfg, home, freshCloudDB)
+	if err != nil {
+		t.Fatalf("first cloud open: %v", err)
+	}
+	assertSchemaVersion(t, first, 3)
+	first.Close()
+
+	// The cache is warm, so a second open must not touch the schema at all:
+	// this fresh empty database stays empty.
+	second, err := openBackend(cfg, home, freshCloudDB)
+	if err != nil {
+		t.Fatalf("second cloud open: %v", err)
+	}
+	defer second.Close()
+	var tables int
+	if err := second.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'schema_version'`).Scan(&tables); err != nil {
+		t.Fatalf("inspect second database: %v", err)
+	}
+	if tables != 0 {
+		t.Fatal("second open migrated despite a current schema cache")
+	}
+
+	// A different database URL must invalidate the cache and migrate again.
+	otherCfg := itoconfig.Config{
+		Backend: itoconfig.BackendCloud,
+		Cloud:   &itoconfig.Cloud{URL: "libsql://other.turso.io", Token: "secret"},
+	}
+	third, err := openBackend(otherCfg, home, freshCloudDB)
+	if err != nil {
+		t.Fatalf("third cloud open: %v", err)
+	}
+	defer third.Close()
+	assertSchemaVersion(t, third, 3)
+}
+
 func TestOpenBackendCloudRequiresURLAndToken(t *testing.T) {
 	tests := []struct {
 		name  string
