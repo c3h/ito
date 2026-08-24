@@ -3,53 +3,64 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestLoadDefaultsToLocal(t *testing.T) {
+func TestLoadMissingFileYieldsEmptyConfig(t *testing.T) {
 	t.Setenv("ITO_HOME", t.TempDir())
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load missing config: %v", err)
 	}
-	if cfg.Backend != BackendLocal {
-		t.Fatalf("expected local backend, got %q", cfg.Backend)
+	if cfg.Ledger != nil {
+		t.Fatalf("expected no ledger section, got %#v", cfg.Ledger)
 	}
 }
 
-func TestLoadDefaultsMissingBackendToLocal(t *testing.T) {
+func TestLoadAcceptsLegacyLocalBackend(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ITO_HOME", home)
-	if err := os.WriteFile(Path(home), []byte(`{"cloud":{"url":"libsql://example","token":"secret"}}`), 0o600); err != nil {
+	if err := os.WriteFile(Path(home), []byte(`{"backend":"local"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("load config without backend: %v", err)
-	}
-	if cfg.Backend != BackendLocal {
-		t.Fatalf("expected local backend, got %q", cfg.Backend)
+	if _, err := Load(); err != nil {
+		t.Fatalf("load legacy local config: %v", err)
 	}
 }
 
-func TestLoadCloudConfig(t *testing.T) {
+func TestLoadRejectsRetiredCloudBackend(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ITO_HOME", home)
 	if err := os.WriteFile(Path(home), []byte(`{"backend":"cloud","cloud":{"url":"libsql://example","token":"secret"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("load cloud config: %v", err)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected retired cloud backend error")
 	}
-	if cfg.Backend != BackendCloud || cfg.Cloud == nil {
-		t.Fatalf("expected cloud backend, got %#v", cfg)
+	for _, want := range []string{"cloud backend", "no longer supported", "ito ledger connect"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q should mention %q", err, want)
+		}
 	}
-	if cfg.Cloud.URL != "libsql://example" || cfg.Cloud.Token != "secret" {
-		t.Fatalf("unexpected cloud config: %#v", cfg.Cloud)
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("error must not leak the token: %q", err)
+	}
+}
+
+func TestLoadRejectsUnknownBackend(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ITO_HOME", home)
+	if err := os.WriteFile(Path(home), []byte(`{"backend":"mars"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("expected malformed config error, got %v", err)
 	}
 }
 
@@ -65,19 +76,15 @@ func TestLoadRejectsMalformedConfig(t *testing.T) {
 	}
 }
 
-func TestWriteUsesPrivatePermissions(t *testing.T) {
+func TestWriteUsesPrivatePermissionsAndDropsLegacyFields(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ITO_HOME", home)
 	path := Path(home)
-	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"backend":"local"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	want := Config{
-		Backend: BackendCloud,
-		Cloud:   &Cloud{URL: "libsql://example", Token: "secret"},
-	}
-	if err := Write(want); err != nil {
+	if err := Write(Config{}); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -87,13 +94,15 @@ func TestWriteUsesPrivatePermissions(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("expected config permissions 0600, got %04o", got)
 	}
-
-	got, err := Load()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("load written config: %v", err)
+		t.Fatal(err)
 	}
-	if got.Backend != want.Backend || got.Cloud == nil || *got.Cloud != *want.Cloud {
-		t.Fatalf("written config mismatch: got %#v want %#v", got, want)
+	if strings.Contains(string(data), "backend") {
+		t.Fatalf("written config still carries the retired backend field: %s", data)
+	}
+	if _, err := Load(); err != nil {
+		t.Fatalf("load written config: %v", err)
 	}
 
 	matches, err := filepath.Glob(filepath.Join(home, ".config-*.tmp"))

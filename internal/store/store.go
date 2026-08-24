@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -16,7 +15,7 @@ import (
 	"unicode"
 
 	itoconfig "github.com/c3h/ito/internal/config"
-	_ "github.com/tursodatabase/libsql-client-go/libsql"
+	_ "github.com/tursodatabase/libsql-client-go/libsql" // Ledger transport (decision 0005)
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -532,55 +531,17 @@ func (s *Store) ResolveProject(rootPath string, inGit bool, explicitName string)
 	return Project{}, ErrNotRegistered
 }
 
+// The config is loaded first so a retired cloud config fails before any file
+// is created.
 func OpenDefault() (*sql.DB, error) {
-	cfg, err := itoconfig.Load()
-	if err != nil {
+	if _, err := itoconfig.Load(); err != nil {
 		return nil, err
 	}
 	home, err := itoconfig.HomeDir()
 	if err != nil {
 		return nil, err
 	}
-	return openBackend(cfg, home, sql.Open)
-}
-
-type openDBFunc func(driverName, dataSourceName string) (*sql.DB, error)
-
-// CloudDSN is the single place the libsql credential encoding lives.
-func CloudDSN(url, token string) string {
-	return url + "?authToken=" + token
-}
-
-// openBackend returns a ready-to-use, fully migrated database. On the cloud
-// backend every statement is a network round-trip, so the migration is skipped
-// entirely when the local schema cache says this database is already at the
-// latest version; a stale cache (e.g. after wiping the remote database) is
-// cleared by deleting the cache file under ITO_HOME.
-func openBackend(cfg itoconfig.Config, home string, openDB openDBFunc) (*sql.DB, error) {
-	switch cfg.Backend {
-	case itoconfig.BackendLocal:
-		return Open(home)
-	case itoconfig.BackendCloud:
-		if cfg.Cloud == nil || cfg.Cloud.URL == "" || cfg.Cloud.Token == "" {
-			return nil, errors.New("cloud backend requires url and token")
-		}
-		db, err := openDB("libsql", CloudDSN(cfg.Cloud.URL, cfg.Cloud.Token))
-		if err != nil {
-			return nil, fmt.Errorf("open cloud database %q: %w", cfg.Cloud.URL, err)
-		}
-		db.SetMaxIdleConns(maxIdleConns)
-		if schemaCacheCurrent(home, cfg.Cloud.URL) {
-			return db, nil
-		}
-		if err := Migrate(db); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("initialize cloud database %q: %w", cfg.Cloud.URL, err)
-		}
-		MarkSchemaCurrent(home, cfg.Cloud.URL)
-		return db, nil
-	default:
-		return nil, fmt.Errorf("unsupported backend %q", cfg.Backend)
-	}
+	return Open(home)
 }
 
 var migrations = []struct {
@@ -591,49 +552,6 @@ var migrations = []struct {
 	{version: 2, apply: migrateV2},
 	{version: 3, apply: migrateV3},
 	{version: 4, apply: migrateV4},
-}
-
-var latestSchemaVersion = migrations[len(migrations)-1].version
-
-// The schema cache remembers, per cloud database URL, that the remote schema
-// already reached latestSchemaVersion, so subsequent opens skip the Migrate
-// round-trips entirely. It is a pure optimization: deleting the file merely
-// re-runs the (idempotent) migration on the next open.
-type schemaCache struct {
-	URL     string `json:"url"`
-	Version int    `json:"version"`
-}
-
-func schemaCachePath(home string) string {
-	return filepath.Join(home, "schema-cache.json")
-}
-
-func schemaCacheCurrent(home, url string) bool {
-	data, err := os.ReadFile(schemaCachePath(home))
-	if err != nil {
-		return false
-	}
-	var cache schemaCache
-	if err := json.Unmarshal(data, &cache); err != nil {
-		return false
-	}
-	return cache.URL == url && cache.Version == latestSchemaVersion
-}
-
-// MarkSchemaCurrent records that the cloud database at url is fully migrated.
-// It is exported so the cloud-migration command can pre-warm the cache right
-// after it migrates the destination. It reports nothing because there is
-// nothing to handle: failing to write the cache only costs one redundant
-// Migrate on the next open.
-func MarkSchemaCurrent(home, url string) {
-	data, err := json.Marshal(schemaCache{URL: url, Version: latestSchemaVersion})
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(schemaCachePath(home), data, 0o600)
 }
 
 func Migrate(db *sql.DB) error {

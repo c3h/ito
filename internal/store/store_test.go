@@ -14,161 +14,52 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestOpenBackendKeepsLocalFileDSN(t *testing.T) {
+func TestOpenDefaultOpensLocalFileWithWALAndBusyTimeout(t *testing.T) {
 	home := t.TempDir()
-	cloudOpened := false
-	db, err := openBackend(
-		itoconfig.Config{Backend: itoconfig.BackendLocal},
-		home,
-		func(string, string) (*sql.DB, error) {
-			cloudOpened = true
-			return nil, errors.New("unexpected cloud open")
-		},
-	)
+	t.Setenv("ITO_HOME", home)
+
+	db, err := OpenDefault()
 	if err != nil {
-		t.Fatalf("open local backend: %v", err)
+		t.Fatalf("open default store: %v", err)
 	}
 	defer db.Close()
 
-	if cloudOpened {
-		t.Fatal("local backend used cloud opener")
+	if _, err := os.Stat(itoconfig.LocalDBPath(home)); err != nil {
+		t.Fatalf("local database file missing: %v", err)
 	}
-	var sequence int
-	var name, path string
-	if err := db.QueryRow(`PRAGMA database_list`).Scan(&sequence, &name, &path); err != nil {
-		t.Fatalf("read local database path: %v", err)
+	var journalMode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatalf("read journal mode: %v", err)
 	}
-	resolvedHome, err := filepath.EvalSymlinks(home)
-	if err != nil {
-		t.Fatalf("resolve local database home: %v", err)
+	if !strings.EqualFold(journalMode, "wal") {
+		t.Fatalf("journal_mode = %q, want wal", journalMode)
 	}
-	if want := filepath.Join(resolvedHome, "ito.db"); path != want {
-		t.Fatalf("local database path = %q, want %q", path, want)
+	var busyTimeout int
+	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("read busy timeout: %v", err)
 	}
-}
-
-func TestOpenBackendCloudUsesLibSQLAndMigrates(t *testing.T) {
-	var driverName, dataSourceName string
-	db, err := openBackend(
-		itoconfig.Config{
-			Backend: itoconfig.BackendCloud,
-			Cloud:   &itoconfig.Cloud{URL: "libsql://example.turso.io", Token: "secret"},
-		},
-		t.TempDir(),
-		func(driver, dsn string) (*sql.DB, error) {
-			driverName = driver
-			dataSourceName = dsn
-			return sql.Open("sqlite", filepath.Join(t.TempDir(), "cloud.db"))
-		},
-	)
-	if err != nil {
-		t.Fatalf("open cloud backend: %v", err)
-	}
-	defer db.Close()
-
-	if driverName != "libsql" {
-		t.Fatalf("cloud driver = %q, want %q", driverName, "libsql")
-	}
-	if want := "libsql://example.turso.io?authToken=secret"; dataSourceName != want {
-		t.Fatalf("cloud DSN = %q, want %q", dataSourceName, want)
-	}
-	for _, localOnly := range []string{"_txlock", "journal_mode", "busy_timeout"} {
-		if strings.Contains(dataSourceName, localOnly) {
-			t.Fatalf("cloud DSN contains local-only setting %q", localOnly)
-		}
+	if busyTimeout != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
 	}
 	assertSchemaVersion(t, db, 4)
 }
 
-func TestOpenBackendCloudSkipsMigrateWhenSchemaCacheCurrent(t *testing.T) {
-	home := t.TempDir()
-	cfg := itoconfig.Config{
-		Backend: itoconfig.BackendCloud,
-		Cloud:   &itoconfig.Cloud{URL: "libsql://example.turso.io", Token: "secret"},
-	}
-	freshCloudDB := func(string, string) (*sql.DB, error) {
-		return sql.Open("sqlite", filepath.Join(t.TempDir(), "cloud.db"))
-	}
-
-	first, err := openBackend(cfg, home, freshCloudDB)
-	if err != nil {
-		t.Fatalf("first cloud open: %v", err)
-	}
-	assertSchemaVersion(t, first, 4)
-	first.Close()
-
-	// The cache is warm, so a second open must not touch the schema at all:
-	// this fresh empty database stays empty.
-	second, err := openBackend(cfg, home, freshCloudDB)
-	if err != nil {
-		t.Fatalf("second cloud open: %v", err)
-	}
-	defer second.Close()
-	var tables int
-	if err := second.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'schema_version'`).Scan(&tables); err != nil {
-		t.Fatalf("inspect second database: %v", err)
-	}
-	if tables != 0 {
-		t.Fatal("second open migrated despite a current schema cache")
-	}
-
-	// A different database URL must invalidate the cache and migrate again.
-	otherCfg := itoconfig.Config{
-		Backend: itoconfig.BackendCloud,
-		Cloud:   &itoconfig.Cloud{URL: "libsql://other.turso.io", Token: "secret"},
-	}
-	third, err := openBackend(otherCfg, home, freshCloudDB)
-	if err != nil {
-		t.Fatalf("third cloud open: %v", err)
-	}
-	defer third.Close()
-	assertSchemaVersion(t, third, 4)
-}
-
-func TestOpenBackendCloudRequiresURLAndToken(t *testing.T) {
-	tests := []struct {
-		name  string
-		cloud *itoconfig.Cloud
-	}{
-		{name: "missing cloud config"},
-		{name: "missing URL", cloud: &itoconfig.Cloud{Token: "secret"}},
-		{name: "missing token", cloud: &itoconfig.Cloud{URL: "libsql://example.turso.io"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			opened := false
-			_, err := openBackend(
-				itoconfig.Config{Backend: itoconfig.BackendCloud, Cloud: tt.cloud},
-				t.TempDir(),
-				func(string, string) (*sql.DB, error) {
-					opened = true
-					return nil, errors.New("unexpected open")
-				},
-			)
-			if err == nil || !strings.Contains(err.Error(), "cloud backend requires url and token") {
-				t.Fatalf("expected missing cloud credentials error, got %v", err)
-			}
-			if opened {
-				t.Fatal("opened cloud database with incomplete credentials")
-			}
-		})
-	}
-}
-
-func TestOpenDefaultRejectsIncompleteCloudConfig(t *testing.T) {
+func TestOpenDefaultRejectsRetiredCloudConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ITO_HOME", home)
 	if err := os.WriteFile(
 		itoconfig.Path(home),
-		[]byte(`{"backend":"cloud","cloud":{"url":"libsql://example.turso.io"}}`),
+		[]byte(`{"backend":"cloud","cloud":{"url":"libsql://example.turso.io","token":"secret"}}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := OpenDefault(); err == nil || !strings.Contains(err.Error(), "cloud backend requires url and token") {
-		t.Fatalf("expected incomplete cloud config error, got %v", err)
+	if _, err := OpenDefault(); err == nil || !strings.Contains(err.Error(), "ito ledger connect") {
+		t.Fatalf("expected retired cloud config error, got %v", err)
+	}
+	if _, err := os.Stat(itoconfig.LocalDBPath(home)); !os.IsNotExist(err) {
+		t.Fatalf("a rejected config must not create the local database, stat error: %v", err)
 	}
 }
 

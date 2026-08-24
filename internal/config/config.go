@@ -3,26 +3,29 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
-type Backend string
-
-const (
-	BackendLocal Backend = "local"
-	BackendCloud Backend = "cloud"
-)
-
-type Cloud struct {
-	URL   string `json:"url"`
-	Token string `json:"token"`
-}
+// Ledger is the connection to the shared change log (decision 0005); its
+// fields arrive with that work.
+type Ledger struct{}
 
 type Config struct {
-	Backend Backend `json:"backend"`
-	Cloud   *Cloud  `json:"cloud,omitempty"`
+	Ledger *Ledger `json:"ledger,omitempty"`
+}
+
+// ErrRetiredCloudBackend marks a config that still selects the per-statement
+// cloud backend retired by decision 0005.
+var ErrRetiredCloudBackend = errors.New("the cloud backend is no longer supported: the store is always local and machines sync through a Ledger; remove the backend and cloud fields, then connect with 'ito ledger connect' once it ships")
+
+// configFile is the on-disk shape, including the backend field that predates
+// decision 0005.
+type configFile struct {
+	Backend string  `json:"backend"`
+	Ledger  *Ledger `json:"ledger,omitempty"`
 }
 
 func HomeDir() (string, error) {
@@ -57,7 +60,7 @@ func load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Config{Backend: BackendLocal}, nil
+			return Config{}, nil
 		}
 		return Config{}, fmt.Errorf("read config file %q: %w", path, err)
 	}
@@ -67,27 +70,17 @@ func load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("config file %q is malformed: expected a JSON object", path)
 	}
 
-	var cfg Config
-	if err := json.Unmarshal(trimmed, &cfg); err != nil {
+	var file configFile
+	if err := json.Unmarshal(trimmed, &file); err != nil {
 		return Config{}, fmt.Errorf("config file %q is malformed: %w", path, err)
 	}
-	return normalize(cfg, path)
-}
-
-func normalize(cfg Config, path string) (Config, error) {
-	if cfg.Backend == "" {
-		cfg.Backend = BackendLocal
-	}
-	switch cfg.Backend {
-	case BackendLocal:
-		return cfg, nil
-	case BackendCloud:
-		if cfg.Cloud == nil || cfg.Cloud.URL == "" || cfg.Cloud.Token == "" {
-			return Config{}, fmt.Errorf("config file %q is malformed: cloud backend requires url and token", path)
-		}
-		return cfg, nil
+	switch file.Backend {
+	case "", "local":
+		return Config{Ledger: file.Ledger}, nil
+	case "cloud":
+		return Config{}, fmt.Errorf("config file %q: %w", path, ErrRetiredCloudBackend)
 	default:
-		return Config{}, fmt.Errorf("config file %q is malformed: backend must be %q or %q", path, BackendLocal, BackendCloud)
+		return Config{}, fmt.Errorf("config file %q is malformed: unknown backend %q", path, file.Backend)
 	}
 }
 
@@ -97,10 +90,6 @@ func Write(cfg Config) error {
 		return fmt.Errorf("resolve ito home: %w", err)
 	}
 	path := Path(home)
-	cfg, err = normalize(cfg, path)
-	if err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config file %q: %w", path, err)

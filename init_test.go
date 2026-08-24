@@ -165,7 +165,7 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 		{
 			name:     "config help",
 			args:     []string{"config", "--help"},
-			contains: []string{"usage: ito config", "--json", "token is never printed"},
+			contains: []string{"usage: ito config", "--json", "local database path"},
 		},
 		{
 			name:     "batch help",
@@ -227,14 +227,14 @@ func TestHelpPrintsUsageForRootAndCommands(t *testing.T) {
 	}
 }
 
-func TestConfigDefaultsToLocalWithoutCreatingStore(t *testing.T) {
+func TestConfigShowsLocalPathWithoutCreatingStore(t *testing.T) {
 	itoHome := t.TempDir()
 	result := runITO(t, t.TempDir(), itoHome, "config")
 	if result.exitCode != 0 || result.stderr != "" {
 		t.Fatalf("ito config failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
-	if !strings.Contains(result.stdout, "Backend: local\n") {
-		t.Fatalf("expected local backend, got %q", result.stdout)
+	if strings.Contains(result.stdout, "Backend") {
+		t.Fatalf("config must only show the local database path, got %q", result.stdout)
 	}
 	if !strings.Contains(result.stdout, "Local DB: "+filepath.Join(itoHome, "ito.db")+"\n") {
 		t.Fatalf("expected local database path, got %q", result.stdout)
@@ -242,9 +242,18 @@ func TestConfigDefaultsToLocalWithoutCreatingStore(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(itoHome, "ito.db")); !os.IsNotExist(err) {
 		t.Fatalf("ito config must not create the local database, stat error: %v", err)
 	}
+
+	var display configDisplay
+	jsonResult := runITO(t, t.TempDir(), itoHome, "config", "--json")
+	if err := json.Unmarshal([]byte(jsonResult.stdout), &display); err != nil {
+		t.Fatalf("config JSON is invalid: %v\nstdout: %s", err, jsonResult.stdout)
+	}
+	if display.LocalDBPath != filepath.Join(itoHome, "ito.db") {
+		t.Fatalf("unexpected config JSON: %#v", display)
+	}
 }
 
-func TestConfigCloudOutputNeverPrintsToken(t *testing.T) {
+func TestConfigRejectsRetiredCloudBackendWithoutLeakingToken(t *testing.T) {
 	itoHome := t.TempDir()
 	token := "super-secret-token"
 	configJSON := fmt.Sprintf(`{"backend":"cloud","cloud":{"url":"libsql://example.turso.io","token":%q}}`, token)
@@ -252,26 +261,33 @@ func TestConfigCloudOutputNeverPrintsToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, args := range [][]string{{"config"}, {"config", "--json"}} {
+	for _, args := range [][]string{{"config"}, {"config", "--json"}, {"list"}} {
 		result := runITO(t, t.TempDir(), itoHome, args...)
-		if result.exitCode != 0 || result.stderr != "" {
-			t.Fatalf("%v failed with exit %d\nstdout: %s\nstderr: %s", args, result.exitCode, result.stdout, result.stderr)
+		if result.exitCode != exitGeneric {
+			t.Fatalf("%v: expected exit %d, got %d\nstdout: %s\nstderr: %s", args, exitGeneric, result.exitCode, result.stdout, result.stderr)
 		}
 		if strings.Contains(result.stdout, token) || strings.Contains(result.stderr, token) {
 			t.Fatalf("%v exposed the token\nstdout: %s\nstderr: %s", args, result.stdout, result.stderr)
 		}
-		if !strings.Contains(result.stdout, "libsql://example.turso.io") {
-			t.Fatalf("%v omitted the remote URL: %s", args, result.stdout)
+		if !strings.Contains(result.stderr, "ito ledger connect") {
+			t.Fatalf("%v: expected a pointer to 'ito ledger connect'\nstderr: %s", args, result.stderr)
+		}
+		if strings.Contains(result.stderr, "ITO_HOME") || strings.Contains(result.stderr, "fix or remove") {
+			t.Fatalf("%v: competing remedy next to the ledger pointer\nstderr: %s", args, result.stderr)
 		}
 	}
+}
 
-	jsonResult := runITO(t, t.TempDir(), itoHome, "config", "--json")
-	var display configDisplay
-	if err := json.Unmarshal([]byte(jsonResult.stdout), &display); err != nil {
-		t.Fatalf("config JSON is invalid: %v\nstdout: %s", err, jsonResult.stdout)
+func TestMigrateIsUnknownCommand(t *testing.T) {
+	result := runITO(t, t.TempDir(), t.TempDir(), "migrate", "cloud")
+	if result.exitCode != exitBadUsage || !strings.Contains(result.stderr, "unknown command: migrate") {
+		t.Fatalf("expected migrate to be unknown, got exit %d\nstderr: %s", result.exitCode, result.stderr)
 	}
-	if display.Backend != "cloud" || display.LocalDBPath != filepath.Join(itoHome, "ito.db") || display.RemoteURL != "libsql://example.turso.io" {
-		t.Fatalf("unexpected config JSON: %#v", display)
+	help := runITO(t, t.TempDir(), t.TempDir(), "--help")
+	for _, banned := range []string{"ito migrate", "migrate ", "backend", "cloud"} {
+		if strings.Contains(strings.ToLower(help.stdout), banned) {
+			t.Fatalf("root help still mentions %q\n%s", banned, help.stdout)
+		}
 	}
 }
 

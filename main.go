@@ -283,9 +283,7 @@ type deletedIssues struct {
 }
 
 type configDisplay struct {
-	Backend     itoconfig.Backend `json:"backend"`
-	LocalDBPath string            `json:"local_db_path"`
-	RemoteURL   string            `json:"remote_url,omitempty"`
+	LocalDBPath string `json:"local_db_path"`
 }
 
 type commandFailure struct {
@@ -300,11 +298,15 @@ func (e commandFailure) Error() string {
 
 // openStore opens the central store, returning a ready *sql.DB (the caller
 // defers Close) or a typed *commandFailure carrying the exact code/message/hint.
-// OpenDefault already migrates whichever backend it opens.
+// OpenDefault already migrates the store it opens.
 func openStore() (*sql.DB, *itostore.Store, *commandFailure) {
 	db, err := itostore.OpenDefault()
 	if err != nil {
-		return nil, nil, &commandFailure{exitGeneric, fmt.Sprintf("could not open the central store: %v", err), "check ITO_HOME and the directory permissions."}
+		hint := "check ITO_HOME and the directory permissions."
+		if errors.Is(err, itoconfig.ErrRetiredCloudBackend) {
+			hint = ""
+		}
+		return nil, nil, &commandFailure{exitGeneric, fmt.Sprintf("could not open the central store: %v", err), hint}
 	}
 	return db, itostore.New(db), nil
 }
@@ -416,8 +418,6 @@ func runCLI(args []string) int {
 		return runList(args[1:])
 	case "config":
 		return runConfig(args[1:])
-	case "migrate":
-		return runMigrate(args[1:])
 	case "batch":
 		return runBatch(args[1:])
 	case "move":
@@ -431,102 +431,6 @@ func runCLI(args []string) int {
 	default:
 		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0]+".", "Run 'ito --help' to see available commands.")
 	}
-}
-
-func runMigrate(args []string) int {
-	if len(args) == 0 || isHelpArg(args[0]) {
-		printCommandHelp("migrate")
-		return 0
-	}
-	switch args[0] {
-	case "cloud":
-		return runMigrateCloud(args[1:])
-	case "local":
-		return runMigrateLocal(args[1:])
-	default:
-		return fail(wantsJSON(args[1:], nil), exitBadUsage, "unknown migrate command: "+args[0]+".", "Run 'ito migrate --help' to see available commands.")
-	}
-}
-
-func runMigrateCloud(args []string) int {
-	valueFlags := commandValueFlags("migrate cloud")
-	if wantsHelp(args, valueFlags) {
-		printCommandHelp("migrate cloud")
-		return 0
-	}
-	fs := flag.NewFlagSet("migrate cloud", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var url string
-	var token string
-	var force bool
-	var jsonMode bool
-	fs.StringVar(&url, "url", "", "")
-	fs.StringVar(&token, "token", "", "")
-	fs.BoolVar(&force, "force", false, "")
-	fs.BoolVar(&jsonMode, "json", false, "")
-	flagArgs, positionals := splitFlagsAndPositionals(args, valueFlags)
-	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args, valueFlags), exitBadUsage, err.Error(), "run 'ito migrate cloud --help' to see the accepted flags.")
-	}
-	if len(positionals) != 0 {
-		return fail(jsonMode, exitBadUsage, "ito migrate cloud takes no positional arguments.", "use --url and --token.")
-	}
-	if url == "" {
-		return fail(jsonMode, exitBadUsage, "ito migrate cloud requires --url.", "use: ito migrate cloud --url <url> --token <token>.")
-	}
-	if token == "" {
-		return fail(jsonMode, exitBadUsage, "ito migrate cloud requires --token.", "use: ito migrate cloud --url <url> --token <token>.")
-	}
-	if err := migrateCloud(url, token, force, openCloudDatabase); err != nil {
-		return fail(jsonMode, exitGeneric, err.Error(), "check the local database and cloud credentials, then retry.")
-	}
-	return reportMigration(jsonMode, itoconfig.BackendCloud, url)
-}
-
-func runMigrateLocal(args []string) int {
-	valueFlags := commandValueFlags("migrate local")
-	if wantsHelp(args, valueFlags) {
-		printCommandHelp("migrate local")
-		return 0
-	}
-	fs := flag.NewFlagSet("migrate local", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var force bool
-	var jsonMode bool
-	fs.BoolVar(&force, "force", false, "")
-	fs.BoolVar(&jsonMode, "json", false, "")
-	flagArgs, positionals := splitFlagsAndPositionals(args, valueFlags)
-	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args, valueFlags), exitBadUsage, err.Error(), "run 'ito migrate local --help' to see the accepted flags.")
-	}
-	if len(positionals) != 0 {
-		return fail(jsonMode, exitBadUsage, "ito migrate local takes no positional arguments.", "use only --force or --json.")
-	}
-	if err := migrateLocal(force, openCloudDatabase); err != nil {
-		return fail(jsonMode, exitGeneric, err.Error(), "check the cloud credentials and local database; the retained local database usually requires --force.")
-	}
-	return reportMigration(jsonMode, itoconfig.BackendLocal, "")
-}
-
-func reportMigration(jsonMode bool, backend itoconfig.Backend, remoteURL string) int {
-	home, err := itoconfig.HomeDir()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("the migration succeeded but the ito home could not be resolved: %v", err), "run 'ito config' to inspect the active backend.")
-	}
-	display := configDisplay{
-		Backend:     backend,
-		LocalDBPath: itoconfig.LocalDBPath(home),
-		RemoteURL:   remoteURL,
-	}
-	if jsonMode {
-		return printJSON(display, "migration result")
-	}
-	if backend == itoconfig.BackendCloud {
-		fmt.Printf("migrated to cloud at %s.\n", remoteURL)
-	} else {
-		fmt.Printf("migrated to local at %s.\n", display.LocalDBPath)
-	}
-	return 0
 }
 
 func runConfig(args []string) int {
@@ -550,24 +454,18 @@ func runConfig(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the ito home: %v.", err), "")
 	}
-	cfg, err := itoconfig.Load()
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the config: %v; fix or remove it.", err), "")
+	if _, err := itoconfig.Load(); err != nil {
+		message := fmt.Sprintf("could not read the config: %v", err)
+		if !errors.Is(err, itoconfig.ErrRetiredCloudBackend) {
+			message += "; fix or remove it."
+		}
+		return fail(jsonMode, exitGeneric, message, "")
 	}
-	display := configDisplay{
-		Backend:     cfg.Backend,
-		LocalDBPath: itoconfig.LocalDBPath(home),
-	}
-	if cfg.Backend == itoconfig.BackendCloud {
-		display.RemoteURL = cfg.Cloud.URL
-	}
+	display := configDisplay{LocalDBPath: itoconfig.LocalDBPath(home)}
 	if jsonMode {
 		return printJSON(display, "config")
 	}
-	fmt.Printf("Backend: %s\nLocal DB: %s\n", display.Backend, display.LocalDBPath)
-	if display.RemoteURL != "" {
-		fmt.Printf("Remote URL: %s\n", display.RemoteURL)
-	}
+	fmt.Printf("Local DB: %s\n", display.LocalDBPath)
 	return 0
 }
 
@@ -1679,10 +1577,6 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "list":
 		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "search": {}, "label": {}, "batch": {}}
-	case "migrate cloud":
-		return map[string]struct{}{"url": {}, "token": {}}
-	case "migrate local":
-		return nil
 	case "batch new", "batch list", "batch move", "batch rename", "batch rm", "batch show":
 		return map[string]struct{}{"project": {}}
 	case "move":
@@ -1777,8 +1671,7 @@ Commands:
   init     Registers or re-points the Project for the current directory.
   new      Creates an Issue in the current Project.
   list     Lists Issues.
-  config   Shows the active backend configuration.
-  migrate  Moves the store between local and cloud backends.
+  config   Shows where the store lives.
   batch    Manages Batches in the current Project.
   show     Shows an Issue by full ID.
   move     Moves an Issue to another status.
@@ -1797,39 +1690,9 @@ func printCommandHelp(command string) {
 	case "config":
 		fmt.Println(`usage: ito config [--json]
 
-Shows the active backend, local database path, and remote URL when cloud is active. The cloud token is never printed.
+Shows the local database path.
 
 Flags:
-  --json               Prints JSON.`)
-	case "migrate":
-		fmt.Println(`usage: ito migrate <command> [flags]
-
-Moves the store between local and cloud backends, with exactly one backend active at a time.
-
-Commands:
-  cloud    Copies the local store to cloud and activates it.
-  local    Copies the cloud store to local and activates it.
-
-Use "ito migrate <command> --help" to see the command's flags.`)
-	case "migrate cloud":
-		fmt.Println(`usage: ito migrate cloud --url <url> --token <token> [--force] [--json]
-
-Copies the local store to a cloud database and activates it only after row counts validate.
-The local database is retained unchanged. A non-empty destination requires --force.
-
-Flags:
-  --url <url>          Cloud database URL.
-  --token <token>      Cloud authentication token.
-  --force              Replaces data in a non-empty destination.
-  --json               Prints JSON.`)
-	case "migrate local":
-		fmt.Println(`usage: ito migrate local [--force] [--json]
-
-Copies the cloud store to the local database and activates it only after row counts validate.
-The cloud database is retained unchanged. The retained local database usually requires --force.
-
-Flags:
-  --force              Replaces data in a non-empty local destination.
   --json               Prints JSON.`)
 	case "init":
 		fmt.Println(`usage: ito init [--name <name>] [--prefix <PREFIX>] [--reattach <name>] [--json]
