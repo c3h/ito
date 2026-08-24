@@ -1,6 +1,6 @@
 # ito
 
-Local, solo, "full local" issue tracker for the terminal, driven by AI through the command line. This glossary fixes the domain language; decisions and trade-offs live in `SPEC.md` and in `docs/adr/`.
+Local-first, solo issue tracker for the terminal, driven by AI through the command line; several machines of the same person share one tracker by syncing. This glossary fixes the domain language; decisions and trade-offs live in `SPEC.md` and in `docs/adr/`.
 
 ## Language
 
@@ -30,7 +30,15 @@ Local, solo, "full local" issue tracker for the terminal, driven by AI through t
 
 **Created**: The birth timestamp of an Issue. An **immutable** column, written once by `ito new`. _Avoid_: opening date.
 
-**Updated**: The timestamp of the last mutation of an Issue. A column written **transactionally** by the CLI on every change (the CLI is the only writer, so it never desyncs). _Avoid_: modified, mtime, last_modified.
+**Updated**: The timestamp of the last mutation of an Issue. A column written **transactionally** by the CLI on every change (the CLI is the only writer, so it never desyncs). It is also the key that decides which version of a row wins when two Devices changed it between Syncs. _Avoid_: modified, mtime, last_modified.
+
+**Device**: One machine holding its own complete, local copy of the tracker (the Mac, the VPS). Every Device reads and writes locally; Devices never talk to each other directly, only through the Ledger. _Avoid_: node, client, replica, backend.
+
+**Change**: The record of one mutation to one row — its full new state, or a tombstone — stamped with the Device that made it and the row's Updated. Changes are the only thing that travels between Devices. _Avoid_: event, delta, patch, operation.
+
+**Ledger**: The shared, append-only history of Changes hosted remotely, from which any Device can rebuild the whole tracker. It also hands out Issue numbers, so IDs stay sequential across Devices. It is a transport, not a place where queries run. _Avoid_: cloud backend, remote database, server, source of truth (that is each Device's local store).
+
+**Sync**: The batch exchange in which a Device pushes its pending Changes to the Ledger and pulls and applies the ones it has not seen. Never real-time; when two Devices changed the same row, the later Updated wins. _Avoid_: replication, mirror, backup, migrate.
 
 ## Example dialogue
 
@@ -40,5 +48,7 @@ Local, solo, "full local" issue tracker for the terminal, driven by AI through t
 > **Domain:** "Same Project. Identity comes from the git root, and worktrees share the `.git` — so you see the same Issues from any worktree."
 > **Dev:** "When the priority changes, does it stamp updated?"
 > **Domain:** "It does. The CLI is the only writer, so every mutation updates the `updated` column in the same transaction. `created` doesn't — that one is fixed at `new`."
+> **Dev:** "I'm on the VPS and I don't see the issue I created on the Mac."
+> **Domain:** "The Mac's Change hasn't reached the Ledger yet, or the VPS hasn't pulled. Run `ito sync` on both. Nothing is shared in real time — each Device works on its own copy."
 > **Dev:** "Can I edit the issue in Obsidian?"
 > **Domain:** "No. Single writer: everything goes through the CLI (`ito edit`, `ito move`). Markdown export is a future thing, and read-only."

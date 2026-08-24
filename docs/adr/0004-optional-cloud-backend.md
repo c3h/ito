@@ -1,6 +1,6 @@
 # Optional cloud backend via Turso, one active backend at a time
 
-**Status:** accepted · 2026-07-29 · refines decision 0001 (the store stays a single source of truth; only its location becomes configurable).
+**Status:** partially superseded by [decision 0005](./0005-local-first-store-with-change-log-sync.md) · 2026-07-29 · refines decision 0001 (the store stays a single source of truth; only its location becomes configurable). The per-statement remote backend and the "never synced" rule are retired by 0005; the Turso connection, config file and token handling survive as the sync transport.
 
 ## Context
 
