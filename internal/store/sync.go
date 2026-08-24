@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/c3h/ito/internal/ledger"
@@ -32,8 +33,71 @@ type issueState struct {
 	TriageState string `json:"triage_state"`
 	Branch      string `json:"branch"`
 	Body        string `json:"body"`
+	// Batch is the member Batch's name, empty when the Issue sits in none.
+	Batch   string `json:"batch,omitempty"`
+	Created string `json:"created"`
+	Updated string `json:"updated"`
+}
+
+// projectState travels only the Prefix: root_path and last_id are Device-local.
+type projectState struct {
+	Prefix string `json:"prefix"`
+}
+
+// batchState carries the immutable created stamp; on a rename, RenamedFrom
+// names the Batch the receiving Device should re-label so memberships stay put.
+type batchState struct {
 	Created     string `json:"created"`
-	Updated     string `json:"updated"`
+	RenamedFrom string `json:"renamed_from,omitempty"`
+}
+
+func appendChangeTx(tx *sql.Tx, kind, project, key string, deleted bool, updated string, state any) error {
+	var encoded any
+	if state != nil {
+		raw, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		encoded = string(raw)
+	}
+	_, err := tx.Exec(`
+INSERT INTO changes(kind, project, key, deleted, updated, state)
+VALUES (?, ?, ?, ?, ?, ?)`, kind, project, key, deleted, updated, encoded)
+	return err
+}
+
+func logProjectChangeTx(tx *sql.Tx, name, prefix string) error {
+	return appendChangeTx(tx, ledger.KindProject, name, name, false, clock().UTC().Format(time.RFC3339), projectState{Prefix: prefix})
+}
+
+func logBatchChangeTx(tx *sql.Tx, p Project, name string, state batchState) error {
+	return appendChangeTx(tx, ledger.KindBatch, p.Name, name, false, clock().UTC().Format(time.RFC3339), state)
+}
+
+func logBatchTombstoneTx(tx *sql.Tx, p Project, name, deletedAt string) error {
+	return appendChangeTx(tx, ledger.KindBatch, p.Name, name, true, deletedAt, nil)
+}
+
+// Label and Link keys are the rows themselves; the Change carries no state.
+func logLabelChangeTx(tx *sql.Tx, p Project, issueID, label string, deleted bool, updated string) error {
+	return appendChangeTx(tx, ledger.KindLabel, p.Name, labelChangeKey(issueID, label), deleted, updated, nil)
+}
+
+func logLinkChangeTx(tx *sql.Tx, p Project, linkKey string, deleted bool, updated string) error {
+	sourceID, targetID, kind := parseIssueLinkKey(linkKey)
+	return appendChangeTx(tx, ledger.KindLink, p.Name, sourceID+"|"+targetID+"|"+kind, deleted, updated, nil)
+}
+
+func labelChangeKey(issueID, label string) string {
+	return issueID + "|" + label
+}
+
+func splitChangeKey(key string, parts int) ([]string, error) {
+	fields := strings.Split(key, "|")
+	if len(fields) != parts {
+		return nil, fmt.Errorf("change key %q is malformed", key)
+	}
+	return fields, nil
 }
 
 // logIssueChangesTx appends one Change per named Issue, reading each row's
@@ -42,20 +106,18 @@ type issueState struct {
 func logIssueChangesTx(tx *sql.Tx, p Project, ids []string) error {
 	for _, id := range ids {
 		var state issueState
+		var batch sql.NullString
 		if err := tx.QueryRow(`
-SELECT title, status, priority, category, triage_state, branch, body, created, updated
-FROM issues WHERE project_id = ? AND id = ?`, p.ID, id).Scan(
-			&state.Title, &state.Status, &state.Priority, &state.Category, &state.TriageState, &state.Branch, &state.Body, &state.Created, &state.Updated,
+SELECT issues.title, issues.status, issues.priority, issues.category, issues.triage_state, issues.branch, issues.body, batches.name, issues.created, issues.updated
+FROM issues
+LEFT JOIN batches ON batches.id = issues.batch_id
+WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id).Scan(
+			&state.Title, &state.Status, &state.Priority, &state.Category, &state.TriageState, &state.Branch, &state.Body, &batch, &state.Created, &state.Updated,
 		); err != nil {
 			return err
 		}
-		encoded, err := json.Marshal(state)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`
-INSERT INTO changes(kind, project, key, deleted, updated, state)
-VALUES (?, ?, ?, 0, ?, ?)`, ledger.KindIssue, p.Name, id, state.Updated, string(encoded)); err != nil {
+		state.Batch = batch.String
+		if err := appendChangeTx(tx, ledger.KindIssue, p.Name, id, false, state.Updated, state); err != nil {
 			return err
 		}
 	}
@@ -68,9 +130,7 @@ VALUES (?, ?, ?, 0, ?, ?)`, ledger.KindIssue, p.Name, id, state.Updated, string(
 func logIssueTombstonesTx(tx *sql.Tx, p Project, rows []issueDeletionRow) error {
 	deletedAt := clock().UTC().Format(time.RFC3339)
 	for _, row := range rows {
-		if _, err := tx.Exec(`
-INSERT INTO changes(kind, project, key, deleted, updated, state)
-VALUES (?, ?, ?, 1, ?, NULL)`, ledger.KindIssue, p.Name, row.id, deletedAt); err != nil {
+		if err := appendChangeTx(tx, ledger.KindIssue, p.Name, row.id, true, deletedAt, nil); err != nil {
 			return err
 		}
 	}
@@ -230,16 +290,25 @@ func (s *Store) applyEntry(entry ledger.Entry, device string) (bool, error) {
 	defer tx.Rollback()
 	applied := false
 	if entry.Device != device {
+		var err error
 		switch entry.Kind {
 		case ledger.KindIssue:
-			var err error
-			if applied, err = applyIssueChangeTx(tx, entry.Change); err != nil {
-				return false, err
-			}
+			applied, err = applyIssueChangeTx(tx, entry.Change)
+		case ledger.KindProject:
+			applied, err = applyProjectChangeTx(tx, entry.Change)
+		case ledger.KindBatch:
+			applied, err = applyBatchChangeTx(tx, entry.Change)
+		case ledger.KindLabel:
+			applied, err = applyLabelChangeTx(tx, entry.Change)
+		case ledger.KindLink:
+			applied, err = applyLinkChangeTx(tx, entry.Change)
 		default:
 			// Failing loudly beats skipping: an older build must not drop rows a
 			// newer one pushed.
 			return false, fmt.Errorf("row kind %q is unknown to this build of ito; upgrade ito and sync again", entry.Kind)
+		}
+		if err != nil {
+			return false, err
 		}
 	}
 	if err := setSyncStateTx(tx, "position", fmt.Sprint(entry.Position)); err != nil {
@@ -281,11 +350,21 @@ func applyIssueChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	if err := json.Unmarshal(change.State, &state); err != nil {
 		return false, fmt.Errorf("decode issue state: %w", err)
 	}
+	// A Batch this Device does not hold (deleted or renamed here since the
+	// Change was made) leaves the Issue unassigned rather than failing the pull.
+	var batchID sql.NullInt64
+	if state.Batch != "" {
+		id, found, err := findBatchID(tx, p.ID, state.Batch)
+		if err != nil {
+			return false, err
+		}
+		batchID = sql.NullInt64{Int64: id, Valid: found}
+	}
 	if exists {
 		if _, err := tx.Exec(`
 UPDATE issues
-SET title = ?, status = ?, priority = ?, category = ?, triage_state = ?, branch = ?, body = ?, created = ?, updated = ?
-WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, state.Created, state.Updated, rowID); err != nil {
+SET title = ?, status = ?, priority = ?, category = ?, triage_state = ?, branch = ?, body = ?, batch_id = ?, created = ?, updated = ?
+WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, batchID, state.Created, state.Updated, rowID); err != nil {
 			return false, err
 		}
 		if state.Title != currentTitle || state.Body != currentBody {
@@ -300,9 +379,9 @@ WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, st
 	}
 
 	result, err := tx.Exec(`
-INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, branch, body, created, updated)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, change.Key, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, state.Created, state.Updated)
+INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, branch, body, batch_id, created, updated)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, change.Key, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, batchID, state.Created, state.Updated)
 	if err != nil {
 		return false, err
 	}
@@ -323,27 +402,32 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	return err == nil, err
 }
 
-// ensureProjectTx resolves the Change's Project by name, creating it detached
-// (no root_path) when this Device has never seen it; ito init attaches it.
+// ensureProjectTx resolves the Change's Project, creating it detached (no
+// root_path) when this Device has never seen it; ito init attaches it. The
+// Prefix is the durable identity across Devices — a name the Change still
+// carries may have been renamed here since — so it is matched first.
 func ensureProjectTx(tx *sql.Tx, name, issueID string) (Project, error) {
 	prefix, _, err := splitIssueID(issueID)
 	if err != nil {
 		return Project{}, err
 	}
-	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
+	return ensureProjectByPrefixTx(tx, name, prefix)
+}
+
+func ensureProjectByPrefixTx(tx *sql.Tx, name, prefix string) (Project, error) {
+	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, prefix)
 	if err != nil {
 		return Project{}, err
 	}
 	if found {
-		if p.Prefix != prefix {
-			return Project{}, fmt.Errorf("project %q uses prefix %s here but %s on the Device that made the Change; rename one of them before syncing", name, p.Prefix, prefix)
-		}
 		return p, nil
 	}
-	if taken, err := valueExists(tx, `SELECT 1 FROM projects WHERE prefix = ?`, prefix); err != nil {
+	p, found, err = findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
+	if err != nil {
 		return Project{}, err
-	} else if taken {
-		return Project{}, fmt.Errorf("prefix %s already belongs to another local project, so project %q cannot be created for it", prefix, name)
+	}
+	if found {
+		return Project{}, fmt.Errorf("project %q uses prefix %s here but %s on the Device that made the Change; rename one of them before syncing", name, p.Prefix, prefix)
 	}
 	result, err := tx.Exec(`INSERT INTO projects(name, prefix, root_path) VALUES (?, ?, NULL)`, name, prefix)
 	if err != nil {
@@ -364,4 +448,139 @@ func splitIssueID(id string) (string, int64, error) {
 	var number int64
 	_, err := fmt.Sscan(match[2], &number)
 	return match[1], number, err
+}
+
+// applyProjectChangeTx creates or renames the Project by Prefix; root_path
+// and last_id stay whatever this Device holds.
+func applyProjectChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
+	if change.Deleted {
+		return false, fmt.Errorf("project %q: projects are never deleted through sync", change.Key)
+	}
+	var state projectState
+	if err := json.Unmarshal(change.State, &state); err != nil {
+		return false, fmt.Errorf("decode project state: %w", err)
+	}
+	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, state.Prefix)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		_, err := ensureProjectByPrefixTx(tx, change.Key, state.Prefix)
+		return err == nil, err
+	}
+	if p.Name == change.Key {
+		return false, nil
+	}
+	if taken, err := valueExists(tx, `SELECT 1 FROM projects WHERE name = ? AND id != ?`, change.Key, p.ID); err != nil {
+		return false, err
+	} else if taken {
+		return false, fmt.Errorf("project %q (prefix %s) was renamed to %q on another Device, but that name belongs to another local project; rename one of them before syncing", p.Name, p.Prefix, change.Key)
+	}
+	_, err = tx.Exec(`UPDATE projects SET name = ? WHERE id = ?`, change.Key, p.ID)
+	return err == nil, err
+}
+
+// applyBatchChangeTx creates, renames or deletes the Batch named by the key.
+// A rename re-labels the local row so its memberships stay attached; when the
+// new name already exists locally the two Batches merge into it.
+func applyBatchChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
+	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, change.Project)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("project %q is unknown here, so batch %q cannot be applied", change.Project, change.Key)
+	}
+	id, exists, err := findBatchID(tx, p.ID, change.Key)
+	if err != nil {
+		return false, err
+	}
+	if change.Deleted {
+		if !exists {
+			return false, nil
+		}
+		if _, err := tx.Exec(`UPDATE issues SET batch_id = NULL WHERE batch_id = ?`, id); err != nil {
+			return false, err
+		}
+		_, err := tx.Exec(`DELETE FROM batches WHERE id = ?`, id)
+		return err == nil, err
+	}
+	var state batchState
+	if err := json.Unmarshal(change.State, &state); err != nil {
+		return false, fmt.Errorf("decode batch state: %w", err)
+	}
+	if state.RenamedFrom != "" {
+		oldID, oldExists, err := findBatchID(tx, p.ID, state.RenamedFrom)
+		if err != nil {
+			return false, err
+		}
+		if oldExists && oldID != id {
+			if !exists {
+				_, err := tx.Exec(`UPDATE batches SET name = ? WHERE id = ?`, change.Key, oldID)
+				return err == nil, err
+			}
+			if _, err := tx.Exec(`UPDATE issues SET batch_id = ? WHERE batch_id = ?`, id, oldID); err != nil {
+				return false, err
+			}
+			_, err := tx.Exec(`DELETE FROM batches WHERE id = ?`, oldID)
+			return err == nil, err
+		}
+	}
+	if exists {
+		return false, nil
+	}
+	_, err = tx.Exec(`INSERT INTO batches(project_id, name, created) VALUES (?, ?, ?)`, p.ID, change.Key, state.Created)
+	return err == nil, err
+}
+
+// applyLabelChangeTx inserts or deletes one Label row. The Issue's own Change
+// precedes it in the Ledger; an Issue since deleted here has nothing to label.
+func applyLabelChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
+	fields, err := splitChangeKey(change.Key, 2)
+	if err != nil {
+		return false, err
+	}
+	issueID, label := fields[0], fields[1]
+	p, err := ensureProjectTx(tx, change.Project, issueID)
+	if err != nil {
+		return false, err
+	}
+	if change.Deleted {
+		return execChanged(tx, `DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ? AND label = ?`, p.ID, issueID, label)
+	}
+	if exists, err := issueExistsTx(tx, p.ID, issueID); err != nil || !exists {
+		return false, err
+	}
+	return execChanged(tx, `INSERT OR IGNORE INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, issueID, label)
+}
+
+// applyLinkChangeTx inserts or deletes one Link row; both ends must exist here.
+func applyLinkChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
+	fields, err := splitChangeKey(change.Key, 3)
+	if err != nil {
+		return false, err
+	}
+	sourceID, targetID, kind := fields[0], fields[1], fields[2]
+	p, err := ensureProjectTx(tx, change.Project, sourceID)
+	if err != nil {
+		return false, err
+	}
+	if change.Deleted {
+		return execChanged(tx, `DELETE FROM issue_links WHERE project_id = ? AND source_id = ? AND target_id = ? AND kind = ?`, p.ID, sourceID, targetID, kind)
+	}
+	for _, id := range []string{sourceID, targetID} {
+		if exists, err := issueExistsTx(tx, p.ID, id); err != nil || !exists {
+			return false, err
+		}
+	}
+	return execChanged(tx, `INSERT OR IGNORE INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, ?, ?, ?)`, p.ID, sourceID, targetID, kind)
+}
+
+func execChanged(tx *sql.Tx, query string, args ...any) (bool, error) {
+	result, err := tx.Exec(query, args...)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected > 0, err
 }

@@ -995,6 +995,9 @@ func insertProject(db *sql.DB, name, prefix, rootPath string) (Project, error) {
 	if err != nil {
 		return Project{}, err
 	}
+	if err := logProjectChangeTx(tx, name, prefix); err != nil {
+		return Project{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Project{}, err
 	}
@@ -1029,6 +1032,9 @@ func insertProjectWithGeneratedPrefix(db *sql.DB, name, baseInput, rootPath stri
 	if err != nil {
 		return Project{}, err
 	}
+	if err := logProjectChangeTx(tx, name, prefix); err != nil {
+		return Project{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Project{}, err
 	}
@@ -1049,6 +1055,9 @@ func insertBatch(db *sql.DB, p Project, name string) (Batch, error) {
 	}
 	created := clock().UTC().Format(time.RFC3339)
 	if _, err := tx.Exec(`INSERT INTO batches(project_id, name, created) VALUES (?, ?, ?)`, p.ID, name, created); err != nil {
+		return Batch{}, err
+	}
+	if err := logBatchChangeTx(tx, p, name, batchState{Created: created}); err != nil {
 		return Batch{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1139,6 +1148,9 @@ func renameBatch(db *sql.DB, p Project, oldName, newName string) (Batch, error) 
 	if !found {
 		return Batch{}, sql.ErrNoRows
 	}
+	if err := logBatchChangeTx(tx, p, newName, batchState{Created: renamed.Created, RenamedFrom: oldName}); err != nil {
+		return Batch{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Batch{}, err
 	}
@@ -1173,6 +1185,9 @@ func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) 
 		return DeleteBatchResult{}, err
 	}
 	if err := logIssueChangesTx(tx, p, members); err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if err := logBatchTombstoneTx(tx, p, name, now); err != nil {
 		return DeleteBatchResult{}, err
 	}
 	result, err = tx.Exec(`DELETE FROM batches WHERE project_id = ? AND id = ?`, p.ID, id)
@@ -1609,7 +1624,12 @@ func updateProjectRoot(db *sql.DB, p Project) (Project, error) {
 }
 
 func updateProjectName(db *sql.DB, p Project, name string) (Project, error) {
-	result, err := db.Exec(`UPDATE projects SET name = ? WHERE id = ?`, name, p.ID)
+	tx, err := db.Begin()
+	if err != nil {
+		return Project{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE projects SET name = ? WHERE id = ?`, name, p.ID)
 	if err != nil {
 		return Project{}, err
 	}
@@ -1619,6 +1639,12 @@ func updateProjectName(db *sql.DB, p Project, name string) (Project, error) {
 	}
 	if affected != 1 {
 		return Project{}, sql.ErrNoRows
+	}
+	if err := logProjectChangeTx(tx, name, p.Prefix); err != nil {
+		return Project{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Project{}, err
 	}
 	p.Name = name
 	return p, nil
@@ -1699,6 +1725,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	}
 	if err := logIssueChangesTx(tx, p, []string{created.ID}); err != nil {
 		return Issue{}, err
+	}
+	for _, label := range created.Labels {
+		if err := logLabelChangeTx(tx, p, created.ID, label, false, now); err != nil {
+			return Issue{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Issue{}, err
@@ -1991,6 +2022,38 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTri
 		}
 		if err := logIssueChangesTx(tx, p, []string{id}); err != nil {
 			return Issue{}, false, err
+		}
+		if labelsChanged {
+			for label := range nextLabels {
+				if !slices.Contains(currentLabels, label) {
+					if err := logLabelChangeTx(tx, p, id, label, false, now); err != nil {
+						return Issue{}, false, err
+					}
+				}
+			}
+			for _, label := range currentLabels {
+				if _, kept := nextLabels[label]; !kept {
+					if err := logLabelChangeTx(tx, p, id, label, true, now); err != nil {
+						return Issue{}, false, err
+					}
+				}
+			}
+		}
+		if linksChanged {
+			for linkKey := range nextLinks {
+				if _, had := currentLinks[linkKey]; !had {
+					if err := logLinkChangeTx(tx, p, linkKey, false, now); err != nil {
+						return Issue{}, false, err
+					}
+				}
+			}
+			for linkKey := range currentLinks {
+				if _, kept := nextLinks[linkKey]; !kept {
+					if err := logLinkChangeTx(tx, p, linkKey, true, now); err != nil {
+						return Issue{}, false, err
+					}
+				}
+			}
 		}
 	}
 

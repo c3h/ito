@@ -77,8 +77,9 @@ func TestSyncReportsPushedAndPulledCounts(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("stdout is not a sync result: %v\nstdout: %s", err, stdout)
 	}
-	if result.Pushed != 1 || result.Pulled != 1 {
-		t.Fatalf("sync result = %+v, want pushed 1 pulled 1", result)
+	// Each side moves its project and its issue.
+	if result.Pushed != 2 || result.Pulled != 2 {
+		t.Fatalf("sync result = %+v, want pushed 2 pulled 2", result)
 	}
 
 	stdout, code = captureStdout(t, func() int { return runCLI([]string{"sync"}) })

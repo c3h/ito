@@ -122,12 +122,14 @@ func TestSyncConvergesTwoStoresThroughOneLedger(t *testing.T) {
 		t.Fatalf("create on A: %v", err)
 	}
 
+	// A pushes its project, the issue and its label; B, holding the same
+	// project already, pulls the issue and the label.
 	results := syncDevices(t, l, a, b)
-	if results[0].Pushed != 1 || results[0].Pulled != 0 {
-		t.Fatalf("A first sync = %+v, want pushed 1 pulled 0", results[0])
+	if results[0].Pushed != 3 || results[0].Pulled != 0 {
+		t.Fatalf("A first sync = %+v, want pushed 3 pulled 0", results[0])
 	}
-	if results[1].Pushed != 0 || results[1].Pulled != 1 {
-		t.Fatalf("B first sync = %+v, want pushed 0 pulled 1", results[1])
+	if results[1].Pushed != 1 || results[1].Pulled != 2 {
+		t.Fatalf("B first sync = %+v, want pushed 1 pulled 2", results[1])
 	}
 	onB, err := b.st.FindIssue(b.p, created.ID)
 	if err != nil {
@@ -313,7 +315,8 @@ func TestSyncResumesAnInterruptedPullWithoutDuplicatesOrGaps(t *testing.T) {
 	}
 	syncDevices(t, l, a)
 
-	l.reads, l.failAfter = 0, 2
+	// Entries: A's project, then four issues; three reads land two issues.
+	l.reads, l.failAfter = 0, 3
 	result, err := b.st.Sync(l)
 	if !errors.Is(err, errDropped) {
 		t.Fatalf("expected the dropped connection to surface, got result %+v err %v", result, err)
@@ -366,8 +369,8 @@ func TestSyncBootstrapsAnEmptyDeviceAndKeepsSearchWorking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap sync: %v", err)
 	}
-	if result.Pulled != 2 {
-		t.Fatalf("bootstrap = %+v, want 2 pulled", result)
+	if result.Pulled != 3 {
+		t.Fatalf("bootstrap = %+v, want the project and 2 issues pulled", result)
 	}
 
 	p, found, err := empty.FindProjectByName("shared")
@@ -406,5 +409,225 @@ func TestSyncBootstrapsAnEmptyDeviceAndKeepsSearchWorking(t *testing.T) {
 	next := createStoreIssue(t, empty, p, "Local", "todo", "medium")
 	if next.ID != "SHR-3" {
 		t.Fatalf("next local ID = %s, want SHR-3", next.ID)
+	}
+}
+
+func TestSyncLinksAndLabelsRoundTripIncludingRemovals(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	b := openSyncDevice(t, "b")
+
+	setClock(t, "2026-08-24T16:00:00Z")
+	one := createStoreIssue(t, a.st, a.p, "One", "todo", "medium")
+	two := createStoreIssue(t, a.st, a.p, "Two", "todo", "medium")
+	three, err := a.st.CreateIssue(a.p, "Three", "todo", "medium", []string{"feature", "docs"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setClock(t, "2026-08-24T16:01:00Z")
+	if _, err := a.st.Edit(a.p, two.ID, EditIssueOptions{
+		LinkOps: []LinkEditOp{
+			{Action: "add", Kind: "blocked_by", Target: one.ID},
+			{Action: "add", Kind: "relates_to", Target: three.ID},
+			{Action: "add", Kind: "conflicts_with", Target: three.ID},
+		},
+		LabelOps: []LabelEditOp{{Kind: "add", Label: "bug"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, a, b)
+
+	onB, err := b.st.FindIssue(b.p, two.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := onB.BlockedBy; len(got) != 1 || got[0] != one.ID {
+		t.Fatalf("blocked_by on B = %v, want [%s]", got, one.ID)
+	}
+	if got := onB.RelatesTo; len(got) != 1 || got[0] != three.ID {
+		t.Fatalf("relates_to on B = %v, want [%s]", got, three.ID)
+	}
+	if got := onB.ConflictsWith; len(got) != 1 || got[0] != three.ID {
+		t.Fatalf("conflicts_with on B = %v, want [%s]", got, three.ID)
+	}
+	if got := onB.Labels; len(got) != 1 || got[0] != "bug" {
+		t.Fatalf("labels on B = %v, want [bug]", got)
+	}
+	threeOnB, err := b.st.FindIssue(b.p, three.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := threeOnB.Labels; len(got) != 2 || got[0] != "docs" || got[1] != "feature" {
+		t.Fatalf("labels set at creation on B = %v, want [docs feature]", got)
+	}
+
+	// Removals on B travel back to A.
+	setClock(t, "2026-08-24T16:02:00Z")
+	if _, err := b.st.Edit(b.p, two.ID, EditIssueOptions{
+		LinkOps:  []LinkEditOp{{Action: "remove", Kind: "blocked_by", Target: one.ID}},
+		LabelOps: []LabelEditOp{{Kind: "remove", Label: "bug"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, b, a)
+	onA, err := a.st.FindIssue(a.p, two.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onA.BlockedBy) != 0 || len(onA.Labels) != 0 {
+		t.Fatalf("removals must reach A, got blocked_by %v labels %v", onA.BlockedBy, onA.Labels)
+	}
+	if len(onA.RelatesTo) != 1 || len(onA.ConflictsWith) != 1 {
+		t.Fatalf("untouched links must survive on A, got %#v", onA)
+	}
+}
+
+func TestSyncBatchesRoundTripAndWavesMatch(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	b := openSyncDevice(t, "b")
+
+	setClock(t, "2026-08-24T17:00:00Z")
+	if _, err := a.st.CreateBatch(a.p, "plan"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.st.CreateBatch(a.p, "doomed"); err != nil {
+		t.Fatal(err)
+	}
+	first := createStoreIssueInBatch(t, a.st, a.p, "First", "todo", "medium", "plan")
+	second := createStoreIssueInBatch(t, a.st, a.p, "Second", "todo", "medium", "plan")
+	loose := createStoreIssue(t, a.st, a.p, "Loose", "todo", "medium")
+	setClock(t, "2026-08-24T17:01:00Z")
+	if _, err := a.st.Edit(a.p, second.ID, EditIssueOptions{LinkOps: []LinkEditOp{{Action: "add", Kind: "blocked_by", Target: first.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.st.Edit(a.p, loose.ID, EditIssueOptions{BatchSet: true, Batch: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, a, b)
+
+	batchesOnB, err := b.st.ListBatches(b.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batchesOnB) != 2 {
+		t.Fatalf("batches on B = %+v, want plan and doomed", batchesOnB)
+	}
+	for _, batch := range batchesOnB {
+		if batch.Created != "2026-08-24T17:00:00Z" {
+			t.Fatalf("batch %s on B keeps the origin created, got %s", batch.Name, batch.Created)
+		}
+		if batch.Name == "plan" && batch.Total != 3 {
+			t.Fatalf("plan on B has %d members, want 3", batch.Total)
+		}
+	}
+	planA, err := a.st.ShowBatch(a.p, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planB, err := b.st.ShowBatch(b.p, "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(planA.Waves) != len(planB.Waves) || len(planA.Waves) != 2 {
+		t.Fatalf("waves differ: A %d, B %d, want 2", len(planA.Waves), len(planB.Waves))
+	}
+	for i := range planA.Waves {
+		if got, want := storeIssueIDs(planB.Waves[i].Issues), storeIssueIDs(planA.Waves[i].Issues); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("wave %d on B = %v, want %v", i+1, got, want)
+		}
+	}
+
+	// Rename, membership removal and deletion travel, including from B.
+	setClock(t, "2026-08-24T17:02:00Z")
+	if _, err := b.st.RenameBatch(b.p, "plan", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.st.Edit(b.p, loose.ID, EditIssueOptions{BatchSet: true, Batch: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.st.DeleteBatch(b.p, "doomed"); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, b, a)
+	batchesOnA, err := a.st.ListBatches(a.p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batchesOnA) != 1 || batchesOnA[0].Name != "renamed" || batchesOnA[0].Total != 2 {
+		t.Fatalf("batches on A after rename/removal/delete = %+v, want only renamed with 2 members", batchesOnA)
+	}
+	looseOnA, err := a.st.FindIssue(a.p, loose.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if looseOnA.Batch != nil {
+		t.Fatalf("loose issue must leave the batch on A, got %v", *looseOnA.Batch)
+	}
+	// Renaming keeps the members attached and further edits resolve the new name.
+	firstOnA, err := a.st.FindIssue(a.p, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstOnA.Batch == nil || *firstOnA.Batch != "renamed" {
+		t.Fatalf("first issue on A should sit in renamed, got %v", firstOnA.Batch)
+	}
+}
+
+func TestSyncProjectsArriveDetachedAndKeepLocalRoot(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	setClock(t, "2026-08-24T18:00:00Z")
+	other, err := a.st.CreateProject("other", "OTH", filepath.Join(t.TempDir(), "other-on-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, a)
+
+	emptyDB, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emptyDB.Close()
+	b := New(emptyDB)
+	if _, err := b.Sync(l); err != nil {
+		t.Fatal(err)
+	}
+	onB, found, err := b.FindProjectByName("other")
+	if err != nil || !found {
+		t.Fatalf("project created on A must arrive on B, found=%v err=%v", found, err)
+	}
+	if onB.RootPath != nil || onB.Prefix != "OTH" {
+		t.Fatalf("project on B = %#v, want detached with prefix OTH", onB)
+	}
+
+	// ito init attaches by name on B; A's later Changes never touch that path.
+	rootOnB := filepath.Join(t.TempDir(), "other-on-b")
+	onB.RootPath = &rootOnB
+	if _, err := b.UpdateProjectRoot(onB); err != nil {
+		t.Fatal(err)
+	}
+	setClock(t, "2026-08-24T18:01:00Z")
+	if _, err := a.st.RenameProject(other, "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	createStoreIssue(t, a.st, other, "In other", "todo", "medium")
+	syncDevices(t, l, a)
+	if _, err := b.Sync(l); err != nil {
+		t.Fatal(err)
+	}
+	renamed, found, err := b.FindProjectByName("renamed")
+	if err != nil || !found {
+		t.Fatalf("rename must reach B, found=%v err=%v", found, err)
+	}
+	if renamed.ID != onB.ID || renamed.RootPath == nil || *renamed.RootPath != rootOnB {
+		t.Fatalf("project on B = %#v, want the same row with root %s", renamed, rootOnB)
+	}
+	issues, err := b.ListIssues(ListOptions{ProjectID: renamed.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 || issues[0].ID != "OTH-1" {
+		t.Fatalf("issues in the renamed project on B = %v, want OTH-1", storeIssueIDs(issues))
 	}
 }

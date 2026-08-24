@@ -9,9 +9,16 @@ import (
 	"sync"
 )
 
-// KindIssue is the row kind of a Change carrying an Issue row. Other kinds
-// (project, link, label, batch) arrive with later work.
-const KindIssue = "issue"
+// Row kinds a Change can carry. Issue, Project and Batch Changes hold the
+// row's full state; Link and Label rows are set-like, so their Change is an
+// insert or a delete keyed by the row itself.
+const (
+	KindIssue   = "issue"
+	KindProject = "project"
+	KindBatch   = "batch"
+	KindLink    = "link"
+	KindLabel   = "label"
+)
 
 // Change records one mutation to one row: the row's full new state, or a
 // tombstone when Deleted is set. Device and Sequence together identify the
