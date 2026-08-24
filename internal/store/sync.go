@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
+	"time"
 
 	"github.com/c3h/ito/internal/ledger"
 )
@@ -63,12 +63,14 @@ VALUES (?, ?, ?, 0, ?, ?)`, ledger.KindIssue, p.Name, id, state.Updated, string(
 }
 
 // logIssueTombstonesTx appends a tombstone per deleted Issue, stamped with the
-// deletion time so a deletion outranks any edit that preceded it.
-func logIssueTombstonesTx(tx *sql.Tx, p Project, ids []string, deletedAt string) error {
-	for _, id := range ids {
+// deletion time so a deletion outranks any edit that preceded it. Only local
+// deletions log; a pulled deletion is applied without echoing a Change back.
+func logIssueTombstonesTx(tx *sql.Tx, p Project, rows []issueDeletionRow) error {
+	deletedAt := clock().UTC().Format(time.RFC3339)
+	for _, row := range rows {
 		if _, err := tx.Exec(`
 INSERT INTO changes(kind, project, key, deleted, updated, state)
-VALUES (?, ?, ?, 1, ?, NULL)`, ledger.KindIssue, p.Name, id, deletedAt); err != nil {
+VALUES (?, ?, ?, 1, ?, NULL)`, ledger.KindIssue, p.Name, row.id, deletedAt); err != nil {
 			return err
 		}
 	}
@@ -163,11 +165,17 @@ func (s *Store) push(l ledger.Ledger, device string) (int, error) {
 		return 0, nil
 	}
 	// The Ledger deduplicates by Device and Sequence, so a push whose marking
-	// below fails is simply resent next time.
+	// below fails is simply resent next time. Exactly the sent sequences are
+	// marked: a writer committing a lower seq after the read above stays
+	// pending.
 	if _, err := l.Append(pending); err != nil {
 		return 0, err
 	}
-	if _, err := s.db.Exec(`UPDATE changes SET pushed = 1 WHERE pushed = 0 AND seq <= ?`, pending[len(pending)-1].Sequence); err != nil {
+	args := make([]any, 0, len(pending))
+	for _, change := range pending {
+		args = append(args, change.Sequence)
+	}
+	if _, err := s.db.Exec(`UPDATE changes SET pushed = 1 WHERE seq IN (`+sqlPlaceholders(len(pending))+`)`, args...); err != nil {
 		return 0, err
 	}
 	return len(pending), nil
@@ -224,12 +232,14 @@ func (s *Store) applyEntry(entry ledger.Entry, device string) (bool, error) {
 	if entry.Device != device {
 		switch entry.Kind {
 		case ledger.KindIssue:
-			if err := applyIssueChangeTx(tx, entry.Change); err != nil {
+			var err error
+			if applied, err = applyIssueChangeTx(tx, entry.Change); err != nil {
 				return false, err
 			}
-			applied = true
 		default:
-			return false, fmt.Errorf("unknown row kind %q", entry.Kind)
+			// Failing loudly beats skipping: an older build must not drop rows a
+			// newer one pushed.
+			return false, fmt.Errorf("row kind %q is unknown to this build of ito; upgrade ito and sync again", entry.Kind)
 		}
 	}
 	if err := setSyncStateTx(tx, "position", fmt.Sprint(entry.Position)); err != nil {
@@ -238,10 +248,12 @@ func (s *Store) applyEntry(entry ledger.Entry, device string) (bool, error) {
 	return applied, tx.Commit()
 }
 
-func applyIssueChangeTx(tx *sql.Tx, change ledger.Change) error {
+// applyIssueChangeTx applies one Issue Change and reports whether it changed
+// the local row.
+func applyIssueChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	p, err := ensureProjectTx(tx, change.Project, change.Key)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var rowID int64
 	var currentTitle, currentBody, currentUpdated string
@@ -249,42 +261,42 @@ func applyIssueChangeTx(tx *sql.Tx, change ledger.Change) error {
 		Scan(&rowID, &currentTitle, &currentBody, &currentUpdated)
 	exists := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return false, err
 	}
 	// Last-writer-wins: a local row at least as new as the Change stays.
 	// RFC3339 stamps in UTC compare correctly as strings.
 	if exists && currentUpdated >= change.Updated {
-		return nil
+		return false, nil
 	}
 
 	if change.Deleted {
 		if !exists {
-			return nil
+			return false, nil
 		}
 		_, err := deleteIssueRowsTx(tx, p, []issueDeletionRow{{rowID: rowID, id: change.Key, title: currentTitle, body: currentBody}})
-		return err
+		return err == nil, err
 	}
 
 	var state issueState
 	if err := json.Unmarshal(change.State, &state); err != nil {
-		return fmt.Errorf("decode issue state: %w", err)
+		return false, fmt.Errorf("decode issue state: %w", err)
 	}
 	if exists {
 		if _, err := tx.Exec(`
 UPDATE issues
 SET title = ?, status = ?, priority = ?, category = ?, triage_state = ?, branch = ?, body = ?, created = ?, updated = ?
 WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, state.Created, state.Updated, rowID); err != nil {
-			return err
+			return false, err
 		}
 		if state.Title != currentTitle || state.Body != currentBody {
 			if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, currentTitle, currentBody); err != nil {
-				return err
+				return false, err
 			}
 			if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, state.Title, state.Body); err != nil {
-				return err
+				return false, err
 			}
 		}
-		return nil
+		return true, nil
 	}
 
 	result, err := tx.Exec(`
@@ -292,35 +304,46 @@ INSERT INTO issues(project_id, id, title, status, priority, category, triage_sta
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, change.Key, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, state.Created, state.Updated)
 	if err != nil {
-		return err
+		return false, err
 	}
 	rowID, err = result.LastInsertId()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, state.Title, state.Body); err != nil {
-		return err
+		return false, err
 	}
 	// Keep the advisory local counter past every number seen, so a Device
 	// numbering locally never reuses a pulled ID.
-	number, err := issueNumber(change.Key)
+	_, number, err := splitIssueID(change.Key)
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, err = tx.Exec(`UPDATE projects SET last_id = max(last_id, ?) WHERE id = ?`, number, p.ID)
-	return err
+	return err == nil, err
 }
 
 // ensureProjectTx resolves the Change's Project by name, creating it detached
 // (no root_path) when this Device has never seen it; ito init attaches it.
 func ensureProjectTx(tx *sql.Tx, name, issueID string) (Project, error) {
-	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
-	if err != nil || found {
-		return p, err
+	prefix, _, err := splitIssueID(issueID)
+	if err != nil {
+		return Project{}, err
 	}
-	prefix, _, _ := strings.Cut(issueID, "-")
-	if !PrefixPattern.MatchString(prefix) {
-		return Project{}, fmt.Errorf("issue %q carries no valid prefix", issueID)
+	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
+	if err != nil {
+		return Project{}, err
+	}
+	if found {
+		if p.Prefix != prefix {
+			return Project{}, fmt.Errorf("project %q uses prefix %s here but %s on the Device that made the Change; rename one of them before syncing", name, p.Prefix, prefix)
+		}
+		return p, nil
+	}
+	if taken, err := valueExists(tx, `SELECT 1 FROM projects WHERE prefix = ?`, prefix); err != nil {
+		return Project{}, err
+	} else if taken {
+		return Project{}, fmt.Errorf("prefix %s already belongs to another local project, so project %q cannot be created for it", prefix, name)
 	}
 	result, err := tx.Exec(`INSERT INTO projects(name, prefix, root_path) VALUES (?, ?, NULL)`, name, prefix)
 	if err != nil {
@@ -333,12 +356,12 @@ func ensureProjectTx(tx *sql.Tx, name, issueID string) (Project, error) {
 	return Project{ID: id, Name: name, Prefix: prefix}, nil
 }
 
-func issueNumber(id string) (int64, error) {
+func splitIssueID(id string) (string, int64, error) {
 	match := IssueIDPattern.FindStringSubmatch(id)
 	if match == nil {
-		return 0, fmt.Errorf("issue %q is not a valid ID", id)
+		return "", 0, fmt.Errorf("issue %q is not a valid ID", id)
 	}
 	var number int64
 	_, err := fmt.Sscan(match[2], &number)
-	return number, err
+	return match[1], number, err
 }

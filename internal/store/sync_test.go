@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,6 +176,68 @@ func TestSyncConvergesTwoStoresThroughOneLedger(t *testing.T) {
 	syncDevices(t, l, a, b)
 	if _, err := b.st.FindIssue(b.p, created.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted issue must be gone on B, got err %v", err)
+	}
+	// Applying the pulled deletion must not echo a tombstone back.
+	results = syncDevices(t, l, b, a)
+	for i, result := range results {
+		if result.Pushed != 0 || result.Pulled != 0 {
+			t.Fatalf("sync %d after a pulled delete = %+v, want nothing moved", i, result)
+		}
+	}
+}
+
+func TestSyncKeepsSearchInStepWithPulledUpdatesAndDeletes(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	b := openSyncDevice(t, "b")
+
+	setClock(t, "2026-08-24T14:00:00Z")
+	kept := createStoreIssue(t, a.st, a.p, "Grinder burrs", "todo", "medium")
+	dropped := createStoreIssue(t, a.st, a.p, "Grinder hopper", "todo", "medium")
+	syncDevices(t, l, a, b)
+
+	setClock(t, "2026-08-24T14:01:00Z")
+	if _, err := a.st.Edit(a.p, kept.ID, EditIssueOptions{TitleSet: true, Title: "Tamper handle"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.st.DeleteIssue(a.p, dropped.ID); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, a, b)
+
+	search := func(term string) []string {
+		found, err := b.st.ListIssues(ListOptions{ProjectID: b.p.ID, Search: term})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return storeIssueIDs(found)
+	}
+	if got := search("grinder"); len(got) != 0 {
+		t.Fatalf("search for the old title and the deleted issue = %v, want none", got)
+	}
+	if got := search("tamper"); len(got) != 1 || got[0] != kept.ID {
+		t.Fatalf("search for the pulled title = %v, want %s", got, kept.ID)
+	}
+}
+
+func TestSyncRefusesAProjectWhosePrefixDiffersLocally(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	setClock(t, "2026-08-24T15:00:00Z")
+	createStoreIssue(t, a.st, a.p, "From A", "todo", "medium")
+	syncDevices(t, l, a)
+
+	otherDB, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherDB.Close()
+	other := New(otherDB)
+	if _, err := other.CreateProject("shared", "OTH", filepath.Join(t.TempDir(), "other")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Sync(l); err == nil || !strings.Contains(err.Error(), "prefix OTH here but SHR") {
+		t.Fatalf("expected an actionable prefix mismatch, got %v", err)
 	}
 }
 

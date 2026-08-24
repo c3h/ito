@@ -2024,6 +2024,9 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&row.rowID, &row.id, &row.title
 	if _, err := deleteIssueRowsTx(tx, p, []issueDeletionRow{row}); err != nil {
 		return err
 	}
+	if err := logIssueTombstonesTx(tx, p, []issueDeletionRow{row}); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -2062,6 +2065,9 @@ ORDER BY row_id`, p.ID, status)
 	if err != nil {
 		return 0, err
 	}
+	if err := logIssueTombstonesTx(tx, p, matches); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -2090,13 +2096,6 @@ func deleteIssueRowsTx(tx *sql.Tx, p Project, matches []issueDeletionRow) (int, 
 		if affected != 1 {
 			return 0, sql.ErrNoRows
 		}
-	}
-	ids := make([]string, 0, len(matches))
-	for _, match := range matches {
-		ids = append(ids, match.id)
-	}
-	if err := logIssueTombstonesTx(tx, p, ids, clock().UTC().Format(time.RFC3339)); err != nil {
-		return 0, err
 	}
 	return len(matches), nil
 }

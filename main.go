@@ -503,7 +503,7 @@ func runSync(args []string) int {
 	}
 	l, err := openLedger(*cfg.Ledger)
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reach the Ledger at %s: %v", cfg.Ledger.URL, err), "check the network and the URL in 'ito config'.")
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reach the Ledger: %v", err), "check the network and 'ito config'.")
 	}
 
 	db, st, openFail := openStore()

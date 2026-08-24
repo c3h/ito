@@ -28,7 +28,7 @@ func TestSyncWithoutLedgerFailsWithConnectHint(t *testing.T) {
 func TestSyncReportsPushedAndPulledCounts(t *testing.T) {
 	itoHome := t.TempDir()
 	t.Setenv("ITO_HOME", itoHome)
-	if err := itoconfig.Write(itoconfig.Config{Ledger: &itoconfig.Ledger{URL: "libsql://example.turso.io", Token: "secret"}}); err != nil {
+	if err := itoconfig.Write(itoconfig.Config{Ledger: &itoconfig.Ledger{}}); err != nil {
 		t.Fatal(err)
 	}
 	shared := ledger.NewMemory()

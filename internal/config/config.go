@@ -9,12 +9,9 @@ import (
 	"path/filepath"
 )
 
-// Ledger is the connection to the shared change log (decision 0005). The
-// token lives only here, in a file with restrictive permissions.
-type Ledger struct {
-	URL   string `json:"url"`
-	Token string `json:"token"`
-}
+// Ledger is the connection to the shared change log (decision 0005); its
+// fields arrive with the connection command.
+type Ledger struct{}
 
 type Config struct {
 	Ledger *Ledger `json:"ledger,omitempty"`
