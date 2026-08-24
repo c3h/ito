@@ -41,7 +41,7 @@ func TestOpenDefaultOpensLocalFileWithWALAndBusyTimeout(t *testing.T) {
 	if busyTimeout != 5000 {
 		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
 	}
-	assertSchemaVersion(t, db, 5)
+	assertSchemaVersion(t, db, 6)
 }
 
 func TestOpenDefaultRejectsRetiredCloudConfig(t *testing.T) {
@@ -70,7 +70,7 @@ func TestMigrateFreshDatabaseReachesBatchSchemaVersion(t *testing.T) {
 	}
 	defer db.Close()
 
-	assertSchemaVersion(t, db, 5)
+	assertSchemaVersion(t, db, 6)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
@@ -145,7 +145,7 @@ VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '
 		t.Fatalf("migrate v1 database: %v", err)
 	}
 
-	assertSchemaVersion(t, db, 5)
+	assertSchemaVersion(t, db, 6)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
@@ -186,6 +186,8 @@ CREATE TABLE issues (
   category     TEXT NOT NULL DEFAULT 'uncategorized',
   triage_state TEXT NOT NULL DEFAULT 'needs-triage'
 );
+CREATE TABLE issue_links (project_id INTEGER NOT NULL, source_id TEXT NOT NULL, target_id TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (project_id, source_id, target_id, kind));
+CREATE TABLE issue_labels (project_id INTEGER NOT NULL, issue_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY (project_id, issue_id, label));
 INSERT INTO issues(project_id, id, title, status, priority, body, created, updated)
 VALUES (1, 'VTH-1', 'Existing issue', 'todo', 'medium', '', '2026-08-09T10:00:00Z', '2026-08-09T10:00:00Z');
 `); err != nil {
@@ -195,7 +197,7 @@ VALUES (1, 'VTH-1', 'Existing issue', 'todo', 'medium', '', '2026-08-09T10:00:00
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate v3 database: %v", err)
 	}
-	assertSchemaVersion(t, db, 5)
+	assertSchemaVersion(t, db, 6)
 	assertColumnExists(t, db, "issues", "branch")
 	var branch string
 	if err := db.QueryRow(`SELECT branch FROM issues WHERE id = 'VTH-1'`).Scan(&branch); err != nil {

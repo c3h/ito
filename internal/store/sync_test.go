@@ -43,6 +43,19 @@ CREATE TABLE issues (
   triage_state TEXT NOT NULL DEFAULT 'needs-triage',
   branch       TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE issue_links (
+  project_id INTEGER NOT NULL,
+  source_id  TEXT NOT NULL,
+  target_id  TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  PRIMARY KEY (project_id, source_id, target_id, kind)
+);
+CREATE TABLE issue_labels (
+  project_id INTEGER NOT NULL,
+  issue_id   TEXT NOT NULL,
+  label      TEXT NOT NULL,
+  PRIMARY KEY (project_id, issue_id, label)
+);
 INSERT INTO projects(name, prefix, last_id) VALUES ('legacy', 'LEG', 1);
 INSERT INTO issues(project_id, id, title, status, priority, created, updated)
 VALUES (1, 'LEG-1', 'Existing issue', 'todo', 'medium', '2026-08-09T10:00:00Z', '2026-08-09T10:00:00Z');
@@ -53,7 +66,7 @@ VALUES (1, 'LEG-1', 'Existing issue', 'todo', 'medium', '2026-08-09T10:00:00Z', 
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate v4 database: %v", err)
 	}
-	assertSchemaVersion(t, db, 5)
+	assertSchemaVersion(t, db, 6)
 	var pending int
 	if err := db.QueryRow(`SELECT count(*) FROM changes WHERE pushed = 0`).Scan(&pending); err != nil {
 		t.Fatalf("read change log: %v", err)
@@ -629,5 +642,120 @@ func TestSyncProjectsArriveDetachedAndKeepLocalRoot(t *testing.T) {
 	}
 	if len(issues) != 1 || issues[0].ID != "OTH-1" {
 		t.Fatalf("issues in the renamed project on B = %v, want OTH-1", storeIssueIDs(issues))
+	}
+}
+
+func TestSyncAppliesBatchesForProjectsThatPredateProjectChanges(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	// Projects created before project Changes existed have none in the Ledger.
+	if _, err := a.db.Exec(`DELETE FROM changes`); err != nil {
+		t.Fatal(err)
+	}
+	setClock(t, "2026-08-24T19:00:00Z")
+	if _, err := a.st.CreateBatch(a.p, "early"); err != nil {
+		t.Fatal(err)
+	}
+	createStoreIssueInBatch(t, a.st, a.p, "Member", "todo", "medium", "early")
+	syncDevices(t, l, a)
+
+	emptyDB, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer emptyDB.Close()
+	b := New(emptyDB)
+	if _, err := b.Sync(l); err != nil {
+		t.Fatalf("a batch Change must create its project detached: %v", err)
+	}
+	p, _, err := b.FindProjectByName("shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, err := b.ListBatches(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 1 || batches[0].Total != 1 {
+		t.Fatalf("batches on B = %+v, want early with 1 member", batches)
+	}
+}
+
+func TestSyncConcurrentLabelAndLinkEditsConvergeOnTheLaterOne(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	b := openSyncDevice(t, "b")
+
+	setClock(t, "2026-08-24T20:00:00Z")
+	issue, err := a.st.CreateIssue(a.p, "Labelled", "todo", "medium", []string{"bug"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := createStoreIssue(t, a.st, a.p, "Other", "todo", "medium")
+	if _, err := a.st.Edit(a.p, issue.ID, EditIssueOptions{LinkOps: []LinkEditOp{{Action: "add", Kind: "blocked_by", Target: other.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, a, b)
+
+	// B removes earlier, A re-affirms later, but B pushes first.
+	setClock(t, "2026-08-24T20:01:00Z")
+	if _, err := b.st.Edit(b.p, issue.ID, EditIssueOptions{
+		LabelOps: []LabelEditOp{{Kind: "remove", Label: "bug"}},
+		LinkOps:  []LinkEditOp{{Action: "remove", Kind: "blocked_by", Target: other.ID}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setClock(t, "2026-08-24T20:02:00Z")
+	if _, err := a.st.Edit(a.p, issue.ID, EditIssueOptions{
+		LabelOps: []LabelEditOp{{Kind: "remove", Label: "bug"}, {Kind: "add", Label: "bug"}, {Kind: "add", Label: "docs"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, b, a, b)
+	for name, device := range map[string]syncDevice{"A": a, "B": b} {
+		got, err := device.st.FindIssue(device.p, issue.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Labels) != 2 || got.Labels[0] != "bug" || got.Labels[1] != "docs" {
+			t.Fatalf("%s labels = %v, want the later edit [bug docs]", name, got.Labels)
+		}
+		if len(got.BlockedBy) != 0 {
+			t.Fatalf("%s blocked_by = %v, want B's removal (A never re-touched the link)", name, got.BlockedBy)
+		}
+	}
+}
+
+func TestMigrateV6StampsSetRowsOnV5Database(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "v5.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version(version) VALUES (5);
+CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, root_path TEXT UNIQUE, prefix TEXT UNIQUE NOT NULL, last_id INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE issues (row_id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, priority TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', created TEXT NOT NULL, updated TEXT NOT NULL, batch_id INTEGER, category TEXT NOT NULL DEFAULT 'uncategorized', triage_state TEXT NOT NULL DEFAULT 'needs-triage', branch TEXT NOT NULL DEFAULT '');
+CREATE TABLE issue_links (project_id INTEGER NOT NULL, source_id TEXT NOT NULL, target_id TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (project_id, source_id, target_id, kind));
+CREATE TABLE issue_labels (project_id INTEGER NOT NULL, issue_id TEXT NOT NULL, label TEXT NOT NULL, PRIMARY KEY (project_id, issue_id, label));
+CREATE TABLE changes (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, project TEXT NOT NULL, key TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, updated TEXT NOT NULL, state TEXT, pushed INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO projects(name, prefix, last_id) VALUES ('legacy', 'LEG', 1);
+INSERT INTO issues(project_id, id, title, status, priority, created, updated) VALUES (1, 'LEG-1', 'Existing', 'todo', 'medium', '2026-08-09T10:00:00Z', '2026-08-09T10:00:00Z');
+INSERT INTO issue_labels(project_id, issue_id, label) VALUES (1, 'LEG-1', 'bug');
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate v5 database: %v", err)
+	}
+	assertSchemaVersion(t, db, 6)
+	var updated string
+	if err := db.QueryRow(`SELECT updated FROM issue_labels WHERE issue_id = 'LEG-1'`).Scan(&updated); err != nil || updated != "" {
+		t.Fatalf("legacy label rows carry the empty stamp, got %q err %v", updated, err)
+	}
+	if _, err := db.Exec(`INSERT INTO set_tombstones(kind, project_id, key, updated) VALUES ('label', 1, 'x', '')`); err != nil {
+		t.Fatalf("set_tombstones table missing: %v", err)
 	}
 }

@@ -47,6 +47,8 @@ type projectState struct {
 // batchState carries the immutable created stamp; on a rename, RenamedFrom
 // names the Batch the receiving Device should re-label so memberships stay put.
 type batchState struct {
+	// Prefix identifies the Project across Devices, whatever it is named there.
+	Prefix      string `json:"prefix"`
 	Created     string `json:"created"`
 	RenamedFrom string `json:"renamed_from,omitempty"`
 }
@@ -71,11 +73,12 @@ func logProjectChangeTx(tx *sql.Tx, name, prefix string) error {
 }
 
 func logBatchChangeTx(tx *sql.Tx, p Project, name string, state batchState) error {
+	state.Prefix = p.Prefix
 	return appendChangeTx(tx, ledger.KindBatch, p.Name, name, false, clock().UTC().Format(time.RFC3339), state)
 }
 
 func logBatchTombstoneTx(tx *sql.Tx, p Project, name, deletedAt string) error {
-	return appendChangeTx(tx, ledger.KindBatch, p.Name, name, true, deletedAt, nil)
+	return appendChangeTx(tx, ledger.KindBatch, p.Name, name, true, deletedAt, batchState{Prefix: p.Prefix})
 }
 
 // Label and Link keys are the rows themselves; the Change carries no state.
@@ -84,12 +87,44 @@ func logLabelChangeTx(tx *sql.Tx, p Project, issueID, label string, deleted bool
 }
 
 func logLinkChangeTx(tx *sql.Tx, p Project, linkKey string, deleted bool, updated string) error {
-	sourceID, targetID, kind := parseIssueLinkKey(linkKey)
-	return appendChangeTx(tx, ledger.KindLink, p.Name, sourceID+"|"+targetID+"|"+kind, deleted, updated, nil)
+	return appendChangeTx(tx, ledger.KindLink, p.Name, linkChangeKey(linkKey), deleted, updated, nil)
 }
 
 func labelChangeKey(issueID, label string) string {
 	return issueID + "|" + label
+}
+
+// linkChangeKey renders the in-process link key (NUL-separated) as it travels.
+func linkChangeKey(linkKey string) string {
+	sourceID, targetID, kind := parseIssueLinkKey(linkKey)
+	return sourceID + "|" + targetID + "|" + kind
+}
+
+// tombstoneSetRowTx remembers when a Label or Link row was removed, so an
+// older insert arriving later does not resurrect it.
+func tombstoneSetRowTx(tx *sql.Tx, kind string, projectID int64, key, updated string) error {
+	_, err := tx.Exec(`
+INSERT INTO set_tombstones(kind, project_id, key, updated) VALUES (?, ?, ?, ?)
+ON CONFLICT(kind, project_id, key) DO UPDATE SET updated = max(updated, excluded.updated)`, kind, projectID, key, updated)
+	return err
+}
+
+// setRowOutranked reports whether a local row or tombstone for the key is at
+// least as new as the Change, in which case the Change is stale.
+func setRowOutranked(tx *sql.Tx, kind string, projectID int64, key, rowQuery string, rowArgs []any, updated string) (bool, error) {
+	var current string
+	err := tx.QueryRow(rowQuery, rowArgs...).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if err == nil && current >= updated {
+		return true, nil
+	}
+	err = tx.QueryRow(`SELECT updated FROM set_tombstones WHERE kind = ? AND project_id = ? AND key = ?`, kind, projectID, key).Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	return err == nil && current >= updated, nil
 }
 
 func splitChangeKey(key string, parts int) ([]string, error) {
@@ -482,14 +517,18 @@ func applyProjectChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 
 // applyBatchChangeTx creates, renames or deletes the Batch named by the key.
 // A rename re-labels the local row so its memberships stay attached; when the
-// new name already exists locally the two Batches merge into it.
+// new name already exists locally the two Batches merge into it. Batch and
+// Project Changes apply in Ledger order rather than by updated: their rows
+// are rarely touched on two Devices between Syncs, and a stale rename is
+// harmless where a stale row state would not be.
 func applyBatchChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
-	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, change.Project)
+	var state batchState
+	if err := json.Unmarshal(change.State, &state); err != nil {
+		return false, fmt.Errorf("decode batch state: %w", err)
+	}
+	p, err := ensureProjectByPrefixTx(tx, change.Project, state.Prefix)
 	if err != nil {
 		return false, err
-	}
-	if !found {
-		return false, fmt.Errorf("project %q is unknown here, so batch %q cannot be applied", change.Project, change.Key)
 	}
 	id, exists, err := findBatchID(tx, p.ID, change.Key)
 	if err != nil {
@@ -504,10 +543,6 @@ func applyBatchChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 		}
 		_, err := tx.Exec(`DELETE FROM batches WHERE id = ?`, id)
 		return err == nil, err
-	}
-	var state batchState
-	if err := json.Unmarshal(change.State, &state); err != nil {
-		return false, fmt.Errorf("decode batch state: %w", err)
 	}
 	if state.RenamedFrom != "" {
 		oldID, oldExists, err := findBatchID(tx, p.ID, state.RenamedFrom)
@@ -533,39 +568,59 @@ func applyBatchChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	return err == nil, err
 }
 
-// applyLabelChangeTx inserts or deletes one Label row. The Issue's own Change
-// precedes it in the Ledger; an Issue since deleted here has nothing to label.
+// applyLabelChangeTx inserts or deletes one Label row by last-writer-wins on
+// the row's own updated, remembering deletions as tombstones. The Issue's own
+// Change precedes it in the Ledger; an Issue since deleted here has nothing to
+// label, and a removal for a Project unknown here has nothing to remove.
 func applyLabelChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	fields, err := splitChangeKey(change.Key, 2)
 	if err != nil {
 		return false, err
 	}
 	issueID, label := fields[0], fields[1]
-	p, err := ensureProjectTx(tx, change.Project, issueID)
-	if err != nil {
+	p, found, err := findProjectByIssueIDTx(tx, issueID)
+	if err != nil || !found {
+		return false, err
+	}
+	outranked, err := setRowOutranked(tx, ledger.KindLabel, p.ID, change.Key,
+		`SELECT updated FROM issue_labels WHERE project_id = ? AND issue_id = ? AND label = ?`, []any{p.ID, issueID, label}, change.Updated)
+	if err != nil || outranked {
 		return false, err
 	}
 	if change.Deleted {
+		if err := tombstoneSetRowTx(tx, ledger.KindLabel, p.ID, change.Key, change.Updated); err != nil {
+			return false, err
+		}
 		return execChanged(tx, `DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ? AND label = ?`, p.ID, issueID, label)
 	}
 	if exists, err := issueExistsTx(tx, p.ID, issueID); err != nil || !exists {
 		return false, err
 	}
-	return execChanged(tx, `INSERT OR IGNORE INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, issueID, label)
+	return execChanged(tx, `
+INSERT INTO issue_labels(project_id, issue_id, label, updated) VALUES (?, ?, ?, ?)
+ON CONFLICT(project_id, issue_id, label) DO UPDATE SET updated = excluded.updated`, p.ID, issueID, label, change.Updated)
 }
 
-// applyLinkChangeTx inserts or deletes one Link row; both ends must exist here.
+// applyLinkChangeTx is applyLabelChangeTx for Link rows; both ends must exist.
 func applyLinkChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	fields, err := splitChangeKey(change.Key, 3)
 	if err != nil {
 		return false, err
 	}
 	sourceID, targetID, kind := fields[0], fields[1], fields[2]
-	p, err := ensureProjectTx(tx, change.Project, sourceID)
-	if err != nil {
+	p, found, err := findProjectByIssueIDTx(tx, sourceID)
+	if err != nil || !found {
+		return false, err
+	}
+	outranked, err := setRowOutranked(tx, ledger.KindLink, p.ID, change.Key,
+		`SELECT updated FROM issue_links WHERE project_id = ? AND source_id = ? AND target_id = ? AND kind = ?`, []any{p.ID, sourceID, targetID, kind}, change.Updated)
+	if err != nil || outranked {
 		return false, err
 	}
 	if change.Deleted {
+		if err := tombstoneSetRowTx(tx, ledger.KindLink, p.ID, change.Key, change.Updated); err != nil {
+			return false, err
+		}
 		return execChanged(tx, `DELETE FROM issue_links WHERE project_id = ? AND source_id = ? AND target_id = ? AND kind = ?`, p.ID, sourceID, targetID, kind)
 	}
 	for _, id := range []string{sourceID, targetID} {
@@ -573,7 +628,9 @@ func applyLinkChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 			return false, err
 		}
 	}
-	return execChanged(tx, `INSERT OR IGNORE INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, ?, ?, ?)`, p.ID, sourceID, targetID, kind)
+	return execChanged(tx, `
+INSERT INTO issue_links(project_id, source_id, target_id, kind, updated) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(project_id, source_id, target_id, kind) DO UPDATE SET updated = excluded.updated`, p.ID, sourceID, targetID, kind, change.Updated)
 }
 
 func execChanged(tx *sql.Tx, query string, args ...any) (bool, error) {

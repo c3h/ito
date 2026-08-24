@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+
+	"github.com/c3h/ito/internal/ledger"
 	"sort"
 	"strconv"
 	"strings"
@@ -556,6 +558,7 @@ var migrations = []struct {
 	{version: 3, apply: migrateV3},
 	{version: 4, apply: migrateV4},
 	{version: 5, apply: migrateV5},
+	{version: 6, apply: migrateV6},
 }
 
 func Migrate(db *sql.DB) error {
@@ -732,6 +735,33 @@ CREATE TABLE IF NOT EXISTS sync_state (
   value TEXT NOT NULL
 );
 `)
+	return err
+}
+
+// migrateV6 stamps Label and Link rows with their own updated and records
+// their removals, so each set-like row converges by last-writer-wins on its
+// own (ITO-52). Legacy rows get the empty stamp: any pulled Change beats them.
+func migrateV6(tx *sql.Tx) error {
+	for _, table := range []string{"issue_labels", "issue_links"} {
+		has, err := columnExists(tx, table, "updated")
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := tx.Exec(`ALTER TABLE ` + table + ` ADD COLUMN updated TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS set_tombstones (
+  kind       TEXT NOT NULL,
+  project_id INTEGER NOT NULL,
+  key        TEXT NOT NULL,
+  updated    TEXT NOT NULL,
+  PRIMARY KEY (kind, project_id, key)
+);`)
 	return err
 }
 
@@ -1719,7 +1749,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		return Issue{}, err
 	}
 	for _, label := range created.Labels {
-		if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, created.ID, label); err != nil {
+		if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label, updated) VALUES (?, ?, ?, ?)`, p.ID, created.ID, label, now); err != nil {
 			return Issue{}, err
 		}
 	}
@@ -1999,13 +2029,32 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTri
 				return Issue{}, false, err
 			}
 		}
+		if err := logIssueChangesTx(tx, p, []string{id}); err != nil {
+			return Issue{}, false, err
+		}
+		// Every row of a rewritten set is re-stamped and re-logged, removals as
+		// tombstones: an edit that merely re-affirms a row still outranks an
+		// older removal made elsewhere.
 		if labelsChanged {
 			if _, err := tx.Exec(`DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ?`, p.ID, id); err != nil {
 				return Issue{}, false, err
 			}
 			for label := range nextLabels {
-				if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label) VALUES (?, ?, ?)`, p.ID, id, label); err != nil {
+				if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label, updated) VALUES (?, ?, ?, ?)`, p.ID, id, label, now); err != nil {
 					return Issue{}, false, err
+				}
+				if err := logLabelChangeTx(tx, p, id, label, false, now); err != nil {
+					return Issue{}, false, err
+				}
+			}
+			for _, label := range currentLabels {
+				if _, kept := nextLabels[label]; !kept {
+					if err := tombstoneSetRowTx(tx, ledger.KindLabel, p.ID, labelChangeKey(id, label), now); err != nil {
+						return Issue{}, false, err
+					}
+					if err := logLabelChangeTx(tx, p, id, label, true, now); err != nil {
+						return Issue{}, false, err
+					}
 				}
 			}
 		}
@@ -2015,40 +2064,18 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTri
 			}
 			for linkKey := range nextLinks {
 				sourceID, targetID, kind := parseIssueLinkKey(linkKey)
-				if _, err := tx.Exec(`INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, ?, ?, ?)`, p.ID, sourceID, targetID, kind); err != nil {
+				if _, err := tx.Exec(`INSERT INTO issue_links(project_id, source_id, target_id, kind, updated) VALUES (?, ?, ?, ?, ?)`, p.ID, sourceID, targetID, kind, now); err != nil {
 					return Issue{}, false, err
 				}
-			}
-		}
-		if err := logIssueChangesTx(tx, p, []string{id}); err != nil {
-			return Issue{}, false, err
-		}
-		if labelsChanged {
-			for label := range nextLabels {
-				if !slices.Contains(currentLabels, label) {
-					if err := logLabelChangeTx(tx, p, id, label, false, now); err != nil {
-						return Issue{}, false, err
-					}
-				}
-			}
-			for _, label := range currentLabels {
-				if _, kept := nextLabels[label]; !kept {
-					if err := logLabelChangeTx(tx, p, id, label, true, now); err != nil {
-						return Issue{}, false, err
-					}
-				}
-			}
-		}
-		if linksChanged {
-			for linkKey := range nextLinks {
-				if _, had := currentLinks[linkKey]; !had {
-					if err := logLinkChangeTx(tx, p, linkKey, false, now); err != nil {
-						return Issue{}, false, err
-					}
+				if err := logLinkChangeTx(tx, p, linkKey, false, now); err != nil {
+					return Issue{}, false, err
 				}
 			}
 			for linkKey := range currentLinks {
 				if _, kept := nextLinks[linkKey]; !kept {
+					if err := tombstoneSetRowTx(tx, ledger.KindLink, p.ID, linkChangeKey(linkKey), now); err != nil {
+						return Issue{}, false, err
+					}
 					if err := logLinkChangeTx(tx, p, linkKey, true, now); err != nil {
 						return Issue{}, false, err
 					}
