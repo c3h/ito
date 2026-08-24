@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	itoconfig "github.com/c3h/ito/internal/config"
+	"github.com/c3h/ito/internal/ledger"
 	itostore "github.com/c3h/ito/internal/store"
 	"github.com/c3h/ito/internal/tui"
 	"github.com/mattn/go-isatty"
@@ -41,6 +42,11 @@ var (
 	validLabels     = valueSet(itostore.Labels)
 	isTerminal      = isatty.IsTerminal
 	runTUI          = tui.Run
+	// openLedger dials the configured Ledger; tests replace it with an
+	// in-memory one. The Turso transport arrives with the connection command.
+	openLedger = func(cfg itoconfig.Ledger) (ledger.Ledger, error) {
+		return nil, errors.New("the Ledger transport is not available in this build")
+	}
 )
 
 // The prose enumerations for hints and help derive from the same slices, so a
@@ -428,6 +434,8 @@ func runCLI(args []string) int {
 		return runRm(args[1:])
 	case "prune":
 		return runPrune(args[1:])
+	case "sync":
+		return runSync(args[1:])
 	default:
 		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0]+".", "Run 'ito --help' to see available commands.")
 	}
@@ -466,6 +474,52 @@ func runConfig(args []string) int {
 		return printJSON(display, "config")
 	}
 	fmt.Printf("Local DB: %s\n", display.LocalDBPath)
+	return 0
+}
+
+func runSync(args []string) int {
+	if wantsHelp(args, nil) {
+		printCommandHelp("sync")
+		return 0
+	}
+	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	fs.BoolVar(&jsonMode, "json", false, "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, nil)
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, nil), exitBadUsage, err.Error(), "run 'ito sync --help' to see the accepted flags.")
+	}
+	if len(positionals) != 0 {
+		return fail(jsonMode, exitBadUsage, "ito sync takes no positional arguments.", "use only --json.")
+	}
+
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the config: %v", err), "")
+	}
+	if cfg.Ledger == nil {
+		return fail(jsonMode, exitGeneric, "no Ledger is connected, so there is nothing to sync with.", "connect one with 'ito ledger connect --url <url> --token <token>'.")
+	}
+	l, err := openLedger(*cfg.Ledger)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reach the Ledger at %s: %v", cfg.Ledger.URL, err), "check the network and the URL in 'ito config'.")
+	}
+
+	db, st, openFail := openStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+
+	result, err := st.Sync(l)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("sync stopped after pushing %d and pulling %d Changes: %v", result.Pushed, result.Pulled, err), "run 'ito sync' again to resume.")
+	}
+	if jsonMode {
+		return printJSON(result, "sync result")
+	}
+	fmt.Printf("Pushed %d, pulled %d.\n", result.Pushed, result.Pulled)
 	return 0
 }
 
@@ -1679,6 +1733,7 @@ Commands:
   rm       Deletes an Issue.
   prune    Deletes Issues in bulk with an explicit filter.
   rename   Renames the current Project.
+  sync     Exchanges Changes with the connected Ledger.
 
 Every command takes --json and never prompts; failures exit non-zero (2 usage, 3 not found, 4 no Project here) with an actionable sentence on stderr. Bare "ito" in a TTY opens the TUI; "ito --version" prints the build.
 
@@ -1694,6 +1749,13 @@ Shows the local database path.
 
 Flags:
   --json               Prints JSON.`)
+	case "sync":
+		fmt.Println(`usage: ito sync [--json]
+
+Pushes this Device's pending Changes to the connected Ledger, then pulls and applies the ones it has not seen. Rows changed on two Devices converge to the later "updated". Prints how many Changes went each way; fails when no Ledger is connected.
+
+Flags:
+  --json               Prints {"pushed": n, "pulled": n}.`)
 	case "init":
 		fmt.Println(`usage: ito init [--name <name>] [--prefix <PREFIX>] [--reattach <name>] [--json]
 

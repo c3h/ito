@@ -287,6 +287,9 @@ type Store struct {
 	db *sql.DB
 }
 
+// clock stamps every mutation; tests replace it to control updated.
+var clock = time.Now
+
 // maxIdleConns keeps enough pooled connections warm for the widest concurrent
 // read the surfaces issue, so a burst does not churn connections.
 const maxIdleConns = 16
@@ -552,6 +555,7 @@ var migrations = []struct {
 	{version: 2, apply: migrateV2},
 	{version: 3, apply: migrateV3},
 	{version: 4, apply: migrateV4},
+	{version: 5, apply: migrateV5},
 }
 
 func Migrate(db *sql.DB) error {
@@ -703,6 +707,31 @@ func migrateV3(tx *sql.Tx) error {
 
 func migrateV4(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE issues ADD COLUMN branch TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrateV5 adds the local change log and the per-Device sync state
+// (decision 0005). Existing rows are not backfilled: the Ledger starts from a
+// snapshot written when a Device connects.
+func migrateV5(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS changes (
+  seq     INTEGER PRIMARY KEY,
+  kind    TEXT NOT NULL,
+  project TEXT NOT NULL,
+  key     TEXT NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  updated TEXT NOT NULL,
+  state   TEXT,
+  pushed  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS changes_pending ON changes(pushed, seq);
+
+CREATE TABLE IF NOT EXISTS sync_state (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`)
 	return err
 }
 
@@ -1018,7 +1047,7 @@ func insertBatch(db *sql.DB, p Project, name string) (Batch, error) {
 	} else if exists {
 		return Batch{}, ErrBatchExists
 	}
-	created := time.Now().UTC().Format(time.RFC3339)
+	created := clock().UTC().Format(time.RFC3339)
 	if _, err := tx.Exec(`INSERT INTO batches(project_id, name, created) VALUES (?, ?, ?)`, p.ID, name, created); err != nil {
 		return Batch{}, err
 	}
@@ -1130,13 +1159,20 @@ func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) 
 	if !found {
 		return DeleteBatchResult{}, ErrBatchNotFound
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	members, err := stringColumn(tx, `SELECT id FROM issues WHERE project_id = ? AND batch_id = ? ORDER BY row_id`, p.ID, id)
+	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	now := clock().UTC().Format(time.RFC3339)
 	result, err := tx.Exec(`UPDATE issues SET batch_id = NULL, updated = ? WHERE project_id = ? AND batch_id = ?`, now, p.ID, id)
 	if err != nil {
 		return DeleteBatchResult{}, err
 	}
 	membersCleared, err := result.RowsAffected()
 	if err != nil {
+		return DeleteBatchResult{}, err
+	}
+	if err := logIssueChangesTx(tx, p, members); err != nil {
 		return DeleteBatchResult{}, err
 	}
 	result, err = tx.Exec(`DELETE FROM batches WHERE project_id = ? AND id = ?`, p.ID, id)
@@ -1623,7 +1659,7 @@ func insertIssue(db *sql.DB, p Project, title, status, priority, category, triag
 	if err := tx.QueryRow(`SELECT last_id FROM projects WHERE id = ?`, p.ID).Scan(&nextID); err != nil {
 		return Issue{}, err
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := clock().UTC().Format(time.RFC3339)
 	created := Issue{
 		ID:            fmt.Sprintf("%s-%d", p.Prefix, nextID),
 		Project:       p.Name,
@@ -1661,6 +1697,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			return Issue{}, err
 		}
 	}
+	if err := logIssueChangesTx(tx, p, []string{created.ID}); err != nil {
+		return Issue{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Issue{}, err
 	}
@@ -1683,7 +1722,7 @@ func moveIssueStatus(db *sql.DB, p Project, id string, targetStatus string) (Iss
 	}
 	changed := currentStatus != targetStatus
 	if changed {
-		now := time.Now().UTC().Format(time.RFC3339)
+		now := clock().UTC().Format(time.RFC3339)
 		result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND id = ?`, targetStatus, now, p.ID, id)
 		if err != nil {
 			return Issue{}, "", false, err
@@ -1694,6 +1733,9 @@ func moveIssueStatus(db *sql.DB, p Project, id string, targetStatus string) (Iss
 		}
 		if affected != 1 {
 			return Issue{}, "", false, sql.ErrNoRows
+		}
+		if err := logIssueChangesTx(tx, p, []string{id}); err != nil {
+			return Issue{}, "", false, err
 		}
 	}
 	moved, found, err := findIssueByID(tx, p, id)
@@ -1758,7 +1800,7 @@ ORDER BY row_id ASC`, p.ID, batchID)
 	// the WHERE re-selects the same rows inside this transaction's snapshot, so
 	// RowsAffected must match. The skipped members already hold targetStatus and
 	// keep their updated stamp.
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := clock().UTC().Format(time.RFC3339)
 	result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND batch_id = ? AND status != ?`,
 		targetStatus, now, p.ID, batchID, targetStatus)
 	if err != nil {
@@ -1770,6 +1812,9 @@ ORDER BY row_id ASC`, p.ID, batchID)
 	}
 	if int(affected) != len(changed) {
 		return BatchMoveResult{}, sql.ErrNoRows
+	}
+	if err := logIssueChangesTx(tx, p, changed); err != nil {
+		return BatchMoveResult{}, err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1900,7 +1945,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 	changed := scalarChanged || batchChanged || labelsChanged || linksChanged
 
 	if changed {
-		now := time.Now().UTC().Format(time.RFC3339)
+		now := clock().UTC().Format(time.RFC3339)
 		result, err := tx.Exec(`
 UPDATE issues
 SET title = ?, priority = ?, category = ?, triage_state = ?, branch = ?, body = ?, batch_id = ?, updated = ?
@@ -1943,6 +1988,9 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTri
 					return Issue{}, false, err
 				}
 			}
+		}
+		if err := logIssueChangesTx(tx, p, []string{id}); err != nil {
+			return Issue{}, false, err
 		}
 	}
 
@@ -2042,6 +2090,13 @@ func deleteIssueRowsTx(tx *sql.Tx, p Project, matches []issueDeletionRow) (int, 
 		if affected != 1 {
 			return 0, sql.ErrNoRows
 		}
+	}
+	ids := make([]string, 0, len(matches))
+	for _, match := range matches {
+		ids = append(ids, match.id)
+	}
+	if err := logIssueTombstonesTx(tx, p, ids, clock().UTC().Format(time.RFC3339)); err != nil {
+		return 0, err
 	}
 	return len(matches), nil
 }

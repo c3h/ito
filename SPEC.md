@@ -17,7 +17,7 @@ The AI already makes it trivial to have an idea and plan it — what's missing i
 
 ### Non-goals (explicit)
 - It is **not** an AI agent orchestrator (≠ [contrabass](https://github.com/junhoyeo/contrabass), which runs multiple agents to execute work).
-- It is **not** multi-user / team / cloud sync (for now).
+- It is **not** multi-user / team (for now). One person's machines share a tracker by syncing Changes through a Ledger (decision 0005); nothing is real-time.
 - It does **not** embed an LLM or an API key.
 - It does **not** keep long-term history — issues are ephemeral.
 

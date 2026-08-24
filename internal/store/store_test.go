@@ -41,7 +41,7 @@ func TestOpenDefaultOpensLocalFileWithWALAndBusyTimeout(t *testing.T) {
 	if busyTimeout != 5000 {
 		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
 	}
-	assertSchemaVersion(t, db, 4)
+	assertSchemaVersion(t, db, 5)
 }
 
 func TestOpenDefaultRejectsRetiredCloudConfig(t *testing.T) {
@@ -70,7 +70,7 @@ func TestMigrateFreshDatabaseReachesBatchSchemaVersion(t *testing.T) {
 	}
 	defer db.Close()
 
-	assertSchemaVersion(t, db, 4)
+	assertSchemaVersion(t, db, 5)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
@@ -145,7 +145,7 @@ VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '
 		t.Fatalf("migrate v1 database: %v", err)
 	}
 
-	assertSchemaVersion(t, db, 4)
+	assertSchemaVersion(t, db, 5)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
@@ -195,7 +195,7 @@ VALUES (1, 'VTH-1', 'Existing issue', 'todo', 'medium', '', '2026-08-09T10:00:00
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate v3 database: %v", err)
 	}
-	assertSchemaVersion(t, db, 4)
+	assertSchemaVersion(t, db, 5)
 	assertColumnExists(t, db, "issues", "branch")
 	var branch string
 	if err := db.QueryRow(`SELECT branch FROM issues WHERE id = 'VTH-1'`).Scan(&branch); err != nil {
