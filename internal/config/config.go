@@ -23,7 +23,7 @@ type Config struct {
 
 // ErrRetiredCloudBackend marks a config that still selects the per-statement
 // cloud backend retired by decision 0005.
-var ErrRetiredCloudBackend = errors.New("the cloud backend is no longer supported: the store is always local and machines sync through a Ledger; remove the backend and cloud fields, then connect with 'ito ledger connect' once it ships")
+var ErrRetiredCloudBackend = errors.New("the cloud backend is no longer supported: the store is always local and machines sync through a Ledger; remove the backend and cloud fields, then connect with 'ito ledger connect'")
 
 // configFile is the on-disk shape, including the backend field that predates
 // decision 0005.
