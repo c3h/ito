@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 
@@ -27,11 +28,24 @@ const appendChunkSize = 500
 // work and nothing here opens a transaction.
 type SQL struct {
 	db DB
+	// owned is the handle this SQL dialled itself and may close; a handle
+	// handed to NewSQL belongs to the caller and is left alone.
+	owned io.Closer
 }
 
-// NewSQL wraps an open handle; call EnsureSchema once before using it.
+// NewSQL wraps an open handle; call EnsureSchema once before using it. The
+// handle stays the caller's to close.
 func NewSQL(db DB) *SQL {
 	return &SQL{db: db}
+}
+
+// Close releases the connection pool a dialled Ledger owns; on one this
+// process did not dial it does nothing.
+func (s *SQL) Close() error {
+	if s.owned == nil {
+		return nil
+	}
+	return s.owned.Close()
 }
 
 // OpenTurso dials a Turso Ledger with the token as credential. Nothing is sent
@@ -42,7 +56,7 @@ func OpenTurso(address, token string) (*SQL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open the Ledger at %s", address)
 	}
-	return NewSQL(db), nil
+	return &SQL{db: db, owned: db}, nil
 }
 
 // EnsureSchema creates the Ledger's tables when they do not exist yet; it

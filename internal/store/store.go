@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-
-	"github.com/c3h/ito/internal/ledger"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +15,7 @@ import (
 	"unicode"
 
 	itoconfig "github.com/c3h/ito/internal/config"
+	"github.com/c3h/ito/internal/ledger"
 	_ "github.com/tursodatabase/libsql-client-go/libsql" // Ledger transport (decision 0005)
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
@@ -321,6 +320,10 @@ func (s *Store) SetIssueNumberer(n IssueNumberer) {
 // clock stamps every mutation; tests replace it to control updated.
 var clock = time.Now
 
+// nowStamp renders the current instant the one way every stamp is written:
+// RFC3339 in UTC, the format the last-writer-wins comparison depends on.
+func nowStamp() string { return clock().UTC().Format(time.RFC3339) }
+
 // maxIdleConns keeps enough pooled connections warm for the widest concurrent
 // read the surfaces issue, so a burst does not churn connections.
 const maxIdleConns = 16
@@ -566,16 +569,18 @@ func (s *Store) ResolveProject(rootPath string, inGit bool, explicitName string)
 }
 
 // The config is loaded first so a retired cloud config fails before any file
-// is created.
-func OpenDefault() (*sql.DB, error) {
-	if _, err := itoconfig.Load(); err != nil {
-		return nil, err
+// is created; it is returned so the caller need not read it again.
+func OpenDefault() (*sql.DB, itoconfig.Config, error) {
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return nil, itoconfig.Config{}, err
 	}
 	home, err := itoconfig.HomeDir()
 	if err != nil {
-		return nil, err
+		return nil, itoconfig.Config{}, err
 	}
-	return Open(home)
+	db, err := Open(home)
+	return db, cfg, err
 }
 
 var migrations = []struct {
@@ -928,11 +933,11 @@ func findProjectByRoot(db *sql.DB, rootPath string) (Project, bool, error) {
 	return findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE root_path = ?`, rootPath)
 }
 
-func findProjectByName(db *sql.DB, name string) (Project, bool, error) {
+func findProjectByName(db rowQuerier, name string) (Project, bool, error) {
 	return findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
 }
 
-func findProjectByPrefix(db *sql.DB, prefix string) (Project, bool, error) {
+func findProjectByPrefix(db rowQuerier, prefix string) (Project, bool, error) {
 	return findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, prefix)
 }
 
@@ -1112,7 +1117,7 @@ func insertBatch(db *sql.DB, p Project, name string) (Batch, error) {
 	} else if exists {
 		return Batch{}, ErrBatchExists
 	}
-	created := clock().UTC().Format(time.RFC3339)
+	created := nowStamp()
 	if _, err := tx.Exec(`INSERT INTO batches(project_id, name, created) VALUES (?, ?, ?)`, p.ID, name, created); err != nil {
 		return Batch{}, err
 	}
@@ -1234,7 +1239,7 @@ func deleteBatch(db *sql.DB, p Project, name string) (DeleteBatchResult, error) 
 	if err != nil {
 		return DeleteBatchResult{}, err
 	}
-	now := clock().UTC().Format(time.RFC3339)
+	now := nowStamp()
 	result, err := tx.Exec(`UPDATE issues SET batch_id = NULL, updated = ? WHERE project_id = ? AND batch_id = ?`, now, p.ID, id)
 	if err != nil {
 		return DeleteBatchResult{}, err
@@ -1747,32 +1752,19 @@ func insertIssue(db *sql.DB, numberer IssueNumberer, p Project, title, status, p
 	}
 	defer tx.Rollback()
 
-	// A reserved number only lifts the advisory counter; a local one advances it.
-	counter := `UPDATE projects SET last_id = last_id + 1 WHERE id = ?`
-	args := []any{p.ID}
-	if reserved > 0 {
-		counter = `UPDATE projects SET last_id = max(last_id, ?) WHERE id = ?`
-		args = []any{reserved, p.ID}
-	}
-	result, err := tx.Exec(counter, args...)
-	if err != nil {
-		return Issue{}, err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return Issue{}, err
-	}
-	if affected != 1 {
-		return Issue{}, sql.ErrNoRows
-	}
-
+	// A reserved number only lifts the advisory counter; a local one advances
+	// it and is the number.
 	nextID := reserved
-	if nextID == 0 {
-		if err := tx.QueryRow(`SELECT last_id FROM projects WHERE id = ?`, p.ID).Scan(&nextID); err != nil {
-			return Issue{}, err
-		}
+	counter := `UPDATE projects SET last_id = max(last_id, ?) WHERE id = ? RETURNING last_id`
+	args := []any{reserved, p.ID}
+	if numberer == nil {
+		counter = `UPDATE projects SET last_id = last_id + 1 WHERE id = ? RETURNING last_id`
+		args = []any{p.ID}
 	}
-	now := clock().UTC().Format(time.RFC3339)
+	if err := tx.QueryRow(counter, args...).Scan(&nextID); err != nil {
+		return Issue{}, err
+	}
+	now := nowStamp()
 	created := Issue{
 		ID:            fmt.Sprintf("%s-%d", p.Prefix, nextID),
 		Project:       p.Name,
@@ -1791,7 +1783,7 @@ func insertIssue(db *sql.DB, numberer IssueNumberer, p Project, title, status, p
 		Updated:       now,
 	}
 
-	result, err = tx.Exec(`
+	result, err := tx.Exec(`
 INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, branch, body, created, updated, batch_id)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, created.ID, created.Title, created.Status, created.Priority, created.Category, created.TriageState, created.Branch, created.Body, created.Created, created.Updated, batchID)
@@ -1802,18 +1794,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if err != nil {
 		return Issue{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, created.Title, created.Body); err != nil {
+	if err := insertIssueFTSTx(tx, rowID, created.Title, created.Body); err != nil {
+		return Issue{}, err
+	}
+	if err := logIssueChangesTx(tx, p, []string{created.ID}); err != nil {
 		return Issue{}, err
 	}
 	for _, label := range created.Labels {
 		if _, err := tx.Exec(`INSERT INTO issue_labels(project_id, issue_id, label, updated) VALUES (?, ?, ?, ?)`, p.ID, created.ID, label, now); err != nil {
 			return Issue{}, err
 		}
-	}
-	if err := logIssueChangesTx(tx, p, []string{created.ID}); err != nil {
-		return Issue{}, err
-	}
-	for _, label := range created.Labels {
 		if err := logLabelChangeTx(tx, p, created.ID, label, false, now); err != nil {
 			return Issue{}, err
 		}
@@ -1840,7 +1830,7 @@ func moveIssueStatus(db *sql.DB, p Project, id string, targetStatus string) (Iss
 	}
 	changed := currentStatus != targetStatus
 	if changed {
-		now := clock().UTC().Format(time.RFC3339)
+		now := nowStamp()
 		result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND id = ?`, targetStatus, now, p.ID, id)
 		if err != nil {
 			return Issue{}, "", false, err
@@ -1918,7 +1908,7 @@ ORDER BY row_id ASC`, p.ID, batchID)
 	// the WHERE re-selects the same rows inside this transaction's snapshot, so
 	// RowsAffected must match. The skipped members already hold targetStatus and
 	// keep their updated stamp.
-	now := clock().UTC().Format(time.RFC3339)
+	now := nowStamp()
 	result, err := tx.Exec(`UPDATE issues SET status = ?, updated = ? WHERE project_id = ? AND batch_id = ? AND status != ?`,
 		targetStatus, now, p.ID, batchID, targetStatus)
 	if err != nil {
@@ -2063,7 +2053,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&rowID, &currentTitle, &current
 	changed := scalarChanged || batchChanged || labelsChanged || linksChanged
 
 	if changed {
-		now := clock().UTC().Format(time.RFC3339)
+		now := nowStamp()
 		result, err := tx.Exec(`
 UPDATE issues
 SET title = ?, priority = ?, category = ?, triage_state = ?, branch = ?, body = ?, batch_id = ?, updated = ?
@@ -2078,13 +2068,8 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTri
 		if affected != 1 {
 			return Issue{}, false, sql.ErrNoRows
 		}
-		if nextTitle != currentTitle || nextBody != currentBody {
-			if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, currentTitle, currentBody); err != nil {
-				return Issue{}, false, err
-			}
-			if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, nextTitle, nextBody); err != nil {
-				return Issue{}, false, err
-			}
+		if err := reindexIssueFTSTx(tx, rowID, currentTitle, currentBody, nextTitle, nextBody); err != nil {
+			return Issue{}, false, err
 		}
 		if err := logIssueChangesTx(tx, p, []string{id}); err != nil {
 			return Issue{}, false, err
@@ -2130,7 +2115,7 @@ WHERE project_id = ? AND id = ?`, nextTitle, nextPriority, nextCategory, nextTri
 			}
 			for linkKey := range currentLinks {
 				if _, kept := nextLinks[linkKey]; !kept {
-					if err := tombstoneSetRowTx(tx, ledger.KindLink, p.ID, linkChangeKey(linkKey), now); err != nil {
+					if err := tombstoneSetRowTx(tx, ledger.KindLink, p.ID, linkKey, now); err != nil {
 						return Issue{}, false, err
 					}
 					if err := logLinkChangeTx(tx, p, linkKey, true, now); err != nil {
@@ -2171,7 +2156,7 @@ WHERE project_id = ? AND id = ?`, p.ID, id).Scan(&row.rowID, &row.id, &row.title
 	if _, err := deleteIssueRowsTx(tx, p, []issueDeletionRow{row}); err != nil {
 		return err
 	}
-	if err := logIssueTombstonesTx(tx, p, []issueDeletionRow{row}); err != nil {
+	if err := logIssueTombstonesTx(tx, p, []string{row.id}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -2212,7 +2197,7 @@ ORDER BY row_id`, p.ID, status)
 	if err != nil {
 		return 0, err
 	}
-	if err := logIssueTombstonesTx(tx, p, matches); err != nil {
+	if err := logIssueTombstonesTx(tx, p, issueDeletionIDs(matches)); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2221,9 +2206,41 @@ ORDER BY row_id`, p.ID, status)
 	return deleted, nil
 }
 
+// dropIssueFTSTx removes an Issue's row from the external-content FTS index;
+// the index has no triggers, so every write path maintains it explicitly.
+func dropIssueFTSTx(tx *sql.Tx, rowID int64, title, body string) error {
+	_, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, title, body)
+	return err
+}
+
+func insertIssueFTSTx(tx *sql.Tx, rowID int64, title, body string) error {
+	_, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, title, body)
+	return err
+}
+
+// reindexIssueFTSTx re-points the index at the new text, skipping the work
+// when neither indexed column moved.
+func reindexIssueFTSTx(tx *sql.Tx, rowID int64, oldTitle, oldBody, newTitle, newBody string) error {
+	if newTitle == oldTitle && newBody == oldBody {
+		return nil
+	}
+	if err := dropIssueFTSTx(tx, rowID, oldTitle, oldBody); err != nil {
+		return err
+	}
+	return insertIssueFTSTx(tx, rowID, newTitle, newBody)
+}
+
+func issueDeletionIDs(matches []issueDeletionRow) []string {
+	ids := make([]string, len(matches))
+	for i, match := range matches {
+		ids[i] = match.id
+	}
+	return ids
+}
+
 func deleteIssueRowsTx(tx *sql.Tx, p Project, matches []issueDeletionRow) (int, error) {
 	for _, match := range matches {
-		if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, match.rowID, match.title, match.body); err != nil {
+		if err := dropIssueFTSTx(tx, match.rowID, match.title, match.body); err != nil {
 			return 0, err
 		}
 		if _, err := tx.Exec(`DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ?`, p.ID, match.id); err != nil {
@@ -2764,12 +2781,14 @@ func issueIDLess(left, right string) bool {
 	return leftNumber < rightNumber
 }
 
+// A Link's key is the same string in the store and in its Change: Issue IDs
+// and Link kinds are drawn from patterns that never contain the separator.
 func issueLinkKey(sourceID, targetID, kind string) string {
-	return sourceID + "\x00" + targetID + "\x00" + kind
+	return sourceID + "|" + targetID + "|" + kind
 }
 
 func parseIssueLinkKey(key string) (string, string, string) {
-	parts := strings.SplitN(key, "\x00", 3)
+	parts := strings.SplitN(key, "|", 3)
 	return parts[0], parts[1], parts[2]
 }
 
@@ -2797,7 +2816,7 @@ func stringSetMatches(left, right map[string]struct{}) bool {
 	return true
 }
 
-func projectNameExistsForAnotherID(db *sql.DB, name string, id int64) (bool, error) {
+func projectNameExistsForAnotherID(db rowQuerier, name string, id int64) (bool, error) {
 	return valueExists(db, `SELECT 1 FROM projects WHERE name = ? AND id != ?`, name, id)
 }
 

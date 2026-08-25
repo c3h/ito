@@ -18,7 +18,7 @@ func TestOpenDefaultOpensLocalFileWithWALAndBusyTimeout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ITO_HOME", home)
 
-	db, err := OpenDefault()
+	db, _, err := OpenDefault()
 	if err != nil {
 		t.Fatalf("open default store: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestOpenDefaultRejectsRetiredCloudConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := OpenDefault(); err == nil || !strings.Contains(err.Error(), "ito ledger connect") {
+	if _, _, err := OpenDefault(); err == nil || !strings.Contains(err.Error(), "ito ledger connect") {
 		t.Fatalf("expected retired cloud config error, got %v", err)
 	}
 	if _, err := os.Stat(itoconfig.LocalDBPath(home)); !os.IsNotExist(err) {

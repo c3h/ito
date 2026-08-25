@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/c3h/ito/internal/ledger"
 )
@@ -17,6 +17,10 @@ import (
 // transaction, so a connection dropping between pages or entries leaves the
 // store at a consistent position to resume from.
 const pullPageSize = 500
+
+// markPageSize bounds one "mark as pushed" statement, so a snapshot-sized
+// push stays under SQLite's bind-parameter limit.
+const markPageSize = 500
 
 type SyncResult struct {
 	Pushed int `json:"pushed"`
@@ -69,12 +73,12 @@ VALUES (?, ?, ?, ?, ?, ?)`, kind, project, key, deleted, updated, encoded)
 }
 
 func logProjectChangeTx(tx *sql.Tx, name, prefix string) error {
-	return appendChangeTx(tx, ledger.KindProject, name, name, false, clock().UTC().Format(time.RFC3339), projectState{Prefix: prefix})
+	return appendChangeTx(tx, ledger.KindProject, name, name, false, nowStamp(), projectState{Prefix: prefix})
 }
 
 func logBatchChangeTx(tx *sql.Tx, p Project, name string, state batchState) error {
 	state.Prefix = p.Prefix
-	return appendChangeTx(tx, ledger.KindBatch, p.Name, name, false, clock().UTC().Format(time.RFC3339), state)
+	return appendChangeTx(tx, ledger.KindBatch, p.Name, name, false, nowStamp(), state)
 }
 
 func logBatchTombstoneTx(tx *sql.Tx, p Project, name, deletedAt string) error {
@@ -87,17 +91,11 @@ func logLabelChangeTx(tx *sql.Tx, p Project, issueID, label string, deleted bool
 }
 
 func logLinkChangeTx(tx *sql.Tx, p Project, linkKey string, deleted bool, updated string) error {
-	return appendChangeTx(tx, ledger.KindLink, p.Name, linkChangeKey(linkKey), deleted, updated, nil)
+	return appendChangeTx(tx, ledger.KindLink, p.Name, linkKey, deleted, updated, nil)
 }
 
 func labelChangeKey(issueID, label string) string {
 	return issueID + "|" + label
-}
-
-// linkChangeKey renders the in-process link key (NUL-separated) as it travels.
-func linkChangeKey(linkKey string) string {
-	sourceID, targetID, kind := parseIssueLinkKey(linkKey)
-	return sourceID + "|" + targetID + "|" + kind
 }
 
 // tombstoneSetRowTx remembers when a Label or Link row was removed, so an
@@ -109,18 +107,50 @@ ON CONFLICT(kind, project_id, key) DO UPDATE SET updated = max(updated, excluded
 	return err
 }
 
+// setRelation describes one of the set-like relations a Change can carry:
+// the table it lives in and the columns its key splits into, in key order.
+// issueColumns indexes the columns that name an Issue both ends of an insert
+// need; the first also identifies the owning Project.
+type setRelation struct {
+	kind         string
+	table        string
+	columns      []string
+	issueColumns []int
+}
+
+var (
+	labelRelation = setRelation{ledger.KindLabel, "issue_labels", []string{"issue_id", "label"}, []int{0}}
+	linkRelation  = setRelation{ledger.KindLink, "issue_links", []string{"source_id", "target_id", "kind"}, []int{0, 1}}
+)
+
+// rowWhere matches the single row a Change key names, within its Project.
+func (r setRelation) rowWhere() string {
+	clauses := make([]string, 0, len(r.columns)+1)
+	clauses = append(clauses, "project_id = ?")
+	for _, column := range r.columns {
+		clauses = append(clauses, column+" = ?")
+	}
+	return strings.Join(clauses, " AND ")
+}
+
+func (r setRelation) upsert() string {
+	columns := strings.Join(r.columns, ", ")
+	return `INSERT INTO ` + r.table + `(project_id, ` + columns + `, updated) VALUES (` + sqlPlaceholders(len(r.columns)+2) + `)
+ON CONFLICT(project_id, ` + columns + `) DO UPDATE SET updated = excluded.updated`
+}
+
 // setRowOutranked reports whether a local row or tombstone for the key is at
 // least as new as the Change, in which case the Change is stale.
-func setRowOutranked(tx *sql.Tx, kind string, projectID int64, key, rowQuery string, rowArgs []any, updated string) (bool, error) {
+func setRowOutranked(tx *sql.Tx, r setRelation, projectID int64, key string, rowArgs []any, updated string) (bool, error) {
 	var current string
-	err := tx.QueryRow(rowQuery, rowArgs...).Scan(&current)
+	err := tx.QueryRow(`SELECT updated FROM `+r.table+` WHERE `+r.rowWhere(), rowArgs...).Scan(&current)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	if err == nil && current >= updated {
 		return true, nil
 	}
-	err = tx.QueryRow(`SELECT updated FROM set_tombstones WHERE kind = ? AND project_id = ? AND key = ?`, kind, projectID, key).Scan(&current)
+	err = tx.QueryRow(`SELECT updated FROM set_tombstones WHERE kind = ? AND project_id = ? AND key = ?`, r.kind, projectID, key).Scan(&current)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
@@ -162,10 +192,10 @@ WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id).Scan(
 // logIssueTombstonesTx appends a tombstone per deleted Issue, stamped with the
 // deletion time so a deletion outranks any edit that preceded it. Only local
 // deletions log; a pulled deletion is applied without echoing a Change back.
-func logIssueTombstonesTx(tx *sql.Tx, p Project, rows []issueDeletionRow) error {
-	deletedAt := clock().UTC().Format(time.RFC3339)
-	for _, row := range rows {
-		if err := appendChangeTx(tx, ledger.KindIssue, p.Name, row.id, true, deletedAt, nil); err != nil {
+func logIssueTombstonesTx(tx *sql.Tx, p Project, ids []string) error {
+	deletedAt := nowStamp()
+	for _, id := range ids {
+		if err := appendChangeTx(tx, ledger.KindIssue, p.Name, id, true, deletedAt, nil); err != nil {
 			return err
 		}
 	}
@@ -307,12 +337,17 @@ func (s *Store) push(l ledger.Ledger, device string) (int, error) {
 	if _, err := l.Append(pending); err != nil {
 		return 0, err
 	}
-	args := make([]any, 0, len(pending))
-	for _, change := range pending {
-		args = append(args, change.Sequence)
-	}
-	if _, err := s.db.Exec(`UPDATE changes SET pushed = 1 WHERE seq IN (`+sqlPlaceholders(len(pending))+`)`, args...); err != nil {
-		return 0, err
+	// Marked in the same bounded chunks the Ledger is appended in: a whole
+	// snapshot binds one parameter per Change, well past SQLite's limit.
+	for start := 0; start < len(pending); start += markPageSize {
+		chunk := pending[start:min(start+markPageSize, len(pending))]
+		args := make([]any, len(chunk))
+		for i, change := range chunk {
+			args[i] = change.Sequence
+		}
+		if _, err := s.db.Exec(`UPDATE changes SET pushed = 1 WHERE seq IN (`+sqlPlaceholders(len(chunk))+`)`, args...); err != nil {
+			return 0, err
+		}
 	}
 	return len(pending), nil
 }
@@ -349,8 +384,8 @@ func (s *Store) lastPosition() (int64, error) {
 	if err != nil || !found {
 		return 0, err
 	}
-	var position int64
-	if _, err := fmt.Sscan(value, &position); err != nil {
+	position, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
 		return 0, fmt.Errorf("sync position %q is malformed", value)
 	}
 	return position, nil
@@ -375,9 +410,9 @@ func (s *Store) applyEntry(entry ledger.Entry, device string) (bool, error) {
 		case ledger.KindBatch:
 			applied, err = applyBatchChangeTx(tx, entry.Change)
 		case ledger.KindLabel:
-			applied, err = applyLabelChangeTx(tx, entry.Change)
+			applied, err = applySetRowChangeTx(tx, labelRelation, entry.Change)
 		case ledger.KindLink:
-			applied, err = applyLinkChangeTx(tx, entry.Change)
+			applied, err = applySetRowChangeTx(tx, linkRelation, entry.Change)
 		default:
 			// Failing loudly beats skipping: an older build must not drop rows a
 			// newer one pushed.
@@ -443,13 +478,8 @@ SET title = ?, status = ?, priority = ?, category = ?, triage_state = ?, branch 
 WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, batchID, state.Created, state.Updated, rowID); err != nil {
 			return false, err
 		}
-		if state.Title != currentTitle || state.Body != currentBody {
-			if _, err := tx.Exec(`INSERT INTO issues_fts(issues_fts, rowid, title, body) VALUES ('delete', ?, ?, ?)`, rowID, currentTitle, currentBody); err != nil {
-				return false, err
-			}
-			if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, state.Title, state.Body); err != nil {
-				return false, err
-			}
+		if err := reindexIssueFTSTx(tx, rowID, currentTitle, currentBody, state.Title, state.Body); err != nil {
+			return false, err
 		}
 		return true, nil
 	}
@@ -465,7 +495,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(`INSERT INTO issues_fts(rowid, title, body) VALUES (?, ?, ?)`, rowID, state.Title, state.Body); err != nil {
+	if err := insertIssueFTSTx(tx, rowID, state.Title, state.Body); err != nil {
 		return false, err
 	}
 	// Keep the advisory local counter past every number seen, so a Device
@@ -491,14 +521,14 @@ func ensureProjectTx(tx *sql.Tx, name, issueID string) (Project, error) {
 }
 
 func ensureProjectByPrefixTx(tx *sql.Tx, name, prefix string) (Project, error) {
-	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, prefix)
+	p, found, err := findProjectByPrefix(tx, prefix)
 	if err != nil {
 		return Project{}, err
 	}
 	if found {
 		return p, nil
 	}
-	p, found, err = findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE name = ?`, name)
+	p, found, err = findProjectByName(tx, name)
 	if err != nil {
 		return Project{}, err
 	}
@@ -521,8 +551,7 @@ func splitIssueID(id string) (string, int64, error) {
 	if match == nil {
 		return "", 0, fmt.Errorf("issue %q is not a valid ID", id)
 	}
-	var number int64
-	_, err := fmt.Sscan(match[2], &number)
+	number, err := strconv.ParseInt(match[2], 10, 64)
 	return match[1], number, err
 }
 
@@ -536,7 +565,7 @@ func applyProjectChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	if err := json.Unmarshal(change.State, &state); err != nil {
 		return false, fmt.Errorf("decode project state: %w", err)
 	}
-	p, found, err := findProjectWhere(tx, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, state.Prefix)
+	p, found, err := findProjectByPrefix(tx, state.Prefix)
 	if err != nil {
 		return false, err
 	}
@@ -547,7 +576,7 @@ func applyProjectChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	if p.Name == change.Key {
 		return false, nil
 	}
-	if taken, err := valueExists(tx, `SELECT 1 FROM projects WHERE name = ? AND id != ?`, change.Key, p.ID); err != nil {
+	if taken, err := projectNameExistsForAnotherID(tx, change.Key, p.ID); err != nil {
 		return false, err
 	} else if taken {
 		return false, fmt.Errorf("project %q (prefix %s) was renamed to %q on another Device, but that name belongs to another local project; rename one of them before syncing", p.Name, p.Prefix, change.Key)
@@ -609,69 +638,41 @@ func applyBatchChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	return err == nil, err
 }
 
-// applyLabelChangeTx inserts or deletes one Label row by last-writer-wins on
-// the row's own updated, remembering deletions as tombstones. The Issue's own
-// Change precedes it in the Ledger; an Issue since deleted here has nothing to
-// label, and a removal for a Project unknown here has nothing to remove.
-func applyLabelChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
-	fields, err := splitChangeKey(change.Key, 2)
+// applySetRowChangeTx inserts or deletes one Label or Link row by
+// last-writer-wins on the row's own updated, remembering deletions as
+// tombstones. The Issue's own Change precedes it in the Ledger; an Issue
+// since deleted here has nothing to label or link, and a removal for a
+// Project unknown here has nothing to remove.
+func applySetRowChangeTx(tx *sql.Tx, r setRelation, change ledger.Change) (bool, error) {
+	fields, err := splitChangeKey(change.Key, len(r.columns))
 	if err != nil {
 		return false, err
 	}
-	issueID, label := fields[0], fields[1]
-	p, found, err := findProjectByIssueIDTx(tx, issueID)
+	p, found, err := findProjectByIssueIDTx(tx, fields[r.issueColumns[0]])
 	if err != nil || !found {
 		return false, err
 	}
-	outranked, err := setRowOutranked(tx, ledger.KindLabel, p.ID, change.Key,
-		`SELECT updated FROM issue_labels WHERE project_id = ? AND issue_id = ? AND label = ?`, []any{p.ID, issueID, label}, change.Updated)
+	rowArgs := make([]any, 0, len(fields)+2)
+	rowArgs = append(rowArgs, p.ID)
+	for _, field := range fields {
+		rowArgs = append(rowArgs, field)
+	}
+	outranked, err := setRowOutranked(tx, r, p.ID, change.Key, rowArgs, change.Updated)
 	if err != nil || outranked {
 		return false, err
 	}
 	if change.Deleted {
-		if err := tombstoneSetRowTx(tx, ledger.KindLabel, p.ID, change.Key, change.Updated); err != nil {
+		if err := tombstoneSetRowTx(tx, r.kind, p.ID, change.Key, change.Updated); err != nil {
 			return false, err
 		}
-		return execChanged(tx, `DELETE FROM issue_labels WHERE project_id = ? AND issue_id = ? AND label = ?`, p.ID, issueID, label)
+		return execChanged(tx, `DELETE FROM `+r.table+` WHERE `+r.rowWhere(), rowArgs...)
 	}
-	if exists, err := issueExistsTx(tx, p.ID, issueID); err != nil || !exists {
-		return false, err
-	}
-	return execChanged(tx, `
-INSERT INTO issue_labels(project_id, issue_id, label, updated) VALUES (?, ?, ?, ?)
-ON CONFLICT(project_id, issue_id, label) DO UPDATE SET updated = excluded.updated`, p.ID, issueID, label, change.Updated)
-}
-
-// applyLinkChangeTx is applyLabelChangeTx for Link rows; both ends must exist.
-func applyLinkChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
-	fields, err := splitChangeKey(change.Key, 3)
-	if err != nil {
-		return false, err
-	}
-	sourceID, targetID, kind := fields[0], fields[1], fields[2]
-	p, found, err := findProjectByIssueIDTx(tx, sourceID)
-	if err != nil || !found {
-		return false, err
-	}
-	outranked, err := setRowOutranked(tx, ledger.KindLink, p.ID, change.Key,
-		`SELECT updated FROM issue_links WHERE project_id = ? AND source_id = ? AND target_id = ? AND kind = ?`, []any{p.ID, sourceID, targetID, kind}, change.Updated)
-	if err != nil || outranked {
-		return false, err
-	}
-	if change.Deleted {
-		if err := tombstoneSetRowTx(tx, ledger.KindLink, p.ID, change.Key, change.Updated); err != nil {
-			return false, err
-		}
-		return execChanged(tx, `DELETE FROM issue_links WHERE project_id = ? AND source_id = ? AND target_id = ? AND kind = ?`, p.ID, sourceID, targetID, kind)
-	}
-	for _, id := range []string{sourceID, targetID} {
-		if exists, err := issueExistsTx(tx, p.ID, id); err != nil || !exists {
+	for _, column := range r.issueColumns {
+		if exists, err := issueExistsTx(tx, p.ID, fields[column]); err != nil || !exists {
 			return false, err
 		}
 	}
-	return execChanged(tx, `
-INSERT INTO issue_links(project_id, source_id, target_id, kind, updated) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(project_id, source_id, target_id, kind) DO UPDATE SET updated = excluded.updated`, p.ID, sourceID, targetID, kind, change.Updated)
+	return execChanged(tx, r.upsert(), append(rowArgs, change.Updated)...)
 }
 
 func execChanged(tx *sql.Tx, query string, args ...any) (bool, error) {

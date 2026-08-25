@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"strings"
 
 	"github.com/c3h/ito/internal/ledger"
 )
@@ -30,7 +31,13 @@ func (s *Store) Snapshot() (int, error) {
 	}
 	logged := 0
 	for _, p := range projects {
-		for _, log := range []func(*sql.Tx, Project) (int, error){logAllBatchesTx, logAllIssuesTx, logAllLabelsTx, logAllLinksTx} {
+		// Parents first: the Project owns the Batches, which the Issues
+		// reference, which the Labels and Links hang off.
+		if err := logProjectChangeTx(tx, p.Name, p.Prefix); err != nil {
+			return 0, err
+		}
+		logged++
+		for _, log := range snapshotLoggers {
 			n, err := log(tx, p)
 			if err != nil {
 				return 0, err
@@ -44,12 +51,12 @@ func (s *Store) Snapshot() (int, error) {
 	return logged, tx.Commit()
 }
 
-// logAllBatchesTx logs the Project row first: Batches reference it.
+// snapshotLoggers run in order per Project, parents before the rows that
+// reference them.
+var snapshotLoggers = []func(*sql.Tx, Project) (int, error){logAllBatchesTx, logAllIssuesTx, logAllLabelsTx, logAllLinksTx}
+
 func logAllBatchesTx(tx *sql.Tx, p Project) (int, error) {
-	if err := logProjectChangeTx(tx, p.Name, p.Prefix); err != nil {
-		return 0, err
-	}
-	logged := 1
+	logged := 0
 	err := forEachRow(tx, `SELECT name, created FROM batches WHERE project_id = ? ORDER BY id`, []any{p.ID}, func(rows *sql.Rows) error {
 		var name, created string
 		if err := rows.Scan(&name, &created); err != nil {
@@ -105,22 +112,29 @@ WHERE k.project_id = ? ORDER BY k.source_id, k.target_id, k.kind`, []any{p.ID}, 
 
 // RowCounts reports how many live rows the store holds per Change kind — the
 // figure a Ledger's Inventory must match after a snapshot. Kinds with no rows
-// are absent, as in the Inventory.
+// are absent; the comparison reads the map by kind, so that is a detail.
 func (s *Store) RowCounts() (map[string]int, error) {
-	counts := make(map[string]int, len(ledger.Kinds))
-	for kind, table := range map[string]string{
-		ledger.KindProject: "projects",
-		ledger.KindBatch:   "batches",
-		ledger.KindIssue:   "issues",
-		ledger.KindLabel:   "issue_labels",
-		ledger.KindLink:    "issue_links",
-	} {
-		var n int
-		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n); err != nil {
-			return nil, err
-		}
-		if n > 0 {
-			counts[kind] = n
+	tables := []struct{ kind, table string }{
+		{ledger.KindProject, "projects"},
+		{ledger.KindBatch, "batches"},
+		{ledger.KindIssue, "issues"},
+		{ledger.KindLabel, "issue_labels"},
+		{ledger.KindLink, "issue_links"},
+	}
+	selects := make([]string, len(tables))
+	targets := make([]any, len(tables))
+	found := make([]int, len(tables))
+	for i, t := range tables {
+		selects[i] = `(SELECT count(*) FROM ` + t.table + `)`
+		targets[i] = &found[i]
+	}
+	if err := s.db.QueryRow(`SELECT ` + strings.Join(selects, ", ")).Scan(targets...); err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(tables))
+	for i, t := range tables {
+		if found[i] > 0 {
+			counts[t.kind] = found[i]
 		}
 	}
 	return counts, nil

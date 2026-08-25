@@ -157,10 +157,10 @@ func newModel(st *store.Store, project store.Project, opts Options) model {
 		m.openProjectPicker()
 	} else {
 		m.reload()
-		// Init runs the sync on this model by value, so the in-flight mark is
-		// set here, where it sticks.
-		m.syncing = opts.Sync != nil
 	}
+	// Init runs the sync on this model by value, so the in-flight mark is set
+	// here, where it sticks — by the one rule startSync also asks.
+	m.syncing = m.shouldSync()
 	return m
 }
 
@@ -1875,7 +1875,10 @@ func issueHeader(projectName string, issue store.Issue, width int, syncing bool)
 	// Issue id is cyan, like every other id in the surfaces.
 	prefix, sep := " ito · ", " · "
 	badge := syncBadge(syncing)
-	right := badge + projectName + " "
+	name := projectName + " "
+	// right is the plain right segment — badge included — for the width
+	// maths and the truncating fallbacks; the styled form splits it again.
+	right := badge + name
 	maxLeft := width - runeLen(right) - 1
 	plainLeft := prefix + issue.ID + sep + issue.Title
 	if maxLeft < 1 {
@@ -1893,7 +1896,7 @@ func issueHeader(projectName string, issue store.Issue, width int, syncing bool)
 	if gap < 1 {
 		gap = 1
 	}
-	return styled + strings.Repeat(" ", gap) + headerRight(badge, projectName+" ")
+	return styled + strings.Repeat(" ", gap) + headerRight(badge, name)
 }
 
 // padBetween left-aligns left and right-aligns right across width, keeping at

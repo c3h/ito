@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -327,7 +326,7 @@ func (e commandFailure) Error() string {
 // defers Close) or a typed *commandFailure carrying the exact code/message/hint.
 // OpenDefault already migrates the store it opens.
 func openStore() (*sql.DB, *itostore.Store, *commandFailure) {
-	db, err := itostore.OpenDefault()
+	db, cfg, err := itostore.OpenDefault()
 	if err != nil {
 		hint := "check ITO_HOME and the directory permissions."
 		if errors.Is(err, itoconfig.ErrRetiredCloudBackend) {
@@ -338,7 +337,7 @@ func openStore() (*sql.DB, *itostore.Store, *commandFailure) {
 	st := itostore.New(db)
 	// With a Ledger configured, numbers come from it (decision 0005); the
 	// dial waits for the first creation, so read-only commands never dial.
-	if cfg, err := itoconfig.Load(); err == nil && cfg.Ledger != nil {
+	if cfg.Ledger != nil {
 		st.SetIssueNumberer(ledgerNumberer{})
 	}
 	return db, st, nil
@@ -357,6 +356,10 @@ func (ledgerNumberer) ReserveIssueNumber(prefix string, floor int64) (int64, err
 	})
 }
 
+// errNoLedger is what askLedger reports when no Ledger is configured, so a
+// caller that runs either way can tell it apart from a Ledger that failed.
+var errNoLedger = errors.New("no Ledger is connected")
+
 // askLedger dials the configured Ledger and runs ask against it, giving up
 // after timeout. The work runs aside so nothing on the way to the Ledger can
 // hold the caller past the timeout; a call abandoned mid-flight may still
@@ -368,11 +371,16 @@ func askLedger[T any](timeout time.Duration, ask func(ledger.Ledger) (T, error))
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		l, _, err := connectedLedger()
+		l, connected, err := connectedLedger()
 		if err != nil {
 			done <- outcome{err: err}
 			return
 		}
+		if !connected {
+			done <- outcome{err: errNoLedger}
+			return
+		}
+		defer closeLedger(l)
 		value, err := ask(l)
 		done <- outcome{value, err}
 	}()
@@ -381,7 +389,7 @@ func askLedger[T any](timeout time.Duration, ask func(ledger.Ledger) (T, error))
 		return o.value, o.err
 	case <-time.After(timeout):
 		var zero T
-		return zero, fmt.Errorf("the Ledger did not answer within %s", timeout)
+		return zero, fmt.Errorf("the Ledger timed out after %s", timeout)
 	}
 }
 
@@ -523,21 +531,30 @@ func runCLI(args []string) int {
 	}
 }
 
+// parseJSONOnly parses the flags of a command that accepts --json and no
+// positional arguments. ok is false when the caller should return code.
+func parseJSONOnly(command string, args []string) (jsonMode bool, code int, ok bool) {
+	fs := flag.NewFlagSet(command, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&jsonMode, "json", false, "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, nil)
+	if err := fs.Parse(flagArgs); err != nil {
+		return false, fail(wantsJSON(args, nil), exitBadUsage, err.Error(), "run 'ito "+command+" --help' to see the accepted flags."), false
+	}
+	if len(positionals) != 0 {
+		return false, fail(jsonMode, exitBadUsage, "ito "+command+" takes no positional arguments.", "use only --json."), false
+	}
+	return jsonMode, 0, true
+}
+
 func runConfig(args []string) int {
 	if wantsHelp(args, nil) {
 		printCommandHelp("config")
 		return 0
 	}
-	fs := flag.NewFlagSet("config", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var jsonMode bool
-	fs.BoolVar(&jsonMode, "json", false, "")
-	flagArgs, positionals := splitFlagsAndPositionals(args, nil)
-	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args, nil), exitBadUsage, err.Error(), "run 'ito config --help' to see the accepted flags.")
-	}
-	if len(positionals) != 0 {
-		return fail(jsonMode, exitBadUsage, "ito config takes no positional arguments.", "use only --json.")
+	jsonMode, code, ok := parseJSONOnly("config", args)
+	if !ok {
+		return code
 	}
 
 	home, err := itoconfig.HomeDir()
@@ -660,6 +677,7 @@ func connectLedger(url, token string, force bool) (connectResult, *commandFailur
 	if err != nil {
 		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not reach the Ledger: %v", err), "check the URL, the token and the network."}
 	}
+	defer closeLedger(l)
 	if err := l.EnsureSchema(); err != nil {
 		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not prepare the Ledger: %v", err), "check the URL, the token and the network."}
 	}
@@ -734,10 +752,21 @@ func pushSnapshot(st *itostore.Store, l ledger.Ledger) (int, *commandFailure) {
 	if err != nil {
 		return 0, &commandFailure{exitGeneric, fmt.Sprintf("could not read the snapshot back from the Ledger: %v", err), "check the URL, the token and the network, then run 'ito ledger connect' again."}
 	}
-	if !maps.Equal(local, inventory.Rows) {
+	if !sameRowCounts(local, inventory.Rows) {
 		return 0, &commandFailure{exitGeneric, fmt.Sprintf("the snapshot did not validate: the local store holds %s, the Ledger reports %s.", describeRowCounts(local), describeRowCounts(inventory.Rows)), "the connection was not recorded; run 'ito ledger connect' again or inspect the Ledger."}
 	}
 	return pushed, nil
+}
+
+// sameRowCounts compares the two tallies kind by kind, so neither side has to
+// agree on how a kind with no rows is spelled.
+func sameRowCounts(local, remote map[string]int) bool {
+	for _, kind := range ledger.Kinds {
+		if local[kind] != remote[kind] {
+			return false
+		}
+	}
+	return true
 }
 
 func describeRowCounts(counts map[string]int) string {
@@ -823,19 +852,13 @@ func promptSecret(prompt string) (string, error) {
 	return promptLine(prompt)
 }
 
-// connectPolicy is the state table of ito ledger connect; nil means the
-// connection may proceed.
+// connectPolicy holds the one rule of ito ledger connect: two populated
+// sides only merge on --force. nil means the connection may proceed.
 func connectPolicy(localEmpty, ledgerEmpty, force bool) *commandFailure {
-	switch {
-	case localEmpty:
-		return nil
-	case ledgerEmpty:
-		return nil
-	case !force:
+	if !localEmpty && !ledgerEmpty && !force {
 		return &commandFailure{exitGeneric, "both the local store and the Ledger already hold Issues.", "pass --force to merge them, keeping the later version of every row that both changed."}
-	default:
-		return nil
 	}
+	return nil
 }
 
 func runLedgerDisconnect(args []string) int {
@@ -843,16 +866,9 @@ func runLedgerDisconnect(args []string) int {
 		printCommandHelp("ledger disconnect")
 		return 0
 	}
-	fs := flag.NewFlagSet("ledger disconnect", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var jsonMode bool
-	fs.BoolVar(&jsonMode, "json", false, "")
-	flagArgs, positionals := splitFlagsAndPositionals(args, nil)
-	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args, nil), exitBadUsage, err.Error(), "run 'ito ledger disconnect --help' to see the accepted flags.")
-	}
-	if len(positionals) != 0 {
-		return fail(jsonMode, exitBadUsage, "ito ledger disconnect takes no positional arguments.", "use only --json.")
+	jsonMode, code, ok := parseJSONOnly("ledger disconnect", args)
+	if !ok {
+		return code
 	}
 
 	cfg, err := itoconfig.Load()
@@ -893,6 +909,15 @@ func tuiSync(st *itostore.Store) tui.SyncFunc {
 	}
 }
 
+// closeLedger releases the connection pool a dialled Ledger holds. Every dial
+// makes a fresh one, so leaving them open would let a long TUI session
+// accumulate a pool per sync. A Ledger that owns nothing to close ignores it.
+func closeLedger(l ledger.Ledger) {
+	if c, ok := l.(io.Closer); ok {
+		c.Close()
+	}
+}
+
 // pushTimeout bounds how long a writing command waits for its push; a Ledger
 // that is slow or unreachable costs the command at most this much.
 var pushTimeout = 5 * time.Second
@@ -920,25 +945,13 @@ func connectedLedger() (l ledger.Ledger, connected bool, err error) {
 // failure is one warning on stderr and the Changes stay pending. Without a
 // connected Ledger it does nothing.
 func pushAfterWrite(st *itostore.Store) {
-	// Dial and push run aside so nothing on the way to the Ledger can hold
-	// the command past the timeout. A push abandoned mid-flight is harmless:
-	// the Ledger deduplicates resends, and a Change only stops being pending
-	// once the local marking after a confirmed append succeeds.
-	done := make(chan error, 1)
-	go func() {
-		l, connected, err := connectedLedger()
-		if err == nil && connected {
-			_, err = st.Push(l)
-		}
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			warnPush(err.Error())
-		}
-	case <-time.After(pushTimeout):
-		warnPush(fmt.Sprintf("the push to the Ledger timed out after %s", pushTimeout))
+	// The dial and the push run aside (askLedger) so nothing on the way to
+	// the Ledger can hold the command past the timeout. A push abandoned
+	// mid-flight is harmless: the Ledger deduplicates resends, and a Change
+	// only stops being pending once the local marking after a confirmed
+	// append succeeds.
+	if _, err := askLedger(pushTimeout, st.Push); err != nil && !errors.Is(err, errNoLedger) {
+		warnPush(err.Error())
 	}
 }
 
@@ -951,16 +964,9 @@ func runSync(args []string) int {
 		printCommandHelp("sync")
 		return 0
 	}
-	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var jsonMode bool
-	fs.BoolVar(&jsonMode, "json", false, "")
-	flagArgs, positionals := splitFlagsAndPositionals(args, nil)
-	if err := fs.Parse(flagArgs); err != nil {
-		return fail(wantsJSON(args, nil), exitBadUsage, err.Error(), "run 'ito sync --help' to see the accepted flags.")
-	}
-	if len(positionals) != 0 {
-		return fail(jsonMode, exitBadUsage, "ito sync takes no positional arguments.", "use only --json.")
+	jsonMode, code, ok := parseJSONOnly("sync", args)
+	if !ok {
+		return code
 	}
 
 	l, connected, err := connectedLedger()

@@ -23,10 +23,16 @@ type syncMsg struct {
 	Err     error
 }
 
-// startSync schedules a sync when a Ledger is connected and none is already
-// running, marking the model so the header shows it.
+// shouldSync reports whether a background sync may start: a Ledger is
+// connected, none is already running, and a Project is open.
+func (m *model) shouldSync() bool {
+	return m.sync != nil && !m.syncing && m.project.ID != 0
+}
+
+// startSync schedules a sync when shouldSync allows it, marking the model so
+// the header shows it.
 func (m *model) startSync() tea.Cmd {
-	if m.sync == nil || m.syncing || m.project.ID == 0 {
+	if !m.shouldSync() {
 		return nil
 	}
 	m.syncing = true
