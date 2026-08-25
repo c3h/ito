@@ -120,15 +120,16 @@ func TestFirstRunRejectsAnUnknownChoiceOrAClosedStdin(t *testing.T) {
 func TestFirstRunConnectFailureLeavesNoConfigBehind(t *testing.T) {
 	itoHome := t.TempDir()
 	t.Setenv("ITO_HOME", itoHome)
-	useMemoryLedger(t)
-	createLocalIssue(t, itoHome) // populated store against an empty Ledger is refused
+	shared := useMemoryLedger(t)
+	pushFromAnotherDevice(t, shared)
+	createLocalIssue(t, itoHome) // two populated sides are refused without --force
 	gotTUI, _ := firstRunTTY(t, "2\n"+testLedgerURL+"\n"+testLedgerToken+"\n")
 
 	_, stderr, code := captureOutput(t, func() int { return runCLI(nil) })
 	if code == 0 || *gotTUI {
 		t.Fatalf("exit = %d, opened = %v", code, *gotTUI)
 	}
-	if !strings.Contains(stderr, "empty Ledger") {
+	if !strings.Contains(stderr, "--force") {
 		t.Fatalf("expected the connect policy message, got %q", stderr)
 	}
 	if _, err := os.Stat(filepath.Join(itoHome, "config.json")); !os.IsNotExist(err) {

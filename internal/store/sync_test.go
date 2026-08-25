@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -913,5 +914,141 @@ func TestPushSendsPendingChangesWithoutPulling(t *testing.T) {
 	}
 	if _, err := b.st.FindIssue(b.p, created.ID); err != nil {
 		t.Fatalf("issue pushed by A missing on B: %v", err)
+	}
+}
+
+// legacyRows simulates rows that predate the change log (migrateV5 never
+// backfilled them, and migrateV6 stamped their Labels and Links with ”): it
+// writes through the API, then wipes the log and the set-row stamps.
+func legacyRows(t *testing.T, device syncDevice) (Issue, Issue) {
+	t.Helper()
+	setClock(t, "2026-08-24T18:00:00Z")
+	if _, err := device.st.CreateBatch(device.p, "wave-1"); err != nil {
+		t.Fatal(err)
+	}
+	one, err := device.st.CreateIssueInBatch(device.p, "Café one", "todo", "medium", []string{"feature"}, "espresso", "wave-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	two := createStoreIssue(t, device.st, device.p, "Two", "backlog", "low")
+	if _, err := device.st.Edit(device.p, two.ID, EditIssueOptions{LinkOps: []LinkEditOp{{Action: "add", Kind: "blocked_by", Target: one.ID}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := device.db.Exec(`DELETE FROM changes; UPDATE issue_labels SET updated = ''; UPDATE issue_links SET updated = ''`); err != nil {
+		t.Fatal(err)
+	}
+	return one, two
+}
+
+func TestSnapshotLogsEveryRowOnceAndAFreshDevicePullsIdenticalRows(t *testing.T) {
+	a := openSyncDevice(t, "a")
+	one, two := legacyRows(t, a)
+	// A Label logged before the snapshot sits ahead of its Issue's Change in
+	// the log; the snapshot must still leave the fresh Device with the row.
+	setClock(t, "2026-08-24T18:05:00Z")
+	if _, err := a.st.Edit(a.p, two.ID, EditIssueOptions{TitleSet: true, Title: "Two edited", LabelOps: []LabelEditOp{{Kind: "add", Label: "bug"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	logged, err := a.st.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// project + batch + 2 issues + 2 labels + 1 link
+	if logged != 7 {
+		t.Fatalf("snapshot logged %d Changes, want 7", logged)
+	}
+	again, err := a.st.Snapshot()
+	if err != nil || again != 0 {
+		t.Fatalf("second snapshot logged %d, %v; want nothing new", again, err)
+	}
+
+	l := ledger.NewMemory()
+	if _, err := a.st.Push(l); err != nil {
+		t.Fatal(err)
+	}
+	local, err := a.st.RowCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := ledger.TakeInventory(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{ledger.KindProject: 1, ledger.KindBatch: 1, ledger.KindIssue: 2, ledger.KindLabel: 2, ledger.KindLink: 1}
+	if !maps.Equal(local, want) || !maps.Equal(inventory.Rows, want) {
+		t.Fatalf("counts local %v ledger %v, want %v", local, inventory.Rows, want)
+	}
+	device, _ := a.st.DeviceID()
+	if !inventory.WrittenOnlyBy(device) || inventory.Empty() {
+		t.Fatalf("inventory devices = %v, want only %s", inventory.Devices, device)
+	}
+
+	freshDB, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer freshDB.Close()
+	fresh := New(freshDB)
+	if _, err := fresh.Sync(l); err != nil {
+		t.Fatal(err)
+	}
+	p, found, err := fresh.FindProjectByName("shared")
+	if err != nil || !found {
+		t.Fatalf("project on fresh device: found=%v err=%v", found, err)
+	}
+	pulledTwo, err := fresh.FindIssue(p, two.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pulledTwo.Title != "Two edited" || len(pulledTwo.BlockedBy) != 1 || pulledTwo.BlockedBy[0] != one.ID || len(pulledTwo.Labels) != 1 || pulledTwo.Labels[0] != "bug" {
+		t.Fatalf("pulled %#v, want the edited title, label bug, blocked by %s", pulledTwo, one.ID)
+	}
+	pulledOne, err := fresh.FindIssue(p, one.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pulledOne.Batch == nil || *pulledOne.Batch != "wave-1" || len(pulledOne.Labels) != 1 || pulledOne.Labels[0] != "feature" || pulledOne.Updated != "2026-08-24T18:00:00Z" {
+		t.Fatalf("pulled %#v, want batch wave-1, label feature and the origin stamps", pulledOne)
+	}
+	if hits, err := fresh.ListIssues(ListOptions{ProjectID: p.ID, Search: "cafe"}); err != nil || len(hits) != 1 {
+		t.Fatalf("search on the fresh device = %v, %v", storeIssueIDs(hits), err)
+	}
+	if counts, err := fresh.RowCounts(); err != nil || !maps.Equal(counts, want) {
+		t.Fatalf("fresh device holds %v, %v", counts, err)
+	}
+}
+
+func TestSnapshotPushesInBoundedBatches(t *testing.T) {
+	remote, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+	counting := &countingDB{db: remote}
+	l := ledger.NewSQL(counting)
+	if err := l.EnsureSchema(); err != nil {
+		t.Fatal(err)
+	}
+	mac := openSyncDevice(t, "mac")
+	for i := range 700 {
+		if _, err := mac.st.CreateIssue(mac.p, fmt.Sprintf("Issue %d", i), "todo", "medium", nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := mac.db.Exec(`DELETE FROM changes`); err != nil {
+		t.Fatal(err)
+	}
+	if logged, err := mac.st.Snapshot(); err != nil || logged != 701 {
+		t.Fatalf("snapshot logged %d, %v", logged, err)
+	}
+	counting.statements = 0
+	pushed, err := mac.st.Push(l)
+	if err != nil || pushed != 701 {
+		t.Fatalf("pushed %d, %v", pushed, err)
+	}
+	// Two chunks of at most 500, two statements each.
+	if counting.statements > 4 {
+		t.Fatalf("pushing 701 Changes took %d statements, want at most 4", counting.statements)
 	}
 }

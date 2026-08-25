@@ -20,6 +20,9 @@ const (
 	KindLabel   = "label"
 )
 
+// Kinds lists every row kind, parents first.
+var Kinds = []string{KindProject, KindBatch, KindIssue, KindLabel, KindLink}
+
 // Change records one mutation to one row: the row's full new state, or a
 // tombstone when Deleted is set. Device and Sequence together identify the
 // Change wherever it travels, so a resend never appends twice.
@@ -121,4 +124,52 @@ func (m *Memory) ReserveIssueNumber(prefix string, floor int64) (int64, error) {
 	defer m.mu.Unlock()
 	m.counters[prefix] = max(m.counters[prefix], floor) + 1
 	return m.counters[prefix], nil
+}
+
+// inventoryPageSize bounds one read while folding a Ledger's history.
+const inventoryPageSize = 500
+
+// Inventory is what a Ledger's whole history amounts to: the live rows per
+// kind — last Change per row wins, tombstones remove — and the Devices that
+// wrote to it. Kinds with no live row are absent.
+type Inventory struct {
+	Rows    map[string]int
+	Devices map[string]bool
+}
+
+// Empty reports whether nothing was ever written.
+func (inv Inventory) Empty() bool { return len(inv.Devices) == 0 }
+
+// WrittenOnlyBy reports whether every Change came from device — a Ledger
+// this Device started and nobody else has joined.
+func (inv Inventory) WrittenOnlyBy(device string) bool {
+	return len(inv.Devices) == 1 && inv.Devices[device]
+}
+
+// TakeInventory folds the whole Ledger, page by page.
+func TakeInventory(l Ledger) (Inventory, error) {
+	type rowKey struct{ kind, project, key string }
+	live := make(map[rowKey]bool)
+	inv := Inventory{Rows: make(map[string]int, len(Kinds)), Devices: make(map[string]bool)}
+	position := int64(0)
+	for {
+		entries, err := l.ReadAfter(position, inventoryPageSize)
+		if err != nil {
+			return Inventory{}, err
+		}
+		if len(entries) == 0 {
+			break
+		}
+		for _, entry := range entries {
+			live[rowKey{entry.Kind, entry.Project, entry.Key}] = !entry.Deleted
+			inv.Devices[entry.Device] = true
+			position = entry.Position
+		}
+	}
+	for key, alive := range live {
+		if alive {
+			inv.Rows[key.kind]++
+		}
+	}
+	return inv, nil
 }

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -597,10 +598,11 @@ func runLedger(args []string) int {
 
 // runLedgerConnect decides by what each side holds: an empty local store
 // pulls the whole Ledger; two populated sides merge by last-writer-wins only
-// under --force; a populated store against an empty Ledger waits for the
-// snapshot command. Once the policy passes the connection is recorded, then
-// the first Sync runs — so an interrupted one resumes with "ito sync" rather
-// than facing the policy again against a half-pulled store.
+// under --force; a populated store against an empty Ledger snapshots the
+// store into it and records the connection only once the Ledger holds every
+// row. Once the policy passes the connection is recorded, then the first Sync
+// runs — so an interrupted one resumes with "ito sync" rather than facing the
+// policy again against a half-pulled store.
 func runLedgerConnect(args []string) int {
 	valueFlags := commandValueFlags("ledger connect")
 	if wantsHelp(args, valueFlags) {
@@ -671,29 +673,79 @@ func connectLedger(url, token string, force bool) (connectResult, *commandFailur
 	if err != nil {
 		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not inspect the local store: %v", err), "try again or inspect the central store."}
 	}
-	head, err := l.ReadAfter(0, 1)
+	device, err := st.DeviceID()
+	if err != nil {
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the Device identity: %v", err), "try again or inspect the central store."}
+	}
+	inventory, err := ledger.TakeInventory(l)
 	if err != nil {
 		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the Ledger: %v", err), "check the URL, the token and the network."}
 	}
-	if policyFail := connectPolicy(localEmpty, len(head) == 0, force); policyFail != nil {
+	// A Ledger only this Device ever wrote to is one it started — a snapshot
+	// that failed before the config was written — so the retry resumes it
+	// instead of facing the two-populated-sides rule.
+	ledgerEmpty := inventory.Empty() || inventory.WrittenOnlyBy(device)
+	if policyFail := connectPolicy(localEmpty, ledgerEmpty, force); policyFail != nil {
 		return connectResult{}, policyFail
 	}
 
 	if err := st.ResetSync(); err != nil {
 		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not reset the sync state: %v", err), "try again or inspect the central store."}
 	}
-	device, err := st.DeviceID()
-	if err != nil {
-		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the Device identity: %v", err), "try again or inspect the central store."}
+	snapshotted := 0
+	if !localEmpty {
+		if _, err := st.Snapshot(); err != nil {
+			return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not snapshot the local store: %v", err), "try again or inspect the central store."}
+		}
+		if ledgerEmpty {
+			pushed, snapshotFail := pushSnapshot(st, l)
+			if snapshotFail != nil {
+				return connectResult{}, snapshotFail
+			}
+			snapshotted = pushed
+		}
 	}
 	if err := itoconfig.Write(itoconfig.Config{Ledger: &connection}); err != nil {
 		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not write the config: %v", err), "check the ito home permissions and run 'ito ledger connect' again."}
 	}
 	result, err := st.Sync(l)
+	pushed := snapshotted + result.Pushed
 	if err != nil {
-		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("connected, but the first sync stopped after pushing %d and pulling %d Changes: %v", result.Pushed, result.Pulled, err), "run 'ito sync' to resume."}
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("connected, but the first sync stopped after pushing %d and pulling %d Changes: %v", pushed, result.Pulled, err), "run 'ito sync' to resume."}
 	}
-	return connectResult{ledgerDisplay: ledgerDisplay{URL: url, Device: device}, Pushed: result.Pushed, Pulled: result.Pulled}, nil
+	return connectResult{ledgerDisplay: ledgerDisplay{URL: url, Device: device}, Pushed: pushed, Pulled: result.Pulled}, nil
+}
+
+// pushSnapshot writes the completed change log into an empty Ledger — in the
+// Ledger's batches — then checks that the Ledger folds back to the rows the
+// store holds. Nothing here touches the config, so a failure leaves the
+// Device disconnected and the next connect resumes: the log keeps its
+// Changes and the Ledger deduplicates what it already received.
+func pushSnapshot(st *itostore.Store, l ledger.Ledger) (int, *commandFailure) {
+	pushed, err := st.Push(l)
+	if err != nil {
+		return 0, &commandFailure{exitGeneric, fmt.Sprintf("could not push the snapshot to the Ledger: %v", err), "check the URL, the token and the network, then run 'ito ledger connect' again; the Ledger keeps what it received and the next attempt sends the rest."}
+	}
+	local, err := st.RowCounts()
+	if err != nil {
+		return 0, &commandFailure{exitGeneric, fmt.Sprintf("could not count the local rows: %v", err), "try again or inspect the central store."}
+	}
+	inventory, err := ledger.TakeInventory(l)
+	if err != nil {
+		return 0, &commandFailure{exitGeneric, fmt.Sprintf("could not read the snapshot back from the Ledger: %v", err), "check the URL, the token and the network, then run 'ito ledger connect' again."}
+	}
+	if !maps.Equal(local, inventory.Rows) {
+		return 0, &commandFailure{exitGeneric, fmt.Sprintf("the snapshot did not validate: the local store holds %s, the Ledger reports %s.", describeRowCounts(local), describeRowCounts(inventory.Rows)), "the connection was not recorded; run 'ito ledger connect' again or inspect the Ledger."}
+	}
+	return pushed, nil
+}
+
+func describeRowCounts(counts map[string]int) string {
+	parts := make([]string, 0, len(ledger.Kinds))
+	for _, kind := range ledger.Kinds {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[kind], kind))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // firstRunHint names the explicit commands behind the two first-run choices,
@@ -778,7 +830,7 @@ func connectPolicy(localEmpty, ledgerEmpty, force bool) *commandFailure {
 	case localEmpty:
 		return nil
 	case ledgerEmpty:
-		return &commandFailure{exitGeneric, "the local store already holds Issues and this is an empty Ledger; snapshotting a store into a Ledger is not available in this build.", "connect this Device to a Ledger that already holds the tracker, or start from an empty store."}
+		return nil
 	case !force:
 		return &commandFailure{exitGeneric, "both the local store and the Ledger already hold Issues.", "pass --force to merge them, keeping the later version of every row that both changed."}
 	default:
@@ -2192,7 +2244,7 @@ Use "ito ledger <command> --help" to see the command's flags.`)
 	case "ledger connect":
 		fmt.Println(`usage: ito ledger connect --url <url> --token <token> [--force] [--json]
 
-Connects this Device to the Turso-hosted Ledger at <url>, creating its tables when they do not exist yet. An empty local store pulls the whole tracker. When both the local store and the Ledger already hold Issues the command refuses unless --force is passed, which merges them keeping the later version of every row. The connection is recorded once those checks pass, then the first Sync runs ("ito sync" resumes it if interrupted); the token is stored in the config file with owner-only permissions. Bare "ito" on a machine with no config offers the same connection interactively.
+Connects this Device to the Turso-hosted Ledger at <url>, creating its tables when they do not exist yet. An empty local store pulls the whole tracker. A populated local store against an empty Ledger snapshots every Project, Issue, Link, Label and Batch into it — pushed in batches and validated by per-kind row counts before the connection is recorded — so any other Device can then bootstrap from the Ledger. When both the local store and the Ledger already hold Issues the command refuses unless --force is passed, which merges them keeping the later version of every row. The connection is recorded once those checks pass, then the first Sync runs ("ito sync" resumes it if interrupted); the token is stored in the config file with owner-only permissions. Bare "ito" on a machine with no config offers the same connection interactively.
 
 Flags:
   --url <url>          The Ledger's libsql:// URL.

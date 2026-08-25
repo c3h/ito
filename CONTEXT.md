@@ -40,6 +40,8 @@ Local-first, solo issue tracker for the terminal, driven by AI through the comma
 
 **Sync**: The batch exchange in which a Device pushes its pending Changes to the Ledger and pulls and applies the ones it has not seen. Never real-time; when two Devices changed the same row, the later Updated wins. _Avoid_: replication, mirror, backup, migrate.
 
+**Snapshot**: The one-time completion of a Device's change log — a Change for every current row, parents first — so that pushing the log hands an empty Ledger the whole tracker. Written by `ito ledger connect` from a populated store, validated by per-kind row counts before the connection is recorded. _Avoid_: export, dump, backfill, migration.
+
 ## Example dialogue
 
 > **Dev:** "Where does an issue live?"

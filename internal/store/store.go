@@ -936,7 +936,7 @@ func findProjectByPrefix(db *sql.DB, prefix string) (Project, bool, error) {
 	return findProjectWhere(db, `SELECT id, name, prefix, root_path FROM projects WHERE prefix = ?`, prefix)
 }
 
-func listProjects(db *sql.DB) ([]Project, error) {
+func listProjects(db rowQuerier) ([]Project, error) {
 	rows, err := db.Query(`SELECT id, name, prefix, root_path FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, err
