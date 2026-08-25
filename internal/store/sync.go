@@ -176,7 +176,7 @@ func logIssueTombstonesTx(tx *sql.Tx, p Project, rows []issueDeletionRow) error 
 // applies the Changes it has not seen, skipping its own. Rows converge by
 // last-writer-wins on updated.
 func (s *Store) Sync(l ledger.Ledger) (SyncResult, error) {
-	device, err := s.deviceID()
+	device, err := s.DeviceID()
 	if err != nil {
 		return SyncResult{}, err
 	}
@@ -191,7 +191,8 @@ func (s *Store) Sync(l ledger.Ledger) (SyncResult, error) {
 	return SyncResult{Pushed: pushed, Pulled: pulled}, nil
 }
 
-func (s *Store) deviceID() (string, error) {
+// DeviceID returns this Device's stable identity, generating it on first use.
+func (s *Store) DeviceID() (string, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", err
@@ -213,6 +214,35 @@ func (s *Store) deviceID() (string, error) {
 		return "", err
 	}
 	return device, tx.Commit()
+}
+
+// Empty reports whether the store holds no work yet — no Issues and no
+// Batches. Projects alone do not count: "ito init" on a fresh machine must
+// still leave it free to pull a Ledger.
+func (s *Store) Empty() (bool, error) {
+	var populated bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM issues) OR EXISTS(SELECT 1 FROM batches)`).Scan(&populated)
+	return !populated, err
+}
+
+// ResetSync forgets everything the store knows about a Ledger: the last
+// applied position, so the next pull starts from the beginning, and the
+// pushed marks, so every local Change is offered again. A Ledger that already
+// holds a Change keeps its position, so resending to the same Ledger is
+// harmless and resending to a new one is what makes the local history travel.
+func (s *Store) ResetSync() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM sync_state WHERE key = 'position'`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE changes SET pushed = 0 WHERE pushed = 1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func syncStateTx(q rowQuerier, key string) (string, bool, error) {

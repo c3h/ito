@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -757,5 +758,120 @@ INSERT INTO issue_labels(project_id, issue_id, label) VALUES (1, 'LEG-1', 'bug')
 	}
 	if _, err := db.Exec(`INSERT INTO set_tombstones(kind, project_id, key, updated) VALUES ('label', 1, 'x', '')`); err != nil {
 		t.Fatalf("set_tombstones table missing: %v", err)
+	}
+}
+
+func TestEmptyIgnoresProjectsAndResetSyncRewindsAndResends(t *testing.T) {
+	device := openSyncDevice(t, "mac")
+	st, p := device.st, device.p
+	empty, err := st.Empty()
+	if err != nil || !empty {
+		t.Fatalf("store with only a project: empty=%v err=%v", empty, err)
+	}
+	if _, err := st.CreateIssue(p, "Work", "todo", "medium", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if empty, err = st.Empty(); err != nil || empty {
+		t.Fatalf("store with an issue: empty=%v err=%v", empty, err)
+	}
+
+	shared := ledger.NewMemory()
+	if _, err := st.Sync(shared); err != nil {
+		t.Fatal(err)
+	}
+	if position, err := st.lastPosition(); err != nil || position == 0 {
+		t.Fatalf("position after sync = %d, %v", position, err)
+	}
+	if err := st.ResetSync(); err != nil {
+		t.Fatal(err)
+	}
+	if position, err := st.lastPosition(); err != nil || position != 0 {
+		t.Fatalf("position after reset = %d, %v", position, err)
+	}
+	// A fresh Ledger receives the whole local history; the old one, nothing new.
+	fresh := ledger.NewMemory()
+	result, err := st.Sync(fresh)
+	if err != nil || result.Pushed != 2 {
+		t.Fatalf("sync into a fresh Ledger after reset = %+v, %v", result, err)
+	}
+	if entries, err := fresh.ReadAfter(0, 10); err != nil || len(entries) != 2 {
+		t.Fatalf("fresh Ledger holds %d entries, %v", len(entries), err)
+	}
+	if err := st.ResetSync(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := shared.ReadAfter(0, 10); err != nil || len(entries) != 2 {
+		t.Fatalf("shared Ledger holds %d entries before resend, %v", len(entries), err)
+	}
+	if _, err := st.Sync(shared); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := shared.ReadAfter(0, 10); err != nil || len(entries) != 2 {
+		t.Fatalf("resend to the same Ledger must not grow it: %d entries, %v", len(entries), err)
+	}
+	id, err := st.DeviceID()
+	if err != nil || id == "" {
+		t.Fatalf("device id = %q, %v", id, err)
+	}
+}
+
+// countingDB counts statements sent to the SQL Ledger: on Turso each one is a
+// round-trip.
+type countingDB struct {
+	db         *sql.DB
+	statements int
+}
+
+func (c *countingDB) Exec(query string, args ...any) (sql.Result, error) {
+	c.statements++
+	return c.db.Exec(query, args...)
+}
+
+func (c *countingDB) Query(query string, args ...any) (*sql.Rows, error) {
+	c.statements++
+	return c.db.Query(query, args...)
+}
+
+func (c *countingDB) QueryRow(query string, args ...any) *sql.Row {
+	c.statements++
+	return c.db.QueryRow(query, args...)
+}
+
+func TestSyncThroughSQLLedgerUsesBoundedRoundTrips(t *testing.T) {
+	remote, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+	counting := &countingDB{db: remote}
+	l := ledger.NewSQL(counting)
+	if err := l.EnsureSchema(); err != nil {
+		t.Fatal(err)
+	}
+
+	mac := openSyncDevice(t, "mac")
+	for i := range 40 {
+		if _, err := mac.st.CreateIssue(mac.p, fmt.Sprintf("Issue %d", i), "todo", "medium", []string{"feature"}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	counting.statements = 0
+	result, err := mac.st.Sync(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Push: one insert and one lookup for the single chunk. Pull: one page
+	// with the Changes and one empty page that ends the loop.
+	if result.Pushed < 40 || counting.statements > 4 {
+		t.Fatalf("push of %d Changes and an empty pull took %d statements, want at most 4", result.Pushed, counting.statements)
+	}
+
+	vps := openSyncDevice(t, "vps")
+	counting.statements = 0
+	if result, err = vps.st.Sync(l); err != nil {
+		t.Fatal(err)
+	}
+	if result.Pulled < 40 || counting.statements > 4 {
+		t.Fatalf("pull of %d Changes took %d statements, want at most 4", result.Pulled, counting.statements)
 	}
 }

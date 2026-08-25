@@ -113,3 +113,23 @@ func TestWriteUsesPrivatePermissionsAndDropsLegacyFields(t *testing.T) {
 		t.Fatalf("temporary config files left behind: %v", matches)
 	}
 }
+
+func TestWriteRoundTripsLedgerSection(t *testing.T) {
+	t.Setenv("ITO_HOME", t.TempDir())
+	if err := Write(Config{Ledger: &Ledger{URL: "libsql://ito-example.turso.io", Token: "secret"}}); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Ledger == nil || cfg.Ledger.URL != "libsql://ito-example.turso.io" || cfg.Ledger.Token != "secret" {
+		t.Fatalf("ledger section = %#v", cfg.Ledger)
+	}
+	if err := Write(Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = Load(); err != nil || cfg.Ledger != nil {
+		t.Fatalf("after dropping the section: %#v, %v", cfg.Ledger, err)
+	}
+}

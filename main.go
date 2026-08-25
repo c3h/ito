@@ -43,9 +43,9 @@ var (
 	isTerminal      = isatty.IsTerminal
 	runTUI          = tui.Run
 	// openLedger dials the configured Ledger; tests replace it with an
-	// in-memory one. The Turso transport arrives with the connection command.
+	// in-memory one.
 	openLedger = func(cfg itoconfig.Ledger) (ledger.Ledger, error) {
-		return nil, errors.New("the Ledger transport is not available in this build")
+		return ledger.OpenTurso(cfg.URL, cfg.Token)
 	}
 )
 
@@ -289,7 +289,24 @@ type deletedIssues struct {
 }
 
 type configDisplay struct {
-	LocalDBPath string `json:"local_db_path"`
+	LocalDBPath string         `json:"local_db_path"`
+	Ledger      *ledgerDisplay `json:"ledger"`
+}
+
+// ledgerDisplay is the connection as shown to the user: never the token.
+type ledgerDisplay struct {
+	URL    string `json:"url"`
+	Device string `json:"device"`
+}
+
+type connectResult struct {
+	ledgerDisplay
+	Pushed int `json:"pushed"`
+	Pulled int `json:"pulled"`
+}
+
+type disconnectResult struct {
+	URL string `json:"url"`
 }
 
 type commandFailure struct {
@@ -436,6 +453,8 @@ func runCLI(args []string) int {
 		return runPrune(args[1:])
 	case "sync":
 		return runSync(args[1:])
+	case "ledger":
+		return runLedger(args[1:])
 	default:
 		return fail(wantsJSON(args, nil), exitBadUsage, "unknown command: "+args[0]+".", "Run 'ito --help' to see available commands.")
 	}
@@ -462,7 +481,8 @@ func runConfig(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not resolve the ito home: %v.", err), "")
 	}
-	if _, err := itoconfig.Load(); err != nil {
+	cfg, err := itoconfig.Load()
+	if err != nil {
 		message := fmt.Sprintf("could not read the config: %v", err)
 		if !errors.Is(err, itoconfig.ErrRetiredCloudBackend) {
 			message += "; fix or remove it."
@@ -470,10 +490,181 @@ func runConfig(args []string) int {
 		return fail(jsonMode, exitGeneric, message, "")
 	}
 	display := configDisplay{LocalDBPath: itoconfig.LocalDBPath(home)}
+	if cfg.Ledger != nil {
+		// The Device identity lives in the store; a store that will not open
+		// must not hide the rest of the config, so it is left blank instead.
+		display.Ledger = &ledgerDisplay{URL: cfg.Ledger.URL, Device: localDeviceID()}
+	}
 	if jsonMode {
 		return printJSON(display, "config")
 	}
 	fmt.Printf("Local DB: %s\n", display.LocalDBPath)
+	if display.Ledger != nil {
+		fmt.Printf("Ledger: %s\nDevice: %s\n", display.Ledger.URL, display.Ledger.Device)
+	}
+	return 0
+}
+
+func localDeviceID() string {
+	db, st, openFail := openStore()
+	if openFail != nil {
+		return ""
+	}
+	defer db.Close()
+	device, err := st.DeviceID()
+	if err != nil {
+		return ""
+	}
+	return device
+}
+
+func runLedger(args []string) int {
+	if len(args) == 0 || isHelpArg(args[0]) {
+		printCommandHelp("ledger")
+		return 0
+	}
+	switch args[0] {
+	case "connect":
+		return runLedgerConnect(args[1:])
+	case "disconnect":
+		return runLedgerDisconnect(args[1:])
+	default:
+		return fail(wantsJSON(args[1:], nil), exitBadUsage, "unknown ledger command: "+args[0]+".", "Run 'ito ledger --help' to see available commands.")
+	}
+}
+
+// runLedgerConnect decides by what each side holds: an empty local store
+// pulls the whole Ledger; two populated sides merge by last-writer-wins only
+// under --force; a populated store against an empty Ledger waits for the
+// snapshot command. Once the policy passes the connection is recorded, then
+// the first Sync runs — so an interrupted one resumes with "ito sync" rather
+// than facing the policy again against a half-pulled store.
+func runLedgerConnect(args []string) int {
+	valueFlags := commandValueFlags("ledger connect")
+	if wantsHelp(args, valueFlags) {
+		printCommandHelp("ledger connect")
+		return 0
+	}
+	fs := flag.NewFlagSet("ledger connect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var url, token string
+	var force, jsonMode bool
+	fs.StringVar(&url, "url", "", "")
+	fs.StringVar(&token, "token", "", "")
+	fs.BoolVar(&force, "force", false, "")
+	fs.BoolVar(&jsonMode, "json", false, "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, valueFlags)
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, valueFlags), exitBadUsage, err.Error(), "run 'ito ledger connect --help' to see the accepted flags.")
+	}
+	if len(positionals) != 0 {
+		return fail(jsonMode, exitBadUsage, "ito ledger connect takes no positional arguments.", "pass the Ledger with --url and --token.")
+	}
+	if url == "" || token == "" {
+		return fail(jsonMode, exitBadUsage, "ito ledger connect needs both --url and --token.", "run 'ito ledger connect --help' to see the accepted flags.")
+	}
+
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the config: %v", err), "")
+	}
+	if cfg.Ledger != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("this Device is already connected to %s.", cfg.Ledger.URL), "run 'ito ledger disconnect' first to point it elsewhere.")
+	}
+	connection := itoconfig.Ledger{URL: url, Token: token}
+	l, err := openLedger(connection)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reach the Ledger: %v", err), "check the URL, the token and the network.")
+	}
+	if err := l.EnsureSchema(); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not prepare the Ledger: %v", err), "check the URL, the token and the network.")
+	}
+
+	db, st, openFail := openStore()
+	if openFail != nil {
+		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+	}
+	defer db.Close()
+	localEmpty, err := st.Empty()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not inspect the local store: %v", err), "try again or inspect the central store.")
+	}
+	head, err := l.ReadAfter(0, 1)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Ledger: %v", err), "check the URL, the token and the network.")
+	}
+	if code, message, hint := connectPolicy(localEmpty, len(head) == 0, force); code != 0 {
+		return fail(jsonMode, code, message, hint)
+	}
+
+	if err := st.ResetSync(); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reset the sync state: %v", err), "try again or inspect the central store.")
+	}
+	device, err := st.DeviceID()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Device identity: %v", err), "try again or inspect the central store.")
+	}
+	if err := itoconfig.Write(itoconfig.Config{Ledger: &connection}); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not write the config: %v", err), "check the ito home permissions and run 'ito ledger connect' again.")
+	}
+	result, err := st.Sync(l)
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("connected, but the first sync stopped after pushing %d and pulling %d Changes: %v", result.Pushed, result.Pulled, err), "run 'ito sync' to resume.")
+	}
+	if jsonMode {
+		return printJSON(connectResult{ledgerDisplay: ledgerDisplay{URL: url, Device: device}, Pushed: result.Pushed, Pulled: result.Pulled}, "connect result")
+	}
+	fmt.Printf("Connected to %s as Device %s; pushed %d, pulled %d.\n", url, device, result.Pushed, result.Pulled)
+	return 0
+}
+
+// connectPolicy is the state table of ito ledger connect; a zero code means
+// the connection may proceed.
+func connectPolicy(localEmpty, ledgerEmpty, force bool) (code int, message, hint string) {
+	switch {
+	case localEmpty:
+		return 0, "", ""
+	case ledgerEmpty:
+		return exitGeneric, "the local store already holds Issues and this is an empty Ledger; snapshotting a store into a Ledger is not available in this build.", "connect this Device to a Ledger that already holds the tracker, or start from an empty store."
+	case !force:
+		return exitGeneric, "both the local store and the Ledger already hold Issues.", "pass --force to merge them, keeping the later version of every row that both changed."
+	default:
+		return 0, "", ""
+	}
+}
+
+func runLedgerDisconnect(args []string) int {
+	if wantsHelp(args, nil) {
+		printCommandHelp("ledger disconnect")
+		return 0
+	}
+	fs := flag.NewFlagSet("ledger disconnect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var jsonMode bool
+	fs.BoolVar(&jsonMode, "json", false, "")
+	flagArgs, positionals := splitFlagsAndPositionals(args, nil)
+	if err := fs.Parse(flagArgs); err != nil {
+		return fail(wantsJSON(args, nil), exitBadUsage, err.Error(), "run 'ito ledger disconnect --help' to see the accepted flags.")
+	}
+	if len(positionals) != 0 {
+		return fail(jsonMode, exitBadUsage, "ito ledger disconnect takes no positional arguments.", "use only --json.")
+	}
+
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the config: %v", err), "")
+	}
+	if cfg.Ledger == nil {
+		return fail(jsonMode, exitGeneric, "no Ledger is connected.", "connect one with 'ito ledger connect --url <url> --token <token>'.")
+	}
+	url := cfg.Ledger.URL
+	if err := itoconfig.Write(itoconfig.Config{}); err != nil {
+		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not write the config: %v", err), "check the ito home permissions.")
+	}
+	if jsonMode {
+		return printJSON(disconnectResult{URL: url}, "disconnect result")
+	}
+	fmt.Printf("Disconnected from %s; the local store keeps every row.\n", url)
 	return 0
 }
 
@@ -1646,6 +1837,8 @@ func commandValueFlags(command string) map[string]struct{} {
 		return map[string]struct{}{"project": {}}
 	case "prune":
 		return map[string]struct{}{"project": {}, "status": {}}
+	case "ledger connect":
+		return map[string]struct{}{"url": {}, "token": {}}
 	default:
 		return nil
 	}
@@ -1725,7 +1918,7 @@ Commands:
   init     Registers or re-points the Project for the current directory.
   new      Creates an Issue in the current Project.
   list     Lists Issues.
-  config   Shows where the store lives.
+  config   Shows where the store lives and which Ledger is connected.
   batch    Manages Batches in the current Project.
   show     Shows an Issue by full ID.
   move     Moves an Issue to another status.
@@ -1734,6 +1927,7 @@ Commands:
   prune    Deletes Issues in bulk with an explicit filter.
   rename   Renames the current Project.
   sync     Exchanges Changes with the connected Ledger.
+  ledger   Connects this Device to a Ledger, or disconnects it.
 
 Every command takes --json and never prompts; failures exit non-zero (2 usage, 3 not found, 4 no Project here) with an actionable sentence on stderr. Bare "ito" in a TTY opens the TUI; "ito --version" prints the build.
 
@@ -1745,10 +1939,37 @@ func printCommandHelp(command string) {
 	case "config":
 		fmt.Println(`usage: ito config [--json]
 
-Shows the local database path.
+Shows the local database path and, when a Ledger is connected, its URL and this Device's identity. The token is never shown.
 
 Flags:
-  --json               Prints JSON.`)
+  --json               Prints {"local_db_path": ..., "ledger": {"url": ..., "device": ...} | null}.`)
+	case "ledger":
+		fmt.Println(`usage: ito ledger <connect|disconnect> [flags]
+
+Manages this Device's connection to a Ledger, the shared change log that machines sync through.
+
+Commands:
+  connect      Connects to a Turso Ledger and pulls the tracker it holds.
+  disconnect   Forgets the connection; the local store keeps every row.
+
+Use "ito ledger <command> --help" to see the command's flags.`)
+	case "ledger connect":
+		fmt.Println(`usage: ito ledger connect --url <url> --token <token> [--force] [--json]
+
+Connects this Device to the Turso-hosted Ledger at <url>, creating its tables when they do not exist yet. An empty local store pulls the whole tracker. When both the local store and the Ledger already hold Issues the command refuses unless --force is passed, which merges them keeping the later version of every row. The connection is recorded once those checks pass, then the first Sync runs ("ito sync" resumes it if interrupted); the token is stored in the config file with owner-only permissions.
+
+Flags:
+  --url <url>          The Ledger's libsql:// URL.
+  --token <token>      The auth token for that Ledger.
+  --force              Merges a populated local store with a populated Ledger.
+  --json               Prints {"url": ..., "device": ..., "pushed": n, "pulled": n}.`)
+	case "ledger disconnect":
+		fmt.Println(`usage: ito ledger disconnect [--json]
+
+Drops the Ledger connection from the config. Local rows stay; "ito sync" fails until a Ledger is connected again.
+
+Flags:
+  --json               Prints {"url": ...}.`)
 	case "sync":
 		fmt.Println(`usage: ito sync [--json]
 

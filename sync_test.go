@@ -93,13 +93,40 @@ func TestSyncReportsPushedAndPulledCounts(t *testing.T) {
 
 func captureStdout(t *testing.T, run func() int) (string, int) {
 	t.Helper()
+	stdout, _, code := captureOutput(t, run)
+	return stdout, code
+}
+
+// captureOutput runs an in-process command with stdout and stderr captured.
+func captureOutput(t *testing.T, run func() int) (stdout, stderr string, code int) {
+	t.Helper()
+	outReader, outWriter := pipe(t)
+	errReader, errWriter := pipe(t)
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = outWriter, errWriter
+	outDone := drain(outReader)
+	errDone := drain(errReader)
+	code = run()
+	os.Stdout, os.Stderr = oldStdout, oldStderr
+	outWriter.Close()
+	errWriter.Close()
+	stdout, stderr = <-outDone, <-errDone
+	outReader.Close()
+	errReader.Close()
+	return stdout, stderr, code
+}
+
+func pipe(t *testing.T) (*os.File, *os.File) {
+	t.Helper()
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := os.Stdout
-	os.Stdout = writer
-	done := make(chan string)
+	return reader, writer
+}
+
+func drain(reader *os.File) <-chan string {
+	done := make(chan string, 1)
 	go func() {
 		var b strings.Builder
 		buf := make([]byte, 4096)
@@ -112,10 +139,5 @@ func captureStdout(t *testing.T, run func() int) (string, int) {
 		}
 		done <- b.String()
 	}()
-	code := run()
-	os.Stdout = old
-	writer.Close()
-	output := <-done
-	reader.Close()
-	return output, code
+	return done
 }

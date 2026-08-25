@@ -47,6 +47,9 @@ type Entry struct {
 
 // Ledger is what a Device talks to during Sync.
 type Ledger interface {
+	// EnsureSchema prepares the Ledger for use; a Device calls it once, when
+	// it connects.
+	EnsureSchema() error
 	// Append stores the Changes in order and returns their positions. A Change
 	// the Ledger already holds (same Device and Sequence) keeps its position.
 	Append(changes []Change) ([]int64, error)
@@ -74,6 +77,8 @@ type Memory struct {
 func NewMemory() *Memory {
 	return &Memory{positions: make(map[deviceSequence]int64), counters: make(map[string]int64)}
 }
+
+func (m *Memory) EnsureSchema() error { return nil }
 
 func (m *Memory) Append(changes []Change) ([]int64, error) {
 	m.mu.Lock()
