@@ -191,6 +191,17 @@ func (s *Store) Sync(l ledger.Ledger) (SyncResult, error) {
 	return SyncResult{Pushed: pushed, Pulled: pulled}, nil
 }
 
+// Push sends the pending Changes to the Ledger without pulling; a writing
+// command calls it right after committing so the other Devices see the
+// mutation on their next Sync. Whatever fails stays pending for the next push.
+func (s *Store) Push(l ledger.Ledger) (int, error) {
+	device, err := s.DeviceID()
+	if err != nil {
+		return 0, err
+	}
+	return s.push(l, device)
+}
+
 // DeviceID returns this Device's stable identity, generating it on first use.
 func (s *Store) DeviceID() (string, error) {
 	tx, err := s.db.Begin()

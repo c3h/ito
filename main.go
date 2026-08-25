@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	itoconfig "github.com/c3h/ito/internal/config"
 	"github.com/c3h/ito/internal/ledger"
@@ -668,6 +669,59 @@ func runLedgerDisconnect(args []string) int {
 	return 0
 }
 
+// pushTimeout bounds how long a writing command waits for its push; a Ledger
+// that is slow or unreachable costs the command at most this much.
+var pushTimeout = 5 * time.Second
+
+// connectedLedger dials the Ledger the config names; connected is false when
+// none is configured.
+func connectedLedger() (l ledger.Ledger, connected bool, err error) {
+	cfg, err := itoconfig.Load()
+	if err != nil {
+		return nil, false, fmt.Errorf("could not read the config: %w", err)
+	}
+	if cfg.Ledger == nil {
+		return nil, false, nil
+	}
+	l, err = openLedger(*cfg.Ledger)
+	if err != nil {
+		return nil, true, fmt.Errorf("could not reach the Ledger: %w", err)
+	}
+	return l, true, nil
+}
+
+// pushAfterWrite sends the Changes a writing command just committed to the
+// connected Ledger, so the other Devices see them on their next Sync without
+// this one running "ito sync". It never alters the command's outcome: any
+// failure is one warning on stderr and the Changes stay pending. Without a
+// connected Ledger it does nothing.
+func pushAfterWrite(st *itostore.Store) {
+	// Dial and push run aside so nothing on the way to the Ledger can hold
+	// the command past the timeout. A push abandoned mid-flight is harmless:
+	// the Ledger deduplicates resends, and a Change only stops being pending
+	// once the local marking after a confirmed append succeeds.
+	done := make(chan error, 1)
+	go func() {
+		l, connected, err := connectedLedger()
+		if err == nil && connected {
+			_, err = st.Push(l)
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			warnPush(err.Error())
+		}
+	case <-time.After(pushTimeout):
+		warnPush(fmt.Sprintf("the push to the Ledger timed out after %s", pushTimeout))
+	}
+}
+
+func warnPush(cause string) {
+	fmt.Fprintf(os.Stderr, "warning: %s; the Changes stay pending until the next 'ito sync'.\n", cause)
+}
+
 func runSync(args []string) int {
 	if wantsHelp(args, nil) {
 		printCommandHelp("sync")
@@ -685,16 +739,12 @@ func runSync(args []string) int {
 		return fail(jsonMode, exitBadUsage, "ito sync takes no positional arguments.", "use only --json.")
 	}
 
-	cfg, err := itoconfig.Load()
+	l, connected, err := connectedLedger()
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the config: %v", err), "")
+		return fail(jsonMode, exitGeneric, err.Error(), "check the network and 'ito config'.")
 	}
-	if cfg.Ledger == nil {
+	if !connected {
 		return fail(jsonMode, exitGeneric, "no Ledger is connected, so there is nothing to sync with.", "connect one with 'ito ledger connect --url <url> --token <token>'.")
-	}
-	l, err := openLedger(*cfg.Ledger)
-	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reach the Ledger: %v", err), "check the network and 'ito config'.")
 	}
 
 	db, st, openFail := openStore()
@@ -777,6 +827,7 @@ func runBatchNew(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not create the Batch: %v", err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	return printCreatedBatch(created, jsonMode)
 }
 
@@ -862,6 +913,7 @@ func runBatchMove(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not move Batch %q: %v", name, err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	return printMovedBatch(moved, jsonMode)
 }
 
@@ -908,6 +960,7 @@ func runBatchRename(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not rename the Batch: %v", err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	return printRenamedBatch(oldName, renamed, jsonMode)
 }
 
@@ -948,6 +1001,7 @@ func runBatchRM(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete the Batch: %v", err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	return printDeletedBatch(deleted.Name, deleted.MembersCleared, jsonMode)
 }
 
@@ -1167,6 +1221,7 @@ func runRename(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not rename the project: %v", err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	return printProject(renamed, jsonMode)
 }
 
@@ -1257,6 +1312,7 @@ func runNew(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not create the Issue: %v", err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	return printIssue(created, jsonMode)
 }
 
@@ -1359,6 +1415,7 @@ func runMove(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not move Issue %q: %v", issueID, err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	if jsonMode {
 		return printIssueDetail(moved.Issue, true)
 	}
@@ -1526,6 +1583,7 @@ func runEdit(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not edit Issue %q: %v", issueID, err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	if jsonMode {
 		return printIssueDetail(edited.Issue, true)
 	}
@@ -1582,6 +1640,7 @@ func runRm(args []string) int {
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete Issue %q: %v", issueID, err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	if jsonMode {
 		return printJSON(deletedIssue{Deleted: 1, ID: issueID}, "removal")
 	}
@@ -1637,6 +1696,7 @@ func runPrune(args []string) int {
 	if err != nil {
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not delete Issues with status %q: %v", status, err), "try again or inspect the central store.")
 	}
+	pushAfterWrite(st)
 	if jsonMode {
 		return printJSON(deletedIssues{Deleted: deleted}, "removal")
 	}
@@ -1973,7 +2033,7 @@ Flags:
 	case "sync":
 		fmt.Println(`usage: ito sync [--json]
 
-Pushes this Device's pending Changes to the connected Ledger, then pulls and applies the ones it has not seen. Rows changed on two Devices converge to the later "updated". Prints how many Changes went each way; fails when no Ledger is connected.
+Pushes this Device's pending Changes to the connected Ledger, then pulls and applies the ones it has not seen. Rows changed on two Devices converge to the later "updated". Prints how many Changes went each way; fails when no Ledger is connected. Writing commands already push right after they commit, so a manual sync is mostly for pulling and for resending what a failed push left pending.
 
 Flags:
   --json               Prints {"pushed": n, "pulled": n}.`)

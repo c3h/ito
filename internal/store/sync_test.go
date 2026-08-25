@@ -875,3 +875,43 @@ func TestSyncThroughSQLLedgerUsesBoundedRoundTrips(t *testing.T) {
 		t.Fatalf("pull of %d Changes took %d statements, want at most 4", result.Pulled, counting.statements)
 	}
 }
+
+func TestPushSendsPendingChangesWithoutPulling(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	b := openSyncDevice(t, "b")
+
+	if _, err := b.st.CreateIssue(b.p, "Created on B", "todo", "medium", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.st.Sync(l); err != nil {
+		t.Fatal(err)
+	}
+	created, err := a.st.CreateIssue(a.p, "Created on A", "todo", "high", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A pushes its project and issue but pulls nothing from B.
+	pushed, err := a.st.Push(l)
+	if err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if pushed != 2 {
+		t.Fatalf("pushed = %d, want 2", pushed)
+	}
+	if issues, err := a.st.ListIssues(ListOptions{ProjectID: a.p.ID, Status: "todo"}); err != nil || len(issues) != 1 {
+		t.Fatalf("A must hold only its own issue after a push, got %d (%v)", len(issues), err)
+	}
+	if again, err := a.st.Push(l); err != nil || again != 0 {
+		t.Fatalf("second push = %d, %v; want 0 pending", again, err)
+	}
+
+	// B pulls A's issue without A ever running a full Sync.
+	if _, err := b.st.Sync(l); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.st.FindIssue(b.p, created.ID); err != nil {
+		t.Fatalf("issue pushed by A missing on B: %v", err)
+	}
+}
