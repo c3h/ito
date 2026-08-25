@@ -1,11 +1,13 @@
 # `ito` — Spec / PRD
 
-> **Status:** v1 and v2 implemented (CLI, TUI, Batches/Waves) · **Date:** 2026-07-22
+> **Status:** v1 and v2 implemented (CLI, TUI, Batches/Waves); local-first Sync through a Ledger (decision 0005) · **Date:** 2026-08-24
 > **Name:** **ito** — 糸 (*the thread that links the issues*) · 意図 (*intention/purpose*). "The thread of intentions." Binary: `ito`.
 
-A **local, solo, "full local"** issue tracker, Linear-style, for the terminal — with the twist of being **AI-driven through the command line**.
+A **local-first, solo** issue tracker, Linear-style, for the terminal — with the twist of being **AI-driven through the command line**. Every machine holds its own complete store; a person's machines share one tracker by syncing through a Ledger.
 
 > **Architectural turn (2026-05-24):** the source of truth moved from markdown-per-project to a **central SQLite**. See [`docs/adr/0001`](./docs/adr/0001-sqlite-single-source-of-truth.md).
+>
+> **Second turn (2026-08-24):** the store stays local on every Device, and Devices share state through an append-only **Ledger** during **Sync**. See [`docs/adr/0005`](./docs/adr/0005-local-first-store-with-change-log-sync.md).
 
 ---
 
@@ -19,7 +21,7 @@ The AI already makes it trivial to have an idea and plan it — what's missing i
 - It is **not** an AI agent orchestrator (≠ [contrabass](https://github.com/junhoyeo/contrabass), which runs multiple agents to execute work).
 - It is **not** multi-user / team (for now). One person's machines share a tracker by syncing Changes through a Ledger (decision 0005); nothing is real-time.
 - It does **not** embed an LLM or an API key.
-- It does **not** keep long-term history — issues are ephemeral.
+- It does **not** keep long-term history — issues are ephemeral. (The Ledger keeps the Change history it needs to rebuild a Device, not a history for people to browse.)
 
 ---
 
@@ -46,18 +48,21 @@ The AI is **external**. The tool does **not** expose MCP and does **not** embed 
 - **`--project <name>`** is an **optional** override (address from anywhere), on every command that doesn't already take a full ID. `--all-projects` widens `list` to every Project — it is a `list` flag, not a general scope axis. Neither is the default path.
 - **Moved/renamed repo:** the `root_path` stops matching → exit `4`, **but the Project and its issues remain**. `ito init` never asks anything; when there is a compatible detached Project, it prints an actionable sentence pointing to `ito init --reattach <name>`. Re-pointing is explicit and deterministic by `name` → zero loss with no interactive prompt.
 - **Why central:** issues accessible from **any cwd**; it solves the worktree problem (see ADR-0001) without versioning anything or scattering files.
-- Issues remain **local and ephemeral** — they don't go into git. (Trade-off: switching machines doesn't carry the issues.)
+- Issues remain **local and ephemeral** — they don't go into git. To carry them to another machine, connect both Devices to the same Ledger (§2.4); a machine without a Ledger is simply a local tracker.
 
 ### 2.4 Source of truth & write model
 - **SQLite is the source of truth.** Each issue is a **row**; the markdown body lives in a **TEXT column** (markdown preserved, not lost).
 - **Single writer:** the **CLI is the only writer**. Every create/edit goes through a command (`new`, `move`, `edit`, …). No Obsidian, no direct file editing.
 - Concurrent writes are serialized by SQLite itself. There is no async queue, daemon or job table: each command waits for the write lock, writes in a transaction and returns the real result. The store opens with a 5s `busy_timeout`, so a command blocked on the write lock waits up to that long before erroring; beyond it (or sooner) cancellation is done by the calling process (Ctrl-C/kill/external timeout).
 - **Why:** ready-made, tested **ACID** guarantees; single writer **eliminates the desync class of bug** that double writing created; a schema with migrations gives clean evolution (no frontmatter polluted over time).
+- **Local-first across Devices (decision 0005).** A Device is one machine with its own complete local store; Devices never talk to each other, only through the **Ledger** — a shared, append-only log of Changes hosted remotely (Turso today; the transport sits behind a two-method interface). Each mutation appends a **Change** (the row's full new state, or a tombstone, plus its `updated` and the originating Device) to a local log in the same transaction as the write, so the log can never disagree with the store.
+- **Sync** is a batch exchange, never real-time: the Device pushes the Changes the Ledger has not seen, then pulls and applies the ones it has not seen. When two Devices changed the same row, the later `updated` wins (per row, last-writer-wins) — enough for one person who never writes on two machines at the same moment. It runs manually (`ito sync`), in the background when the TUI opens or refreshes, and as a short, bounded push right after every writing command — there a network failure is a **warning**, never an error, and the Changes stay pending for the next Sync. Reads, edits, moves, search and Batches never touch the network.
+- **Connecting** is explicit (`ito ledger connect`, §6.4): an empty store pulls the whole tracker from the Ledger; a populated store against an empty Ledger snapshots itself into it, so the next Device can bootstrap from there. Disconnecting keeps every local row.
 - **Accepted trade-off (ADR-0001):** you lose Obsidian and file editing by the agent. **Markdown export** stays as a future feature (snapshot).
 
 ### 2.5 Identifiers
 - **Prefix** per project, **unique within the store**, chosen at `init` (overridable with `--prefix`). The default is derived from the folder name by the **"strip-and-cap"** rule: transliterate unicode→ASCII, uppercase, keep only `[A-Z0-9]`, **cap at ~6 chars**, ensure it starts with a letter (fallback `ITO`). E.g.: `my-cool-project` → `MYCOOL`. Since `init` **cannot ask** (agent-native), on a collision it **auto-suffixes** (`API`→`API2`) and prints the chosen one. In v1, the Prefix is immutable after `init`; `ito rename <name>` changes only the `Project name`. A manual prefix (`--prefix`) must be valid as `[A-Z][A-Z0-9]{1,7}` (2 to 8 chars); if it collides, it fails with exit `2`. Auto-suffixing applies only to a generated default, never to a manual prefix.
-- **Monotonic counter** per project, **transactional** in the database. **Never reused**: deleting `AUTH-12` does not make the next one go back to 12. Single writer + transaction make this trivial even with concurrent commands — **no reconciliation**.
+- **Monotonic counter** per project, **transactional** in the database. **Never reused**: deleting `AUTH-12` does not make the next one go back to 12. Single writer + transaction make this trivial even with concurrent commands — **no reconciliation**. With a Ledger connected, `ito new` **reserves the number from the Ledger** (one round-trip per creation), so numbering stays sequential across Devices and an ID never changes once a branch name or a commit references it; an unreachable Ledger fails the command and creates nothing. Creating an Issue is the one write that needs the network.
 - Since the Prefix is unique within the store, the textual ID (`AUTH-12`) identifies a single Issue globally. Commands that take a full ID (`show`, `move`, `edit`, `rm`) resolve the Project by the Prefix of the ID and work from any cwd. If `--project` is passed alongside and points to another Project, the command fails with exit `2`. v1 does not accept short IDs (`12`); every Issue reference in a command uses the full `<PREFIX>-<n>` format.
 
 ### 2.6 Footprint invariant
@@ -139,6 +144,8 @@ Semantics of the early stages: `backlog` = work that's mapped or still subject t
 ```
 ~/.ito/
   ito.db        # SQLite: projects, issues, links, prefix counters (advisory once a Ledger is connected: numbers come from the Ledger)
+                # plus the local change log and per-Device sync state (decision 0005)
+  config.json   # written by the first-run choice or 'ito ledger connect'; holds the Ledger URL, this Device's identity and the token (0600) — or nothing, for a local-only Device
 ```
 (override with `ITO_HOME`.)
 
@@ -211,6 +218,11 @@ CREATE TABLE issue_labels (
   FOREIGN KEY (project_id, issue_id) REFERENCES issues(project_id, id) ON DELETE CASCADE
 );
 -- Labels are global and fixed in v1; the CLI validates the vocabulary before writing.
+
+-- Decision 0005: every mutation also appends to a local change log in the same
+-- transaction; sync_state records how far this Device has pushed and pulled.
+CREATE TABLE changes (...);      -- kind, key, full row state or tombstone, updated, device
+CREATE TABLE sync_state (...);   -- last pushed / pulled Ledger position
 ```
 
 ---
@@ -238,6 +250,8 @@ CREATE TABLE issue_labels (
 | `ito show <ID>`     | Shows an issue (fields + body + links). `--json`. |
 | `ito move <ID> <status>` | Status transition (validates only the target, §3.2); stamps `updated` only when the Status changes. |
 | `ito rm <ID>` / `ito prune` | Destructively deletes an issue / deletes in bulk; `prune` requires `--status <s>` and `--yes`. |
+| `ito config`        | Shows where the store lives and, when a Ledger is connected, its URL and this Device's identity — never the token. |
+| `ito sync` / `ito ledger …` | Sync with the connected Ledger; connect or disconnect this Device (§6.4). |
 
 Principles: every v1 command has `--json`; no command blocks waiting for interactive input (bare `ito` on a TTY with no config is the one exception, §TUI). Commands with a full ID resolve the Project by the Prefix of the ID; commands without a full ID resolve by the cwd, unless `--project` (or, on `list`, `--all-projects`). v1 full-text search uses SQLite FTS5 over `title` + `body`, not over ID or metadata. `--search <text>` treats the input as a simple search: the CLI splits it into terms and searches by prefix (`login oauth` → `login* oauth*`), without exposing the advanced FTS5 syntax. `list` filters combine with AND; `--status all` means no status filter and still AND-combines with every other filter. Repeated `--label` flags are also AND: `--label feature --label infra` returns Issues that have both Labels. `--category` and `--triage-state` combine with the same AND semantics. `--ready` is a computed filter (it evaluates each Issue's blockers, counting a blocker as satisfied only when `done`); it AND-combines with the rest, so a contradictory combination like `--ready --status in_progress` returns an empty set, not an error.
 
@@ -303,6 +317,17 @@ The Batch CRUD is the CLI's **first noun namespace** — the top level stays Iss
 
 Membership travels on the existing Issue commands: `ito new --batch <name>`, `ito edit <ID> --batch <name>` (and `--batch ""` to leave), `ito list --batch <name>` (AND-combines with the other filters; `--batch <name> --ready` = the current Wave). `ito batch move` is only bulk status convenience over member Issues, not a stored Batch status or close command. `--block`/`--unblock`/`--relate`/`--unrelate` gain `--conflict`/`--unconflict` siblings for the new link type. Everything keeps `--json`; `conflicts_with` and `batch` are part of the canonical issue object (§6.2) under the same stable-shape rule — `batch` is `null` outside a Batch, never omitted.
 
+### 6.4 Ledger surface (decision 0005)
+The second noun namespace: `ito ledger <verb>` manages this Device's connection; `ito sync` is a top-level verb because it is the everyday action.
+
+| Command                      | Does                                                          |
+|------------------------------|---------------------------------------------------------------|
+| `ito ledger connect --url <url> --token <token>` | Connects this Device to the Turso-hosted Ledger, creating its tables when missing. An empty local store pulls the whole tracker; a populated store against an empty Ledger snapshots every Project, Issue, Link, Label and Batch into it (validated by per-kind row counts before the connection is recorded). When both sides already hold Issues it refuses unless `--force`, which merges them keeping the later version of every row. The token is written to `config.json` with owner-only permissions. |
+| `ito ledger disconnect`      | Drops the connection from the config. Local rows stay; `ito sync` fails until a Ledger is connected again. |
+| `ito sync`                   | Pushes pending Changes, then pulls and applies the unseen ones; prints how many went each way (`--json` → `{"pushed": n, "pulled": n}`). Fails with exit `1` when no Ledger is connected. |
+
+Writing commands push right after they commit, so a manual `ito sync` is mostly for pulling what another Device wrote and for resending what a failed push left pending. None of these commands prompt; the only interactive path is the first run of bare `ito` on a TTY (§TUI), which offers the same connection.
+
 ---
 
 ## 7. Build phases
@@ -321,7 +346,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 - **Read:** the rows/columns render Issues (one line each, `…`-truncated) plus a read-only detail view (fields + body + links). This is the cheap, high-value half — it reuses the core's read path entirely.
 - **Edit (minimal):** Status (move), Priority (cycle), Labels (toggle). Nothing else. Reached through the always-visible keys (`s`) and, for the rarer edits (`p`, `l`), the issue view and the `:` command line.
 - **Filter & command line (inline, no separate screen):** `/` narrows the current surface to matching Issues live as you type (read-only); `:` is a closed launcher over the **v2 action set only** — Status/Priority/Labels, open the Board, switch Project, refresh, quit — never create or edit title/body/links (those are v3). Both turn the bottom shortcut bar into a text input; `esc` leaves the field.
-- **Refresh:** manual, via a key (`r`), and **global** — the model holds one snapshot of the Project, so a refresh from any view re-reads every surface at once and switching tabs never lands on a stale one. The TUI's own edits reload immediately; `r` pulls in what the agent wrote from another process, then opportunistically checks GitHub PRs in the background: every non-`done` Issue with a registered branch is matched — an open PR advances it to `in_review`, while a merged or closed PR moves it to `done` (`done` is final and never demoted). GitHub CLI failures are silent and never block the local refresh. No polling, no file-watching.
+- **Refresh:** manual, via a key (`r`), and **global** — the model holds one snapshot of the Project, so a refresh from any view re-reads every surface at once and switching tabs never lands on a stale one. The TUI's own edits reload immediately; `r` pulls in what the agent wrote from another process, syncs with the connected Ledger in the background (as the TUI also does when it opens), then opportunistically checks GitHub PRs in the background: every non-`done` Issue with a registered branch is matched — an open PR advances it to `in_review`, while a merged or closed PR moves it to `done` (`done` is final and never demoted). GitHub CLI failures are silent and never block the local refresh. No polling, no file-watching.
 - **Batches `[2]` (extension, settled 2026-06-12):** a surface beside the Digest in the header tabs — **one screen, no drill-in**. Each Batch **with open work** renders as a Digest-style section (focus bar, name, derived progress, its `created` date dim at the right end of the rule), newest-first; its open members group under quiet **Wave** sub-headings (`WAVE n · READY/WAITING`), members gated outside the Batch follow in their own non-numbered waiting group, and done members live in the heading's progress count. Rows are Digest rows (priority mark, id, title, `⊘` group and labels right-aligned); a `conflicts_with` partner shows as a second `⊘` in its own colour next to the blocked marker. Same selection/focus model as the Digest (`tab` focuses a Batch, `↑↓` selects, `h` hides the focused Batch), same minimal edits (`s`, `p`, `l`), same `/` filter; `enter` opens the Issue detail. It reuses the section machinery the Digest already pays for; the genuinely new cost is the wave derivation, which lives in the core and also feeds the CLI (§6.3). Assigning Issues to Batches stays **out of the v2 TUI** (CLI only) — membership editing joins title/body/links in v3.
 - **Keeping the Batches surface bounded (settled 2026-07-22):** Batches accumulate forever while the terminal does not grow, so completed work must cost a constant, not a section each. **Every fully done Batch rolls into one `completed` section at the foot of the surface**, collapsed by default and revealing one quiet line per Batch (name, member count, `created` date) — the Batches equivalent of the Digest's single hidden `done` section. Nothing is lost: a fully done Batch lists no open members, so it never had a body to expand. Two rules follow from the same reasoning. A **collapsed Batch costs one line, not two** — the Digest can spend a blank under every hidden heading because it has five fixed sections; a surface that grows a section per Batch cannot. And an expanded Batch spends its line budget on **Issue rows before Wave headings**: under pressure the headings step aside, because a `WAVE n` heading over no rows says nothing, and the `↑/↓ N more` markers are part of the budget so a truncated body never looks complete. Ordering follows: Batches with open work come first (newest-first among themselves), the completed rollup last — date is chronology, but the surface exists to show what is still moving. *Not built:* reaching a completed Batch's historical Waves from the TUI (`ito batch show --include-done` covers it from the CLI), and windowing the sections themselves — the rollup bounds the completed ones, and many simultaneously open Batches is not yet a real shape.
 - **Build order & escape hatch:** the **Digest ships first** (it is the default and pays for the shared core); the **Board follows within v2** as the second renderer. Its only genuinely new cost is the responsive horizontal layout (budgeting column widths to the terminal, sliding across columns when the five don't fit). If that layout proves costly, the **Board slips to v3** — the shared core is already built either way.
@@ -344,6 +369,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 3. The agent generates the issues: runs `ito new` N times (body via `--body`/stdin). **This is where traceability begins.**
 4. You visualize it in the terminal (`list`/TUI) — from any worktree of the project.
 5. As you finish, you mark `done`; whenever you want, `prune`.
+6. On a second machine, `ito ledger connect` (or the first-run prompt of bare `ito`) pulls the same tracker; from then on every command works locally and Sync carries the Changes across.
 
 ---
 
@@ -372,7 +398,7 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 | 4 | Source of truth | **SQLite, single writer.** Body in a TEXT column. *(ADR-0001 — reverts markdown/frontmatter.)* |
 | 5 | Hierarchy | **v1 = flat issues, no `parent`/`type`/epic** (YAGNI). Only flat `blocked_by`/`relates_to` links. Hierarchy later via migration. |
 | 6 | Status | Fixed: backlog/todo/in_progress/in_review/done + categories. `move` validates only the target. |
-| 7 | ID | Prefix at init + **transactional** monotonic counter. Never reused, no reconciliation. |
+| 7 | ID | Prefix at init + **transactional** monotonic counter. Never reused, no reconciliation. With a Ledger, numbers are reserved from it so they stay sequential across Devices. |
 | 8 | Fields | `title`/`status`/`priority`/`category`/`triage_state`/`labels`/`body` + links. No `owner`, no `type`/`parent` (v1). `created`/`updated` = timestamp columns. |
 | 9 | Writing | **Single writer: the CLI only.** No Obsidian/file editing. *(ADR-0001 — reverts double writing.)* |
 | 10 | Footprint | The CLI **never writes in the repo** — only in `~/.ito/`. |
@@ -386,3 +412,4 @@ A navigable TUI (Bubble Tea) **on top of the same core** — primarily an accomp
 | 18 | Mutual exclusion | Third link type **`conflicts_with`** (symmetric): "not in parallel". Honoured by Waves and by `--ready` (deterministic winner — Priority, then ID — preserves the frontier's independence property). |
 | 19 | Batch CLI | First noun namespace: `ito batch new/list/show/move/rename/rm`; membership via `--batch` on `new`/`edit`/`list`; `batch move` bulk-moves member Issue statuses and `batch rm` never deletes Issues. |
 | 20 | Batch TUI | Second tab `[2]`, one screen: each Batch a Digest-style section (newest first, `created` at the rule's right end), members grouped by Wave sub-headings; no drill-in. Membership editing deferred to v3. |
+| 21 | Machines | **Local-first + Ledger** (ADR-0005): every Device keeps its own complete SQLite; Devices sync in batches through an append-only Ledger, per-row last-writer-wins on `updated`; `ito new` reserves numbers from the Ledger. Never real-time; the remote is a transport, not a store. |
