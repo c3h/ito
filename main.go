@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -665,7 +664,7 @@ func connectLedger(url, token string, force bool) (connectResult, *commandFailur
 
 	db, st, openFail := openStore()
 	if openFail != nil {
-		return connectResult{}, &commandFailure{openFail.code, openFail.message, openFail.hint}
+		return connectResult{}, openFail
 	}
 	defer db.Close()
 	localEmpty, err := st.Empty()
@@ -676,8 +675,8 @@ func connectLedger(url, token string, force bool) (connectResult, *commandFailur
 	if err != nil {
 		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the Ledger: %v", err), "check the URL, the token and the network."}
 	}
-	if code, message, hint := connectPolicy(localEmpty, len(head) == 0, force); code != 0 {
-		return connectResult{}, &commandFailure{code, message, hint}
+	if policyFail := connectPolicy(localEmpty, len(head) == 0, force); policyFail != nil {
+		return connectResult{}, policyFail
 	}
 
 	if err := st.ResetSync(); err != nil {
@@ -705,26 +704,25 @@ const firstRunHint = "connect to an existing Ledger with 'ito ledger connect --u
 // empty or joins an existing Ledger; either answer leaves a config behind so
 // the question is asked once. This is the only prompt in ito (decision 0005).
 func firstRun() int {
-	in := bufio.NewReader(stdin)
 	fmt.Println("This machine has no ito config yet.")
 	fmt.Println("  1) Start empty — a local store on this machine")
 	fmt.Println("  2) Connect to an existing Ledger — pull the tracker from Turso")
-	choice, err := promptLine(in, "Choose [1/2]: ")
+	choice, err := promptLine("Choose [1/2]: ")
 	if err != nil {
 		return fail(false, exitBadUsage, "no choice was made.", firstRunHint)
 	}
 	switch choice {
-	case "1", "":
+	case "1":
 		if err := itoconfig.Write(itoconfig.Config{}); err != nil {
 			return fail(false, exitGeneric, fmt.Sprintf("could not write the config: %v", err), "check the ito home permissions.")
 		}
 		return 0
 	case "2":
-		url, err := promptLine(in, "Ledger URL: ")
+		url, err := promptLine("Ledger URL: ")
 		if err != nil || url == "" {
 			return fail(false, exitBadUsage, "no Ledger URL was given.", firstRunHint)
 		}
-		token, err := promptSecret(in, "Ledger token: ")
+		token, err := promptSecret("Ledger token: ")
 		if err != nil || token == "" {
 			return fail(false, exitBadUsage, "no Ledger token was given.", firstRunHint)
 		}
@@ -739,39 +737,52 @@ func firstRun() int {
 	}
 }
 
-func promptLine(in *bufio.Reader, prompt string) (string, error) {
+// promptLine reads one line byte by byte so nothing past it is buffered away
+// from stdin: promptSecret then reads the same terminal through its fd.
+func promptLine(prompt string) (string, error) {
 	fmt.Print(prompt)
-	line, err := in.ReadString('\n')
-	if err != nil && line == "" {
-		return "", err
+	var line []byte
+	buf := make([]byte, 1)
+	for {
+		n, err := stdin.Read(buf)
+		if n == 1 && buf[0] == '\n' {
+			break
+		}
+		line = append(line, buf[:n]...)
+		if err != nil {
+			if len(line) == 0 {
+				return "", err
+			}
+			break
+		}
 	}
-	return strings.TrimSpace(line), nil
+	return strings.TrimSpace(string(line)), nil
 }
 
 // promptSecret reads without echo when stdin is a real terminal, so the token
 // never lands in the scrollback; any other reader is read as a plain line.
-func promptSecret(in *bufio.Reader, prompt string) (string, error) {
+func promptSecret(prompt string) (string, error) {
 	if f, ok := stdin.(*os.File); ok && isTerminal(f.Fd()) {
 		fmt.Print(prompt)
 		secret, err := term.ReadPassword(f.Fd())
 		fmt.Println()
 		return strings.TrimSpace(string(secret)), err
 	}
-	return promptLine(in, prompt)
+	return promptLine(prompt)
 }
 
-// connectPolicy is the state table of ito ledger connect; a zero code means
-// the connection may proceed.
-func connectPolicy(localEmpty, ledgerEmpty, force bool) (code int, message, hint string) {
+// connectPolicy is the state table of ito ledger connect; nil means the
+// connection may proceed.
+func connectPolicy(localEmpty, ledgerEmpty, force bool) *commandFailure {
 	switch {
 	case localEmpty:
-		return 0, "", ""
+		return nil
 	case ledgerEmpty:
-		return exitGeneric, "the local store already holds Issues and this is an empty Ledger; snapshotting a store into a Ledger is not available in this build.", "connect this Device to a Ledger that already holds the tracker, or start from an empty store."
+		return &commandFailure{exitGeneric, "the local store already holds Issues and this is an empty Ledger; snapshotting a store into a Ledger is not available in this build.", "connect this Device to a Ledger that already holds the tracker, or start from an empty store."}
 	case !force:
-		return exitGeneric, "both the local store and the Ledger already hold Issues.", "pass --force to merge them, keeping the later version of every row that both changed."
+		return &commandFailure{exitGeneric, "both the local store and the Ledger already hold Issues.", "pass --force to merge them, keeping the later version of every row that both changed."}
 	default:
-		return 0, "", ""
+		return nil
 	}
 }
 
@@ -2154,7 +2165,7 @@ Commands:
   sync     Exchanges Changes with the connected Ledger.
   ledger   Connects this Device to a Ledger, or disconnects it.
 
-Every command takes --json and never prompts; failures exit non-zero (2 usage, 3 not found, 4 no Project here) with an actionable sentence on stderr. Bare "ito" in a TTY opens the TUI — on a machine with no config it first asks once whether to start empty or connect to a Ledger; outside a TTY that question becomes an error naming "ito ledger connect". "ito --version" prints the build.
+Every command takes --json and never prompts; failures exit non-zero (2 usage, 3 not found, 4 no Project here) with an actionable sentence on stderr. Bare "ito" in a TTY opens the TUI, and is the one place that asks: on a machine with no config it first offers, once, to start empty or connect to a Ledger; outside a TTY that question becomes an error naming "ito ledger connect". "ito --version" prints the build.
 
 Use "ito <command> --help" to see the command's flags.`)
 }
