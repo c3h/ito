@@ -15,6 +15,7 @@ import (
 	"time"
 
 	itostore "github.com/c3h/ito/internal/store"
+	"github.com/c3h/ito/internal/tui"
 	_ "modernc.org/sqlite"
 )
 
@@ -332,7 +333,7 @@ func TestBareITOWithTTYLaunchesTUIWithStoreAndResolvedProject(t *testing.T) {
 	}
 	var gotStore *itostore.Store
 	var gotProject itostore.Project
-	runTUI = func(st *itostore.Store, project itostore.Project) error {
+	runTUI = func(st *itostore.Store, project itostore.Project, _ tui.Options) error {
 		gotStore = st
 		gotProject = project
 		return nil
@@ -379,7 +380,7 @@ func TestBareITOWithTTYLaunchesTUIWithoutProjectWhenCWDIsUnregistered(t *testing
 	}
 	var gotStore *itostore.Store
 	var gotProject itostore.Project
-	runTUI = func(st *itostore.Store, project itostore.Project) error {
+	runTUI = func(st *itostore.Store, project itostore.Project, _ tui.Options) error {
 		gotStore = st
 		gotProject = project
 		return nil

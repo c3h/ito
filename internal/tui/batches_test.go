@@ -28,7 +28,7 @@ func TestBatchesKeySwitchesSurfaceAndHeaderTabs(t *testing.T) {
 		t.Fatalf("create member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	batches := current.View()
 	if !strings.Contains(batches, "ito · [1] digest · [2] batches") {
 		t.Fatalf("expected batches header tab set, got:\n%s", batches)
@@ -97,7 +97,7 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 		t.Fatalf("block member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	newerAt := strings.Index(view, "newer-effort  (3)")
@@ -167,7 +167,7 @@ func TestBatchesRendersMembersBlockedOutsideTheBatchAsWaitingGroup(t *testing.T)
 		t.Fatalf("block member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "WAITING · BLOCKED OUTSIDE THE BATCH  (1)") || !strings.Contains(view, member.ID+" Batch member") {
@@ -203,7 +203,7 @@ func TestBatchesCountsDoneInHeadingAndCollapsesFullyDoneBatch(t *testing.T) {
 		t.Fatalf("create shipped member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "mixed-effort  (2) · 1/2 done · wave 1/1") {
@@ -253,7 +253,7 @@ func TestBatchesRollUpCompletedBatchesIntoOneSection(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	current, _ = current.Update(keyMsg(t, "2"))
 	view := current.View()
 
@@ -312,7 +312,7 @@ func TestBatchesOrderOpenWorkBeforeCompletedBatches(t *testing.T) {
 		t.Fatalf("create done member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 	openAt := strings.Index(view, "older-open")
 	rollupAt := strings.Index(view, "completed  (1)")
@@ -350,7 +350,7 @@ func TestBatchesRowsShowConflictPartnerAsSecondMarker(t *testing.T) {
 		t.Fatalf("link conflict: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "WAVE 1 · READY  (1)") || !strings.Contains(view, "WAVE 2 · WAITING  (1)") {
@@ -395,7 +395,7 @@ func TestBatchesCyclicBatchRendersCycleLineInsteadOfWaves(t *testing.T) {
 		t.Fatalf("link second: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "cyclic-effort  (2) · 0/2 done") {
@@ -422,7 +422,7 @@ func TestBatchesEmptyProjectShowsActionableHint(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 
 	if !strings.Contains(view, "0 batches   batch-empty-app") {
@@ -460,7 +460,7 @@ func TestBatchesWindowsRowsToTerminalHeight(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 12})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 88, Height: 12})
 	current, _ = current.Update(keyMsg(t, "2"))
 	small := current.View()
 	if !strings.Contains(small, "↓ ") || !strings.Contains(small, " more") {
@@ -498,7 +498,7 @@ func TestBatchesTabCyclesFocusAcrossBatches(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
 	if !strings.Contains(view, " ▌▾ newer-effort") || strings.Contains(view, " ▌▾ older-effort") {
 		t.Fatalf("expected the newest Batch to wear the initial focus bar, got:\n%s", view)
@@ -556,7 +556,7 @@ func TestBatchesUpDownMovesSelectionAcrossWavesClamped(t *testing.T) {
 		t.Fatalf("block tail: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
 		t.Fatalf("expected the selection cursor on the first listed row, got:\n%s", view)
 	}
@@ -626,7 +626,7 @@ func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
 		t.Fatalf("create head second: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
 		t.Fatalf("expected the cursor on the newest Batch's first row, got:\n%s", view)
 	}
@@ -697,7 +697,7 @@ func TestBatchesSelectionLandsOnCollapsedBatchToReveal(t *testing.T) {
 	}
 
 	// Collapse the older Batch, then return focus to the newer one.
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "h"))
 	current, _ = current.Update(keyMsg(t, "tab"))
@@ -744,7 +744,7 @@ func TestBatchesSelectionSurvivesRefreshWhenIssueStillRenders(t *testing.T) {
 		t.Fatalf("create beta: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "down"))
 	if view := current.View(); !strings.Contains(view, "▸ ◆ "+beta.ID) {
 		t.Fatalf("expected the selection on beta before the refresh, got:\n%s", view)
@@ -792,7 +792,7 @@ func TestBatchesHideTogglesFocusedBatchAndInteropsWithDefaultCollapse(t *testing
 		t.Fatalf("create open member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "h"))
 	view := current.View()
 	if !strings.Contains(view, "▸ open-effort  (1)") || !strings.Contains(view, "h to show") {
@@ -843,7 +843,7 @@ func TestBatchesEnterOpensIssueDetailAndEscReturnsInPlace(t *testing.T) {
 		t.Fatalf("create second member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "down"))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	if view := current.View(); !strings.Contains(view, "ito · "+second.ID+" · Open me second") {
@@ -898,7 +898,7 @@ func TestBatchesStatusKeyRederivesWavesAndCollapsesCompletedBatch(t *testing.T) 
 		t.Fatalf("block docs: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	if view := current.View(); !strings.Contains(view, "WAVE 2 · WAITING") {
 		t.Fatalf("expected the blocked member on Wave 2 before the edit, got:\n%s", view)
 	}
@@ -958,7 +958,7 @@ func TestBatchesCommandLineRunsPriorityAndLabelsOnSelectedMember(t *testing.T) {
 		t.Fatalf("create member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, ":"))
 	for _, r := range "priority" {
 		current, _ = current.Update(runeMsg(r))
@@ -1028,7 +1028,7 @@ func TestBatchesInlineFilterNarrowsRowsWithCounts(t *testing.T) {
 		t.Fatalf("create other member: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "2"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "/"))
 	for _, r := range "bug" {
 		current, _ = current.Update(runeMsg(r))
@@ -1070,7 +1070,7 @@ func TestRefreshReloadsEverySurfaceFromAnyView(t *testing.T) {
 		t.Fatalf("create batch: %v", err)
 	}
 
-	var current tea.Model = newModel(st, project)
+	var current tea.Model = newModel(st, project, Options{})
 	// A write from outside the TUI — another agent or a CLI run.
 	if _, err := st.CreateIssueInBatch(project, "Written elsewhere", "todo", "high", nil, "", "shared-effort"); err != nil {
 		t.Fatalf("create outside member: %v", err)
@@ -1138,7 +1138,7 @@ func TestBatchesTightHeightSpendsLinesOnRowsNotWaveHeadings(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	current, _ = current.Update(keyMsg(t, "2"))
 	view := current.View()
 
@@ -1184,7 +1184,7 @@ func TestBatchesCollapsedBatchCostsOneLine(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 	current, _ = current.Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "h"))
 	current, _ = current.Update(keyMsg(t, "tab"))

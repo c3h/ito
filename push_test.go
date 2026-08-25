@@ -10,6 +10,7 @@ import (
 	itoconfig "github.com/c3h/ito/internal/config"
 	"github.com/c3h/ito/internal/ledger"
 	itostore "github.com/c3h/ito/internal/store"
+	"github.com/c3h/ito/internal/tui"
 )
 
 // connectedHome prepares an ITO_HOME whose config points at the test Ledger
@@ -189,5 +190,51 @@ func TestReadOnlyCommandsNeverDialTheLedger(t *testing.T) {
 		if _, stderr, code := captureOutput(t, func() int { return runCLI(args) }); code != 0 {
 			t.Fatalf("%v exit = %d\nstderr: %s", args, code, stderr)
 		}
+	}
+}
+
+func TestBareITOHandsTheTUIASyncOnlyWithALedgerConnected(t *testing.T) {
+	oldIsTerminal, oldRunTUI := isTerminal, runTUI
+	t.Cleanup(func() {
+		isTerminal = oldIsTerminal
+		runTUI = oldRunTUI
+	})
+	isTerminal = func(uintptr) bool { return true }
+	var gotSync bool
+	var result itostore.SyncResult
+	var syncErr error
+	// The store closes with runCLI, so the sync runs where the TUI would run it.
+	runTUI = func(_ *itostore.Store, _ itostore.Project, opts tui.Options) error {
+		gotSync = opts.Sync != nil
+		if gotSync {
+			result, syncErr = opts.Sync()
+		}
+		return nil
+	}
+
+	itoHome := t.TempDir()
+	t.Setenv("ITO_HOME", itoHome)
+	createLocalIssue(t, itoHome)
+	if code := runCLI(nil); code != 0 {
+		t.Fatalf("bare ito exit = %d", code)
+	}
+	if gotSync {
+		t.Fatal("the TUI got a sync without a Ledger connected")
+	}
+
+	connectedHome(t)
+	stub := &stubLedger{Memory: ledger.NewMemory()}
+	useStubLedger(t, stub)
+	if code := runCLI(nil); code != 0 {
+		t.Fatalf("bare ito exit = %d", code)
+	}
+	if !gotSync {
+		t.Fatal("the TUI got no sync with a Ledger connected")
+	}
+	if syncErr != nil {
+		t.Fatalf("sync: %v", syncErr)
+	}
+	if result.Pushed == 0 {
+		t.Fatal("the sync pushed nothing, so it never reached the Ledger")
 	}
 }

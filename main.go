@@ -415,7 +415,7 @@ func runCLI(args []string) int {
 			}
 			p = project{}
 		}
-		if err := runTUI(st, p); err != nil {
+		if err := runTUI(st, p, tui.Options{Sync: tuiSync(st)}); err != nil {
 			return fail(false, exitGeneric, fmt.Sprintf("could not run the TUI: %v", err), "try again from an interactive terminal.")
 		}
 		return 0
@@ -667,6 +667,45 @@ func runLedgerDisconnect(args []string) int {
 	}
 	fmt.Printf("Disconnected from %s; the local store keeps every row.\n", url)
 	return 0
+}
+
+// syncTimeout bounds how long the TUI's background sync may run before the
+// indicator gives up on it; a Ledger that answers later is only abandoned.
+var syncTimeout = 30 * time.Second
+
+// tuiSync is the background sync the TUI runs on launch and on refresh, or nil
+// when no Ledger is connected so the TUI never dials anything. Reading the
+// config here keeps the decision cheap; the dial itself waits for the sync.
+// Like pushAfterWrite, the sync runs aside and is abandoned on timeout — the
+// Ledger deduplicates resends, so the next sync resumes cleanly. A sync still
+// running when the TUI quits meets a closed store and fails the same way.
+func tuiSync(st *itostore.Store) tui.SyncFunc {
+	cfg, err := itoconfig.Load()
+	if err != nil || cfg.Ledger == nil {
+		return nil
+	}
+	return func() (itostore.SyncResult, error) {
+		type outcome struct {
+			result itostore.SyncResult
+			err    error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			l, _, err := connectedLedger()
+			if err != nil {
+				done <- outcome{err: err}
+				return
+			}
+			result, err := st.Sync(l)
+			done <- outcome{result, err}
+		}()
+		select {
+		case o := <-done:
+			return o.result, o.err
+		case <-time.After(syncTimeout):
+			return itostore.SyncResult{}, fmt.Errorf("the Ledger did not answer within %s", syncTimeout)
+		}
+	}
 }
 
 // pushTimeout bounds how long a writing command waits for its push; a Ledger

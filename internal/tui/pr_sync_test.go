@@ -56,7 +56,7 @@ func TestPRSyncMessageAppliesMovesReloadsAndShowsNote(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	updated, _ := newModel(st, project).Update(prSyncMsg{
+	updated, _ := newModel(st, project, Options{}).Update(prSyncMsg{
 		Project: project,
 		Moves:   []issueStatusMove{{ID: issue.ID, Status: "in_review"}},
 	})
@@ -71,7 +71,7 @@ func TestPRSyncMessageAppliesMovesReloadsAndShowsNote(t *testing.T) {
 	if reloaded, ok := model.issueInSections(issue.ID); !ok || reloaded.Status != "in_review" {
 		t.Fatalf("reloaded model does not contain %s in review", issue.ID)
 	}
-	if model.prSyncNote != "PR sync: 1 updated" {
-		t.Fatalf("sync note = %q", model.prSyncNote)
+	if model.note != "PR sync: 1 updated" {
+		t.Fatalf("sync note = %q", model.note)
 	}
 }

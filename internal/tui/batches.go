@@ -411,7 +411,7 @@ func (m model) batchesView() string {
 		bar := m.surfaceBottomBar(0, 0,
 			[2]string{"r", "refresh"}, [2]string{":", "cmd"}, [2]string{"q", "quit"},
 		)
-		return surfaceFrame(header(m.project.Name, 0, width, viewBatches),
+		return surfaceFrame(header(m.project.Name, 0, width, viewBatches, m.syncing),
 			emptyState("no Batches yet", "ito batch new <name>", "to plan one"), bar, width)
 	}
 
@@ -438,7 +438,7 @@ func (m model) batchesView() string {
 	if m.filtering() {
 		total = batchIssueCount(m.batchSections)
 	}
-	return surfaceFrame(header(m.project.Name, len(m.batchSections), width, viewBatches),
+	return surfaceFrame(header(m.project.Name, len(m.batchSections), width, viewBatches, m.syncing),
 		body, m.batchesBottomBar(matched, total), width)
 }
 

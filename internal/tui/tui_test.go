@@ -55,7 +55,7 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 		t.Fatalf("create other project issue: %v", err)
 	}
 
-	view := newModel(st, project).View()
+	view := newModel(st, project, Options{}).View()
 	for _, want := range []string{
 		"ito · [1] digest · [2] batches",
 		"4 issues   digest-app",
@@ -138,7 +138,7 @@ func TestBoardOpensFromCommandLineAndEscReturns(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current := openBoard(t, newModel(st, project))
+	current := openBoard(t, newModel(st, project, Options{}))
 	board := current.View()
 	if !strings.Contains(board, "ito · board") || !strings.Contains(board, "TODO  (1)") {
 		t.Fatalf("expected :board to open the Board, got:\n%s", board)
@@ -176,7 +176,7 @@ func TestBoardRenderDoesNotRevealHiddenDigestSections(t *testing.T) {
 		t.Fatalf("create done issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "h"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "h"))
 	hiddenDigest := current.View()
 	if !strings.Contains(hiddenDigest, "▌▸ BACKLOG  (1) · h to show") ||
 		!strings.Contains(hiddenDigest, "▸ DONE  (1) · h to show") {
@@ -225,7 +225,7 @@ func TestBoardRendersAllStatusesAsColumns(t *testing.T) {
 		t.Fatalf("create done issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 140, Height: 24})
 	current = openBoard(t, current)
 	board := current.View()
 
@@ -268,7 +268,7 @@ func TestBoardSlidesHorizontallyToKeepFocusedStatusVisible(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 20})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 88, Height: 20})
 	current = openBoard(t, current)
 	firstWindow := current.View()
 	if !strings.Contains(firstWindow, "BACKLOG  (1)") || !strings.Contains(firstWindow, "TODO  (1)") || !strings.Contains(firstWindow, "IN PROGRESS  (1)") {
@@ -316,7 +316,7 @@ func TestBoardSharesInlineFilterAndStatusEditWithDigestState(t *testing.T) {
 		t.Fatalf("create done issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	current = openBoard(t, current)
 	current, _ = current.Update(keyMsg(t, "/"))
 	for _, r := range "docs" {
@@ -365,7 +365,7 @@ func TestIssueDetailReturnsToBoardWhenOpenedFromBoard(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current := openBoard(t, newModel(st, project))
+	current := openBoard(t, newModel(st, project, Options{}))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	if view := current.View(); !strings.Contains(view, "ito · "+issue.ID+" · Open detail from Board") {
 		t.Fatalf("expected Board selection to open Issue detail, got:\n%s", view)
@@ -396,7 +396,7 @@ func TestDigestQuitsOnQAndCtrlC(t *testing.T) {
 
 	for _, key := range []string{"q", "ctrl+c"} {
 		t.Run(key, func(t *testing.T) {
-			_, cmd := newModel(st, project).Update(keyMsg(t, key))
+			_, cmd := newModel(st, project, Options{}).Update(keyMsg(t, key))
 			if cmd == nil {
 				t.Fatalf("expected %s to return a quit command", key)
 			}
@@ -429,7 +429,7 @@ func TestDigestNavigationMovesFocusAndSelection(t *testing.T) {
 		t.Fatalf("create second todo: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "down"))
 	view := current.View()
 
@@ -476,7 +476,7 @@ func TestDigestSelectionFlowsAcrossStatusBoundaries(t *testing.T) {
 		t.Fatalf("create done issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "down"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "down"))
 	if view := current.View(); !strings.Contains(view, " ▸ · "+second.ID) {
 		t.Fatalf("expected Down to select the second BACKLOG Issue, got:\n%s", view)
 	}
@@ -548,7 +548,7 @@ func TestDigestHidesAndRevealsFocusedSection(t *testing.T) {
 		t.Fatalf("create done issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "h"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "h"))
 	hiddenBacklog := current.View()
 	if !strings.Contains(hiddenBacklog, "▌▸ BACKLOG  (1) · h to show") {
 		t.Fatalf("expected h to collapse the focused BACKLOG section, got:\n%s", hiddenBacklog)
@@ -603,7 +603,7 @@ func TestDigestSlashOpensInlineFilterAndEscRestoresShortcuts(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "/"))
 	filtering := current.View()
 	if !strings.Contains(filtering, "TODO  (1)") || !strings.Contains(filtering, "FLT-1 Keep the surface visible") {
 		t.Fatalf("expected / to keep the Digest surface visible, got:\n%s", filtering)
@@ -647,7 +647,7 @@ func TestDigestInlineFilterNarrowsLiveByIDTitleAndLabels(t *testing.T) {
 		t.Fatalf("create docs issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "/"))
 	for _, r := range "bug" {
 		current, _ = current.Update(runeMsg(r))
 	}
@@ -708,7 +708,7 @@ func TestDigestInlineFilterAcceptsSpaceKey(t *testing.T) {
 		t.Fatalf("create non-matching issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "/"))
 	for _, r := range "Two" {
 		current, _ = current.Update(runeMsg(r))
 	}
@@ -745,7 +745,7 @@ func TestDigestInlineFilterRevealsMatchesInHiddenSections(t *testing.T) {
 		t.Fatalf("create done issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "/"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "/"))
 	for _, r := range "docs" {
 		current, _ = current.Update(runeMsg(r))
 	}
@@ -780,7 +780,7 @@ func TestCommandLineOpensInlineAndEscRestoresShortcuts(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, ":"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, ":"))
 	commanding := current.View()
 	if !strings.Contains(commanding, "TODO  (1)") || !strings.Contains(commanding, "CMD-1 Keep Digest under command line") {
 		t.Fatalf("expected : to keep the Digest surface visible, got:\n%s", commanding)
@@ -818,7 +818,7 @@ func TestCommandLineFiltersClosedV2ActionSet(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, ":"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, ":"))
 	actions := current.View()
 	for _, want := range []string{
 		"─ actions ",
@@ -869,7 +869,7 @@ func TestCommandLineSelectionRunsActions(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, ":"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, ":"))
 	for _, r := range "quit" {
 		current, _ = current.Update(runeMsg(r))
 	}
@@ -881,7 +881,7 @@ func TestCommandLineSelectionRunsActions(t *testing.T) {
 		t.Fatalf("expected selected quit command to return tea.QuitMsg, got %T", cmd())
 	}
 
-	current, _ = newModel(st, project).Update(keyMsg(t, ":"))
+	current, _ = newModel(st, project, Options{}).Update(keyMsg(t, ":"))
 	for _, r := range "status" {
 		current, _ = current.Update(runeMsg(r))
 	}
@@ -897,7 +897,7 @@ func TestCommandLineSelectionRunsActions(t *testing.T) {
 		t.Fatalf("expected selected status command to close the command line, got:\n%s", current.View())
 	}
 
-	current, _ = newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, ":"))
 	for _, r := range "priority" {
 		current, _ = current.Update(runeMsg(r))
@@ -911,7 +911,7 @@ func TestCommandLineSelectionRunsActions(t *testing.T) {
 		t.Fatalf("expected selected priority command to cycle Issue priority, got %q", prioritized.Priority)
 	}
 
-	current, _ = newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ = newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, ":"))
 	for _, r := range "labels" {
 		current, _ = current.Update(runeMsg(r))
@@ -945,7 +945,7 @@ func TestSwitchProjectCommandOpensPickerAndRescopesDigest(t *testing.T) {
 		t.Fatalf("create beta issue: %v", err)
 	}
 
-	current, _ := newModel(st, alpha).Update(keyMsg(t, ":"))
+	current, _ := newModel(st, alpha, Options{}).Update(keyMsg(t, ":"))
 	for _, r := range "switch" {
 		current, _ = current.Update(runeMsg(r))
 	}
@@ -985,7 +985,7 @@ func TestProjectPickerOpensWhenModelStartsWithoutProject(t *testing.T) {
 		t.Fatalf("create alpha issue: %v", err)
 	}
 
-	current := newModel(st, store.Project{})
+	current := newModel(st, store.Project{}, Options{})
 	view := current.View()
 	if !strings.Contains(view, "ito · switch project") || !strings.Contains(view, "▸ alpha-app   ALP") || !strings.Contains(view, "  beta-app    BET") {
 		t.Fatalf("expected missing initial Project to open the Project picker, got:\n%s", view)
@@ -1005,7 +1005,7 @@ func TestProjectPickerShowsInitHintWhenStoreIsEmpty(t *testing.T) {
 	}
 	defer db.Close()
 
-	current := newModel(store.New(db), store.Project{})
+	current := newModel(store.New(db), store.Project{}, Options{})
 	view := current.View()
 	if !strings.Contains(view, "ito · switch project") || !strings.Contains(view, "run ito init to get started") {
 		t.Fatalf("expected empty store to show the init hint, got:\n%s", view)
@@ -1034,7 +1034,7 @@ func TestIssueDetailCommandLineRunsLongTailActionsInline(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	current, _ = current.Update(keyMsg(t, ":"))
 	commanding := current.View()
@@ -1073,7 +1073,7 @@ func TestRefreshShortcutAndCommandReloadDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	current := newModel(st, project)
+	current := newModel(st, project, Options{})
 	if _, err := st.CreateIssue(project, "External write", "todo", "medium", nil, ""); err != nil {
 		t.Fatalf("create external issue: %v", err)
 	}
@@ -1123,7 +1123,7 @@ func TestRefreshPreservesSelectedIssueWhenItStillExists(t *testing.T) {
 		t.Fatalf("create selected issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "down"))
 	if view := current.View(); !strings.Contains(view, " ▸ · "+selected.ID+" Keep this selected") {
 		t.Fatalf("expected TODO issue to be selected before refresh, got:\n%s", view)
@@ -1160,7 +1160,7 @@ func TestStatusKeyMovesSelectedIssueThroughStoreAndReloadsDigest(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "s"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "s"))
 	moved, err := st.FindIssue(project, issue.ID)
 	if err != nil {
 		t.Fatalf("find moved issue: %v", err)
@@ -1195,7 +1195,7 @@ func TestIssueDetailPriorityKeyCyclesPriorityThroughStore(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	current, _ = current.Update(keyMsg(t, "p"))
 	edited, err := st.FindIssue(project, issue.ID)
@@ -1232,7 +1232,7 @@ func TestIssueDetailLabelPickerTogglesChosenLabelsThroughStore(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "enter"))
 
 	// l opens a picker over the fixed vocabulary, not a blind toggle of one label.
@@ -1302,7 +1302,7 @@ func TestDigestViewportUsesTerminalHeightWithoutFixedItemCap(t *testing.T) {
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 16})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 88, Height: 16})
 	small := current.View()
 	current, _ = current.Update(tea.WindowSizeMsg{Width: 88, Height: 30})
 	tall := current.View()
@@ -1333,7 +1333,7 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 		}
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 19})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 88, Height: 19})
 	current, _ = current.Update(keyMsg(t, "tab"))
 	for i := 0; i < 4; i++ {
 		current, _ = current.Update(keyMsg(t, "down"))
@@ -1382,7 +1382,7 @@ func TestDigestScrollKeepsCursorAtEdgeNotCentre(t *testing.T) {
 	// This window fits six issue rows. Moving the cursor down inside it must not
 	// scroll until the cursor would leave the bottom edge — so five steps down
 	// land on the sixth, last visible row with the first row still on screen.
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 21})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 88, Height: 21})
 	current, _ = current.Update(keyMsg(t, "tab"))
 	for i := 0; i < 5; i++ {
 		current, _ = current.Update(keyMsg(t, "down"))
@@ -1457,7 +1457,7 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 		t.Fatalf("link target issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	detail := current.View()
 
@@ -1508,7 +1508,7 @@ func TestIssueDetailUpDownMovesBetweenIssues(t *testing.T) {
 		t.Fatalf("create second issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "enter"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "enter"))
 	if view := current.View(); !strings.Contains(view, "ito · "+first.ID+" · Backlog first") {
 		t.Fatalf("expected first Issue detail, got:\n%s", view)
 	}
@@ -1619,7 +1619,7 @@ func TestIssueDetailScrollsLongBodyWithinHeight(t *testing.T) {
 		t.Fatalf("create next issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 20})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 88, Height: 20})
 	current, _ = current.Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "enter"))
 	top := current.View()
@@ -1678,7 +1678,7 @@ func TestIssueDetailWithoutLinksHasNoDoubleBlank(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(tea.WindowSizeMsg{Width: 88, Height: 24})
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: 88, Height: 24})
 	current, _ = current.Update(keyMsg(t, "tab")) // focus TODO
 	current, _ = current.Update(keyMsg(t, "enter"))
 	detail := current.View()
@@ -1717,7 +1717,7 @@ func TestLabelPickerEditsTheDisplayedIssueAfterStatusMove(t *testing.T) {
 		t.Fatalf("create bystander issue: %v", err)
 	}
 
-	current, _ := newModel(st, project).Update(keyMsg(t, "tab"))
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "tab"))
 	current, _ = current.Update(keyMsg(t, "tab")) // focus IN REVIEW
 	current, _ = current.Update(keyMsg(t, "enter"))
@@ -1764,7 +1764,7 @@ func TestBoardDetailNavigatesWithinDoneIssues(t *testing.T) {
 		}
 	}
 
-	current := openBoard(t, newModel(st, project))
+	current := openBoard(t, newModel(st, project, Options{}))
 	for i := 0; i < 4; i++ { // focus the DONE column
 		current, _ = current.Update(keyMsg(t, "tab"))
 	}

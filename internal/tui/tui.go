@@ -109,10 +109,15 @@ type model struct {
 	filterQuery    string
 	commandOpen    bool
 	commandQuery   string
-	prSyncNote     string
-	loadErr        error
-	width          int
-	height         int
+	// sync runs a Ledger sync, nil when no Ledger is connected; syncing is true
+	// while one is in flight and the header shows the indicator.
+	sync    SyncFunc
+	syncing bool
+	// note is a one-line notice the bottom bar shows until the next key press.
+	note    string
+	loadErr error
+	width   int
+	height  int
 }
 
 type digestSection struct {
@@ -132,18 +137,19 @@ func statusLabel(status string) string {
 	return strings.ToUpper(strings.ReplaceAll(status, "_", " "))
 }
 
-func Run(st *store.Store, project store.Project) error {
+func Run(st *store.Store, project store.Project, opts Options) error {
 	if st == nil {
 		return fmt.Errorf("store is required")
 	}
-	_, err := tea.NewProgram(newModel(st, project), tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(newModel(st, project, opts), tea.WithAltScreen()).Run()
 	return err
 }
 
-func newModel(st *store.Store, project store.Project) model {
+func newModel(st *store.Store, project store.Project, opts Options) model {
 	m := model{
 		store:      st,
 		project:    project,
+		sync:       opts.Sync,
 		mode:       viewDigest,
 		linkTitles: map[string]string{},
 	}
@@ -151,12 +157,20 @@ func newModel(st *store.Store, project store.Project) model {
 		m.openProjectPicker()
 	} else {
 		m.reload()
+		// Init runs the sync on this model by value, so the in-flight mark is
+		// set here, where it sticks.
+		m.syncing = opts.Sync != nil
 	}
 	return m
 }
 
+// Init starts the background sync newModel marked: the first View already
+// shows the local data, and the sync lands whenever the Ledger answers.
 func (m model) Init() tea.Cmd {
-	return nil
+	if !m.syncing {
+		return nil
+	}
+	return m.syncCmd()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -164,8 +178,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case prSyncMsg:
 		m.applyPRSync(msg)
+	case syncMsg:
+		m.applySync(msg)
 	case tea.KeyMsg:
-		m.prSyncNote = ""
+		m.note = ""
 		if m.filterOpen {
 			return m, editInlineInput(&m.filterOpen, &m.filterQuery, msg)
 		}
@@ -405,7 +421,7 @@ func (m model) View() string {
 		body = append(body, withOverflow(window, len(section.Issues), rows)...)
 		body = append(body, "")
 	}
-	return surfaceFrame(header(m.project.Name, activeIssueCount(sections), width, viewDigest),
+	return surfaceFrame(header(m.project.Name, activeIssueCount(sections), width, viewDigest, m.syncing),
 		body, m.digestBottomBar(issueCount(sections), issueCount(m.sections)), width)
 }
 
@@ -461,7 +477,7 @@ func (m model) boardView() string {
 		body = append(body, line)
 	}
 
-	return surfaceFrame(boardHeader(m.project.Name, activeIssueCount(sections), width),
+	return surfaceFrame(boardHeader(m.project.Name, activeIssueCount(sections), width, m.syncing),
 		body, m.boardBottomBar(issueCount(sections), issueCount(m.sections)), width)
 }
 
@@ -607,10 +623,16 @@ func (m model) surfaceBottomBar(matched, total int, keys ...[2]string) string {
 	if m.commandOpen {
 		return m.commandBottomBar()
 	}
-	if m.prSyncNote != "" {
-		return " " + styleDim.Render(m.prSyncNote)
+	if m.note != "" {
+		return m.noteBar()
 	}
 	return statusBar(keys...)
+}
+
+// noteBar renders the pending notice in the bottom bar, cut to the frame so a
+// long Ledger error never wraps the line.
+func (m model) noteBar() string {
+	return " " + styleDim.Render(truncate(m.note, m.viewWidth()-1))
 }
 
 func (m model) boardBottomBar(matched, total int) string {
@@ -757,7 +779,7 @@ func (m model) updateProjectPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down":
 		m.moveProjectCursor(1)
 	case "enter":
-		m.switchToSelectedProject()
+		return m, m.switchToSelectedProject()
 	}
 	return m, nil
 }
@@ -786,9 +808,12 @@ func (m *model) moveProjectCursor(delta int) {
 	m.projectCursor = min(max(m.projectCursor+delta, 0), len(m.projects)-1)
 }
 
-func (m *model) switchToSelectedProject() {
+// switchToSelectedProject lands on the chosen Project and starts its sync;
+// a sync still running for the previous Project is disowned, its result
+// dropped on arrival.
+func (m *model) switchToSelectedProject() tea.Cmd {
 	if len(m.projects) == 0 || m.projectCursor < 0 || m.projectCursor >= len(m.projects) {
-		return
+		return nil
 	}
 	m.project = m.projects[m.projectCursor]
 	m.sections = nil
@@ -803,7 +828,9 @@ func (m *model) switchToSelectedProject() {
 	m.commandOpen = false
 	m.commandQuery = ""
 	m.mode = viewDigest
+	m.syncing = false
 	m.reload()
+	return m.startSync()
 }
 
 // reload re-reads every surface from the store in one pass, loading the Digest
@@ -843,9 +870,9 @@ func (m *model) reload() []store.Issue {
 }
 
 // refresh re-reads every surface and schedules the PR sync against the Issues
-// that reload just returned.
+// that reload just returned, plus a Ledger sync when one is connected.
 func (m *model) refresh() tea.Cmd {
-	return syncPRsCmd(m.project, m.reload())
+	return tea.Batch(syncPRsCmd(m.project, m.reload()), m.startSync())
 }
 
 // applyPRSync writes the moves gh reported and notes how many landed. A message
@@ -867,7 +894,7 @@ func (m *model) applyPRSync(msg prSyncMsg) {
 	}
 	if updated > 0 {
 		m.reload()
-		m.prSyncNote = fmt.Sprintf("PR sync: %d updated", updated)
+		m.note = fmt.Sprintf("PR sync: %d updated", updated)
 	}
 }
 
@@ -1602,7 +1629,7 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 		meta += dot + labelChips(issue.Labels, "  ")
 	}
 	top = []string{
-		issueHeader(m.project.Name, issue, width),
+		issueHeader(m.project.Name, issue, width, m.syncing),
 		fullRule(width),
 		"",
 		meta,
@@ -1644,6 +1671,8 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 	bottom = []string{"", fullRule(width)}
 	if m.commandOpen {
 		bottom = append(bottom, m.commandBottomBar())
+	} else if m.note != "" {
+		bottom = append(bottom, m.noteBar())
 	} else {
 		bottom = append(bottom, statusBar(
 			[2]string{"esc", "back"}, [2]string{"↑↓", "prev/next"}, [2]string{"s", "status"},
@@ -1732,7 +1761,7 @@ func (m model) labelPickerView() string {
 	issue := m.detailIssue
 	width := m.viewWidth()
 	lines := []string{
-		issueHeader(m.project.Name, issue, width),
+		issueHeader(m.project.Name, issue, width, m.syncing),
 		fullRule(width),
 		"",
 	}
@@ -1787,7 +1816,7 @@ func (m model) projectPickerView() string {
 	return strings.Join(lines, "\n")
 }
 
-func header(projectName string, count, width int, active viewMode) string {
+func header(projectName string, count, width int, active viewMode, syncing bool) string {
 	// Measure the plain text so the gap counts visible runes only, then style
 	// each segment — colouring adds no visible width. The numbers stay in the
 	// default ink; only the active view name takes the accent colour.
@@ -1798,8 +1827,9 @@ func header(projectName string, count, width int, active viewMode) string {
 	if active == viewBatches {
 		noun = "batches"
 	}
+	badge := syncBadge(syncing)
 	right := fmt.Sprintf("%d %s   %s ", count, noun, projectName)
-	gap := width - runeLen(left) - runeLen(right)
+	gap := width - runeLen(left) - runeLen(badge) - runeLen(right)
 	if gap < 1 {
 		gap = 1
 	}
@@ -1812,29 +1842,40 @@ func header(projectName string, count, width int, active viewMode) string {
 	}
 	styledLeft := styleText.Render(" ito · [1] ") + tab("digest", viewDigest) +
 		styleText.Render(" · [2] ") + tab("batches", viewBatches)
-	return styledLeft + strings.Repeat(" ", gap) + styleText.Render(right)
+	return styledLeft + strings.Repeat(" ", gap) + headerRight(badge, right)
+}
+
+// headerRight styles a header's right segment: the dim sync badge, when one
+// shows, ahead of the count and Project name in the default ink.
+func headerRight(badge, right string) string {
+	if badge == "" {
+		return styleText.Render(right)
+	}
+	return styleDim.Render(badge) + styleText.Render(right)
 }
 
 // boardHeader is the Board's crumb header. The Board lives behind the :
 // command line, not the header tabs, so its name sits where the tab set
 // would — in the accent, like any active view name.
-func boardHeader(projectName string, count, width int) string {
+func boardHeader(projectName string, count, width int, syncing bool) string {
 	left := " ito · board"
+	badge := syncBadge(syncing)
 	right := fmt.Sprintf("%d issues   %s ", count, projectName)
-	gap := width - runeLen(left) - runeLen(right)
+	gap := width - runeLen(left) - runeLen(badge) - runeLen(right)
 	if gap < 1 {
 		gap = 1
 	}
 	return styleText.Render(" ito · ") + styleActive.Render("board") +
-		strings.Repeat(" ", gap) + styleText.Render(right)
+		strings.Repeat(" ", gap) + headerRight(badge, right)
 }
 
-func issueHeader(projectName string, issue store.Issue, width int) string {
+func issueHeader(projectName string, issue store.Issue, width int, syncing bool) string {
 	// Same inset shape as header(): a leading space on the crumb and a trailing
 	// space on the project name so the line aligns with the content below. The
 	// Issue id is cyan, like every other id in the surfaces.
 	prefix, sep := " ito · ", " · "
-	right := projectName + " "
+	badge := syncBadge(syncing)
+	right := badge + projectName + " "
 	maxLeft := width - runeLen(right) - 1
 	plainLeft := prefix + issue.ID + sep + issue.Title
 	if maxLeft < 1 {
@@ -1852,7 +1893,7 @@ func issueHeader(projectName string, issue store.Issue, width int) string {
 	if gap < 1 {
 		gap = 1
 	}
-	return styled + strings.Repeat(" ", gap) + styleText.Render(right)
+	return styled + strings.Repeat(" ", gap) + headerRight(badge, projectName+" ")
 }
 
 // padBetween left-aligns left and right-aligns right across width, keeping at
