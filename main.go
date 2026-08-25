@@ -332,7 +332,54 @@ func openStore() (*sql.DB, *itostore.Store, *commandFailure) {
 		}
 		return nil, nil, &commandFailure{exitGeneric, fmt.Sprintf("could not open the central store: %v", err), hint}
 	}
-	return db, itostore.New(db), nil
+	st := itostore.New(db)
+	// With a Ledger configured, numbers come from it (decision 0005); the
+	// dial waits for the first creation, so read-only commands never dial.
+	if cfg, err := itoconfig.Load(); err == nil && cfg.Ledger != nil {
+		st.SetIssueNumberer(ledgerNumberer{})
+	}
+	return db, st, nil
+}
+
+// reserveTimeout bounds how long a creation waits for its number; unlike a
+// push, a reservation that does not answer fails the command.
+const reserveTimeout = 10 * time.Second
+
+// ledgerNumberer reserves Issue numbers from the configured Ledger.
+type ledgerNumberer struct{}
+
+func (ledgerNumberer) ReserveIssueNumber(prefix string, floor int64) (int64, error) {
+	return askLedger(reserveTimeout, func(l ledger.Ledger) (int64, error) {
+		return l.ReserveIssueNumber(prefix, floor)
+	})
+}
+
+// askLedger dials the configured Ledger and runs ask against it, giving up
+// after timeout. The work runs aside so nothing on the way to the Ledger can
+// hold the caller past the timeout; a call abandoned mid-flight may still
+// land on the Ledger, which every caller tolerates.
+func askLedger[T any](timeout time.Duration, ask func(ledger.Ledger) (T, error)) (T, error) {
+	type outcome struct {
+		value T
+		err   error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		l, _, err := connectedLedger()
+		if err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		value, err := ask(l)
+		done <- outcome{value, err}
+	}()
+	select {
+	case o := <-done:
+		return o.value, o.err
+	case <-time.After(timeout):
+		var zero T
+		return zero, fmt.Errorf("the Ledger did not answer within %s", timeout)
+	}
 }
 
 // resolveIssueProject finds the Project that owns the Issue's Prefix and, when an
@@ -685,26 +732,7 @@ func tuiSync(st *itostore.Store) tui.SyncFunc {
 		return nil
 	}
 	return func() (itostore.SyncResult, error) {
-		type outcome struct {
-			result itostore.SyncResult
-			err    error
-		}
-		done := make(chan outcome, 1)
-		go func() {
-			l, _, err := connectedLedger()
-			if err != nil {
-				done <- outcome{err: err}
-				return
-			}
-			result, err := st.Sync(l)
-			done <- outcome{result, err}
-		}()
-		select {
-		case o := <-done:
-			return o.result, o.err
-		case <-time.After(syncTimeout):
-			return itostore.SyncResult{}, fmt.Errorf("the Ledger did not answer within %s", syncTimeout)
-		}
+		return askLedger(syncTimeout, st.Sync)
 	}
 }
 
@@ -1348,6 +1376,10 @@ func runNew(args []string) int {
 	if err != nil {
 		if errors.Is(err, itostore.ErrBatchNotFound) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", batchName, p.Name), "run 'ito batch list' to see the Project's Batches.")
+		}
+		var reservation *itostore.ReservationError
+		if errors.As(err, &reservation) {
+			return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reserve an Issue number from the Ledger: %v", reservation.Err), "check the network and try again; nothing was created.")
 		}
 		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not create the Issue: %v", err), "try again or inspect the central store.")
 	}
@@ -2098,6 +2130,7 @@ Flags:
 		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--body <text>|-] [--batch <name>] [--project <name>] [--json]
 
 Creates an Issue and prints the ID in human mode.
+With a Ledger connected, the number is reserved from the Ledger so it stays sequential across Devices; an unreachable Ledger fails the command and creates nothing. Without one, numbering is local.
 Status tracks execution; triage state tracks whether the Issue needs triage, is ready for an agent, needs human decision, or is wontfix. Category describes the kind of work and is separate from Labels.
 
 Flags:

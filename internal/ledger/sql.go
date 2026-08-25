@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS changes (
   UNIQUE (device, sequence)
 )`, `
 CREATE TABLE IF NOT EXISTS counters (
-  project TEXT PRIMARY KEY,
+  project TEXT PRIMARY KEY, -- the Project's Prefix
   last    INTEGER NOT NULL DEFAULT 0
 )`}
 	for _, statement := range statements {
@@ -173,12 +173,12 @@ FROM changes WHERE position > ? ORDER BY position LIMIT ?`, position, limit)
 }
 
 // ReserveIssueNumber is one statement: an upsert that returns the new count.
-func (s *SQL) ReserveIssueNumber(project string) (int64, error) {
+func (s *SQL) ReserveIssueNumber(prefix string, floor int64) (int64, error) {
 	var number int64
 	err := s.db.QueryRow(`
-INSERT INTO counters(project, last) VALUES (?, 1)
-ON CONFLICT(project) DO UPDATE SET last = last + 1
-RETURNING last`, project).Scan(&number)
+INSERT INTO counters(project, last) VALUES (?, ?)
+ON CONFLICT(project) DO UPDATE SET last = max(last, excluded.last - 1) + 1
+RETURNING last`, prefix, floor+1).Scan(&number)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, errors.New("the Ledger did not hand out an Issue number")
 	}

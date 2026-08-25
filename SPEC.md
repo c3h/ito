@@ -138,7 +138,7 @@ Semantics of the early stages: `backlog` = work that's mapped or still subject t
 
 ```
 ~/.ito/
-  ito.db        # SQLite: projects, issues, links, prefix counters
+  ito.db        # SQLite: projects, issues, links, prefix counters (advisory once a Ledger is connected: numbers come from the Ledger)
 ```
 (override with `ITO_HOME`.)
 

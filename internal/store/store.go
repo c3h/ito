@@ -287,6 +287,35 @@ type EditResult struct {
 
 type Store struct {
 	db *sql.DB
+	// numberer hands out Issue numbers when set; nil numbers locally.
+	numberer IssueNumberer
+}
+
+// IssueNumberer reserves the next Issue number for a Project, keyed by its
+// Prefix — the identity that survives renames across Devices — and above
+// floor, the highest number this Device holds. A connected Ledger satisfies
+// it (decision 0005): numbers then stay globally sequential and the local
+// counter only records the highest number seen.
+type IssueNumberer interface {
+	ReserveIssueNumber(prefix string, floor int64) (int64, error)
+}
+
+// ReservationError reports that the numberer refused a number, so nothing
+// was written.
+type ReservationError struct {
+	Err error
+}
+
+func (e *ReservationError) Error() string {
+	return "reserve an Issue number: " + e.Err.Error()
+}
+
+func (e *ReservationError) Unwrap() error { return e.Err }
+
+// SetIssueNumberer routes every creation through n; every creation path —
+// the CLI today, the TUI when it grows one — inherits it.
+func (s *Store) SetIssueNumberer(n IssueNumberer) {
+	s.numberer = n
 }
 
 // clock stamps every mutation; tests replace it to control updated.
@@ -412,7 +441,7 @@ func (s *Store) CreateIssueInBatch(p Project, title, status, priority string, la
 }
 
 func (s *Store) CreateIssueInBatchWithMetadata(p Project, title, status, priority, category, triageState string, labels []string, body string, batch string) (Issue, error) {
-	return insertIssue(s.db, p, title, status, priority, category, triageState, labels, body, batch)
+	return insertIssue(s.db, s.numberer, p, title, status, priority, category, triageState, labels, body, batch)
 }
 
 func (s *Store) CreateBatch(p Project, name string) (Batch, error) {
@@ -1680,16 +1709,15 @@ func updateProjectName(db *sql.DB, p Project, name string) (Project, error) {
 	return p, nil
 }
 
-func insertIssue(db *sql.DB, p Project, title, status, priority, category, triageState string, labels []string, body string, batch string) (Issue, error) {
-	tx, err := db.Begin()
-	if err != nil {
-		return Issue{}, err
-	}
-	defer tx.Rollback()
-
+// insertIssue reserves the number before opening the transaction: a refused
+// reservation leaves no row and no Change behind. The local counter is
+// advisory once a numberer is set — it only tracks the highest number seen.
+func insertIssue(db *sql.DB, numberer IssueNumberer, p Project, title, status, priority, category, triageState string, labels []string, body string, batch string) (Issue, error) {
+	// Everything that can refuse the creation runs before the reservation, so
+	// a refusal never burns a number.
 	var batchID sql.NullInt64
 	if batch != "" {
-		id, found, err := findBatchID(tx, p.ID, batch)
+		id, found, err := findBatchID(db, p.ID, batch)
 		if err != nil {
 			return Issue{}, err
 		}
@@ -1698,8 +1726,35 @@ func insertIssue(db *sql.DB, p Project, title, status, priority, category, triag
 		}
 		batchID = sql.NullInt64{Int64: id, Valid: true}
 	}
+	var reserved int64
+	if numberer != nil {
+		var floor int64
+		if err := db.QueryRow(`SELECT last_id FROM projects WHERE id = ?`, p.ID).Scan(&floor); err != nil {
+			return Issue{}, err
+		}
+		number, err := numberer.ReserveIssueNumber(p.Prefix, floor)
+		if err != nil {
+			return Issue{}, &ReservationError{Err: err}
+		}
+		if number <= 0 {
+			return Issue{}, &ReservationError{Err: fmt.Errorf("the Ledger handed out %d", number)}
+		}
+		reserved = number
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return Issue{}, err
+	}
+	defer tx.Rollback()
 
-	result, err := tx.Exec(`UPDATE projects SET last_id = last_id + 1 WHERE id = ?`, p.ID)
+	// A reserved number only lifts the advisory counter; a local one advances it.
+	counter := `UPDATE projects SET last_id = last_id + 1 WHERE id = ?`
+	args := []any{p.ID}
+	if reserved > 0 {
+		counter = `UPDATE projects SET last_id = max(last_id, ?) WHERE id = ?`
+		args = []any{reserved, p.ID}
+	}
+	result, err := tx.Exec(counter, args...)
 	if err != nil {
 		return Issue{}, err
 	}
@@ -1711,9 +1766,11 @@ func insertIssue(db *sql.DB, p Project, title, status, priority, category, triag
 		return Issue{}, sql.ErrNoRows
 	}
 
-	var nextID int64
-	if err := tx.QueryRow(`SELECT last_id FROM projects WHERE id = ?`, p.ID).Scan(&nextID); err != nil {
-		return Issue{}, err
+	nextID := reserved
+	if nextID == 0 {
+		if err := tx.QueryRow(`SELECT last_id FROM projects WHERE id = ?`, p.ID).Scan(&nextID); err != nil {
+			return Issue{}, err
+		}
 	}
 	now := clock().UTC().Format(time.RFC3339)
 	created := Issue{

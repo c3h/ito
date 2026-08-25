@@ -93,12 +93,12 @@ func TestAppendAssignsPositionsAndDeduplicatesResends(t *testing.T) {
 	}
 }
 
-func TestReserveIssueNumberIsSequentialPerProject(t *testing.T) {
+func TestReserveIssueNumberIsSequentialPerPrefix(t *testing.T) {
 	for name, open := range implementations {
 		t.Run(name, func(t *testing.T) {
 			l := open(t)
 			for want := int64(1); want <= 3; want++ {
-				got, err := l.ReserveIssueNumber("ito")
+				got, err := l.ReserveIssueNumber("ito", 0)
 				if err != nil {
 					t.Fatalf("reserve: %v", err)
 				}
@@ -106,12 +106,28 @@ func TestReserveIssueNumberIsSequentialPerProject(t *testing.T) {
 					t.Fatalf("reserved %d, want %d", got, want)
 				}
 			}
-			got, err := l.ReserveIssueNumber("other")
+			got, err := l.ReserveIssueNumber("other", 0)
 			if err != nil {
 				t.Fatalf("reserve other: %v", err)
 			}
 			if got != 1 {
 				t.Fatalf("other project must count from 1, got %d", got)
+			}
+			// A floor lifts the counter past numbers used before the Ledger
+			// counted them; a floor below the counter changes nothing.
+			for _, step := range []struct{ floor, want int64 }{{10, 11}, {3, 12}} {
+				floor, want := step.floor, step.want
+				got, err := l.ReserveIssueNumber("ito", floor)
+				if err != nil {
+					t.Fatalf("reserve with floor %d: %v", floor, err)
+				}
+				if got != want {
+					t.Fatalf("reserved %d with floor %d, want %d", got, floor, want)
+				}
+			}
+			got, err = l.ReserveIssueNumber("fresh", 7)
+			if err != nil || got != 8 {
+				t.Fatalf("fresh project with floor 7 = %d, %v; want 8", got, err)
 			}
 		})
 	}
@@ -186,7 +202,7 @@ func TestSQLUsesBoundedStatementsPerOperation(t *testing.T) {
 	}
 
 	db.statements = 0
-	if _, err := l.ReserveIssueNumber("ito"); err != nil {
+	if _, err := l.ReserveIssueNumber("ito", 0); err != nil {
 		t.Fatal(err)
 	}
 	if db.statements != 1 {

@@ -57,8 +57,10 @@ type Ledger interface {
 	// position, in Ledger order.
 	ReadAfter(position int64, limit int) ([]Entry, error)
 	// ReserveIssueNumber atomically hands out the next Issue number for the
-	// named Project.
-	ReserveIssueNumber(project string) (int64, error)
+	// Project, keyed by its Prefix — the identity that survives renames. The
+	// number is always above floor, the highest number the caller has seen,
+	// so Issues numbered before the Ledger counted them are never reissued.
+	ReserveIssueNumber(prefix string, floor int64) (int64, error)
 }
 
 type deviceSequence struct {
@@ -114,9 +116,9 @@ func (m *Memory) ReadAfter(position int64, limit int) ([]Entry, error) {
 	return append([]Entry{}, page...), nil
 }
 
-func (m *Memory) ReserveIssueNumber(project string) (int64, error) {
+func (m *Memory) ReserveIssueNumber(prefix string, floor int64) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.counters[project]++
-	return m.counters[project], nil
+	m.counters[prefix] = max(m.counters[prefix], floor) + 1
+	return m.counters[prefix], nil
 }
