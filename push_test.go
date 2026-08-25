@@ -214,6 +214,7 @@ func TestBareITOHandsTheTUIASyncOnlyWithALedgerConnected(t *testing.T) {
 
 	itoHome := t.TempDir()
 	t.Setenv("ITO_HOME", itoHome)
+	stayLocal(t, itoHome)
 	createLocalIssue(t, itoHome)
 	if code := runCLI(nil); code != 0 {
 		t.Fatalf("bare ito exit = %d", code)

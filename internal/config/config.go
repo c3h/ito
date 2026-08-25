@@ -52,6 +52,23 @@ func LocalDBPath(home string) string {
 	return filepath.Join(home, "ito.db")
 }
 
+// Exists reports whether this machine has a config file at all, which is how
+// bare ito tells a first run from a Device that chose to stay local.
+func Exists() (bool, error) {
+	home, err := HomeDir()
+	if err != nil {
+		return false, fmt.Errorf("resolve ito home: %w", err)
+	}
+	_, err = os.Stat(Path(home))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspect config file %q: %w", Path(home), err)
+}
+
 func Load() (Config, error) {
 	home, err := HomeDir()
 	if err != nil {

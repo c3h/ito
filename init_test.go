@@ -308,7 +308,9 @@ func TestConfigRejectsMalformedFile(t *testing.T) {
 }
 
 func TestBareITOWithoutTTYPrintsRootHelpAndExitsZero(t *testing.T) {
-	result := runITO(t, t.TempDir(), t.TempDir())
+	itoHome := t.TempDir()
+	stayLocal(t, itoHome)
+	result := runITO(t, t.TempDir(), itoHome)
 	if result.exitCode != 0 {
 		t.Fatalf("expected bare ito without a TTY to exit 0, got %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
 	}
@@ -341,6 +343,7 @@ func TestBareITOWithTTYLaunchesTUIWithStoreAndResolvedProject(t *testing.T) {
 
 	itoHome := t.TempDir()
 	t.Setenv("ITO_HOME", itoHome)
+	stayLocal(t, itoHome)
 	db, err := itostore.Open(itoHome)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -386,7 +389,9 @@ func TestBareITOWithTTYLaunchesTUIWithoutProjectWhenCWDIsUnregistered(t *testing
 		return nil
 	}
 
-	t.Setenv("ITO_HOME", t.TempDir())
+	itoHome := t.TempDir()
+	t.Setenv("ITO_HOME", itoHome)
+	stayLocal(t, itoHome)
 	exitCode := runCLI(nil)
 	if exitCode != 0 {
 		t.Fatalf("expected bare ito on a TTY without a registered cwd Project to exit 0, got %d", exitCode)

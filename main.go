@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/c3h/ito/internal/ledger"
 	itostore "github.com/c3h/ito/internal/store"
 	"github.com/c3h/ito/internal/tui"
+	"github.com/charmbracelet/x/term"
 	"github.com/mattn/go-isatty"
 	_ "modernc.org/sqlite"
 )
@@ -36,13 +38,14 @@ var (
 	// the domain values live in exactly one place (internal/store); the
 	// identifier formats come from the store's exported patterns for the same
 	// reason.
-	validStatuses   = valueSet(itostore.Statuses)
-	validPriorities = valueSet(itostore.Priorities)
-	validCategories = valueSet(itostore.Categories)
-	validTriage     = valueSet(itostore.TriageStates)
-	validLabels     = valueSet(itostore.Labels)
-	isTerminal      = isatty.IsTerminal
-	runTUI          = tui.Run
+	validStatuses             = valueSet(itostore.Statuses)
+	validPriorities           = valueSet(itostore.Priorities)
+	validCategories           = valueSet(itostore.Categories)
+	validTriage               = valueSet(itostore.TriageStates)
+	validLabels               = valueSet(itostore.Labels)
+	isTerminal                = isatty.IsTerminal
+	stdin           io.Reader = os.Stdin
+	runTUI                    = tui.Run
 	// openLedger dials the configured Ledger; tests replace it with an
 	// in-memory one.
 	openLedger = func(cfg itoconfig.Ledger) (ledger.Ledger, error) {
@@ -446,7 +449,19 @@ func versionFromBuildInfo(info *debug.BuildInfo) string {
 
 func runCLI(args []string) int {
 	if len(args) == 0 {
-		if !isTerminal(os.Stdin.Fd()) || !isTerminal(os.Stdout.Fd()) {
+		tty := isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd())
+		configured, err := itoconfig.Exists()
+		if err != nil {
+			return fail(false, exitGeneric, fmt.Sprintf("could not inspect the config: %v", err), "check ITO_HOME and the directory permissions.")
+		}
+		if !configured {
+			if !tty {
+				return fail(false, exitGeneric, "this machine has no ito config yet and only a terminal can be asked how to start.", firstRunHint)
+			}
+			if code := firstRun(); code != 0 {
+				return code
+			}
+		} else if !tty {
 			printRootHelp(os.Stdout)
 			return 0
 		}
@@ -612,58 +627,137 @@ func runLedgerConnect(args []string) int {
 		return fail(jsonMode, exitBadUsage, "ito ledger connect needs both --url and --token.", "run 'ito ledger connect --help' to see the accepted flags.")
 	}
 
+	result, connectFail := connectLedger(url, token, force)
+	if connectFail != nil {
+		return fail(jsonMode, connectFail.code, connectFail.message, connectFail.hint)
+	}
+	if jsonMode {
+		return printJSON(result, "connect result")
+	}
+	fmt.Println(result.summary())
+	return 0
+}
+
+func (r connectResult) summary() string {
+	return fmt.Sprintf("Connected to %s as Device %s; pushed %d, pulled %d.", r.URL, r.Device, r.Pushed, r.Pulled)
+}
+
+// connectLedger is the shared path of ito ledger connect and the first-run
+// choice: it checks the Ledger, applies connectPolicy, records the connection
+// and runs the first sync. The config is written only once the policy passes,
+// so a refused connect leaves the machine unconfigured.
+func connectLedger(url, token string, force bool) (connectResult, *commandFailure) {
 	cfg, err := itoconfig.Load()
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the config: %v", err), "")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the config: %v", err), ""}
 	}
 	if cfg.Ledger != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("this Device is already connected to %s.", cfg.Ledger.URL), "run 'ito ledger disconnect' first to point it elsewhere.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("this Device is already connected to %s.", cfg.Ledger.URL), "run 'ito ledger disconnect' first to point it elsewhere."}
 	}
 	connection := itoconfig.Ledger{URL: url, Token: token}
 	l, err := openLedger(connection)
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reach the Ledger: %v", err), "check the URL, the token and the network.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not reach the Ledger: %v", err), "check the URL, the token and the network."}
 	}
 	if err := l.EnsureSchema(); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not prepare the Ledger: %v", err), "check the URL, the token and the network.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not prepare the Ledger: %v", err), "check the URL, the token and the network."}
 	}
 
 	db, st, openFail := openStore()
 	if openFail != nil {
-		return fail(jsonMode, openFail.code, openFail.message, openFail.hint)
+		return connectResult{}, &commandFailure{openFail.code, openFail.message, openFail.hint}
 	}
 	defer db.Close()
 	localEmpty, err := st.Empty()
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not inspect the local store: %v", err), "try again or inspect the central store.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not inspect the local store: %v", err), "try again or inspect the central store."}
 	}
 	head, err := l.ReadAfter(0, 1)
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Ledger: %v", err), "check the URL, the token and the network.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the Ledger: %v", err), "check the URL, the token and the network."}
 	}
 	if code, message, hint := connectPolicy(localEmpty, len(head) == 0, force); code != 0 {
-		return fail(jsonMode, code, message, hint)
+		return connectResult{}, &commandFailure{code, message, hint}
 	}
 
 	if err := st.ResetSync(); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not reset the sync state: %v", err), "try again or inspect the central store.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not reset the sync state: %v", err), "try again or inspect the central store."}
 	}
 	device, err := st.DeviceID()
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not read the Device identity: %v", err), "try again or inspect the central store.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not read the Device identity: %v", err), "try again or inspect the central store."}
 	}
 	if err := itoconfig.Write(itoconfig.Config{Ledger: &connection}); err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("could not write the config: %v", err), "check the ito home permissions and run 'ito ledger connect' again.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("could not write the config: %v", err), "check the ito home permissions and run 'ito ledger connect' again."}
 	}
 	result, err := st.Sync(l)
 	if err != nil {
-		return fail(jsonMode, exitGeneric, fmt.Sprintf("connected, but the first sync stopped after pushing %d and pulling %d Changes: %v", result.Pushed, result.Pulled, err), "run 'ito sync' to resume.")
+		return connectResult{}, &commandFailure{exitGeneric, fmt.Sprintf("connected, but the first sync stopped after pushing %d and pulling %d Changes: %v", result.Pushed, result.Pulled, err), "run 'ito sync' to resume."}
 	}
-	if jsonMode {
-		return printJSON(connectResult{ledgerDisplay: ledgerDisplay{URL: url, Device: device}, Pushed: result.Pushed, Pulled: result.Pulled}, "connect result")
+	return connectResult{ledgerDisplay: ledgerDisplay{URL: url, Device: device}, Pushed: result.Pushed, Pulled: result.Pulled}, nil
+}
+
+// firstRunHint names the explicit commands behind the two first-run choices,
+// for every path that cannot or will not ask.
+const firstRunHint = "connect to an existing Ledger with 'ito ledger connect --url <url> --token <token>', or start empty from a terminal with 'ito'; 'ito --help' lists the commands."
+
+// firstRun asks, on a terminal with no config, whether this machine starts
+// empty or joins an existing Ledger; either answer leaves a config behind so
+// the question is asked once. This is the only prompt in ito (decision 0005).
+func firstRun() int {
+	in := bufio.NewReader(stdin)
+	fmt.Println("This machine has no ito config yet.")
+	fmt.Println("  1) Start empty — a local store on this machine")
+	fmt.Println("  2) Connect to an existing Ledger — pull the tracker from Turso")
+	choice, err := promptLine(in, "Choose [1/2]: ")
+	if err != nil {
+		return fail(false, exitBadUsage, "no choice was made.", firstRunHint)
 	}
-	fmt.Printf("Connected to %s as Device %s; pushed %d, pulled %d.\n", url, device, result.Pushed, result.Pulled)
-	return 0
+	switch choice {
+	case "1", "":
+		if err := itoconfig.Write(itoconfig.Config{}); err != nil {
+			return fail(false, exitGeneric, fmt.Sprintf("could not write the config: %v", err), "check the ito home permissions.")
+		}
+		return 0
+	case "2":
+		url, err := promptLine(in, "Ledger URL: ")
+		if err != nil || url == "" {
+			return fail(false, exitBadUsage, "no Ledger URL was given.", firstRunHint)
+		}
+		token, err := promptSecret(in, "Ledger token: ")
+		if err != nil || token == "" {
+			return fail(false, exitBadUsage, "no Ledger token was given.", firstRunHint)
+		}
+		result, connectFail := connectLedger(url, token, false)
+		if connectFail != nil {
+			return fail(false, connectFail.code, connectFail.message, connectFail.hint)
+		}
+		fmt.Println(result.summary())
+		return 0
+	default:
+		return fail(false, exitBadUsage, fmt.Sprintf("%q is not one of the choices.", choice), firstRunHint)
+	}
+}
+
+func promptLine(in *bufio.Reader, prompt string) (string, error) {
+	fmt.Print(prompt)
+	line, err := in.ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// promptSecret reads without echo when stdin is a real terminal, so the token
+// never lands in the scrollback; any other reader is read as a plain line.
+func promptSecret(in *bufio.Reader, prompt string) (string, error) {
+	if f, ok := stdin.(*os.File); ok && isTerminal(f.Fd()) {
+		fmt.Print(prompt)
+		secret, err := term.ReadPassword(f.Fd())
+		fmt.Println()
+		return strings.TrimSpace(string(secret)), err
+	}
+	return promptLine(in, prompt)
 }
 
 // connectPolicy is the state table of ito ledger connect; a zero code means
@@ -2060,7 +2154,7 @@ Commands:
   sync     Exchanges Changes with the connected Ledger.
   ledger   Connects this Device to a Ledger, or disconnects it.
 
-Every command takes --json and never prompts; failures exit non-zero (2 usage, 3 not found, 4 no Project here) with an actionable sentence on stderr. Bare "ito" in a TTY opens the TUI; "ito --version" prints the build.
+Every command takes --json and never prompts; failures exit non-zero (2 usage, 3 not found, 4 no Project here) with an actionable sentence on stderr. Bare "ito" in a TTY opens the TUI — on a machine with no config it first asks once whether to start empty or connect to a Ledger; outside a TTY that question becomes an error naming "ito ledger connect". "ito --version" prints the build.
 
 Use "ito <command> --help" to see the command's flags.`)
 }
@@ -2087,7 +2181,7 @@ Use "ito ledger <command> --help" to see the command's flags.`)
 	case "ledger connect":
 		fmt.Println(`usage: ito ledger connect --url <url> --token <token> [--force] [--json]
 
-Connects this Device to the Turso-hosted Ledger at <url>, creating its tables when they do not exist yet. An empty local store pulls the whole tracker. When both the local store and the Ledger already hold Issues the command refuses unless --force is passed, which merges them keeping the later version of every row. The connection is recorded once those checks pass, then the first Sync runs ("ito sync" resumes it if interrupted); the token is stored in the config file with owner-only permissions.
+Connects this Device to the Turso-hosted Ledger at <url>, creating its tables when they do not exist yet. An empty local store pulls the whole tracker. When both the local store and the Ledger already hold Issues the command refuses unless --force is passed, which merges them keeping the later version of every row. The connection is recorded once those checks pass, then the first Sync runs ("ito sync" resumes it if interrupted); the token is stored in the config file with owner-only permissions. Bare "ito" on a machine with no config offers the same connection interactively.
 
 Flags:
   --url <url>          The Ledger's libsql:// URL.
