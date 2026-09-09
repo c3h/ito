@@ -50,7 +50,7 @@ const detailBodyWidth = 80
 const linkIDWidth = 8
 
 // detailLabelWidth is the gutter the detail view's field labels occupy, so
-// branch, created and updated share one column whichever of them renders.
+// branch, assignee, created and updated share one column whichever of them renders.
 const detailLabelWidth = 13
 
 type viewMode string
@@ -1637,6 +1637,9 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 	}
 	if issue.Branch != "" {
 		top = append(top, metaLine("branch", issue.Branch), "")
+	}
+	if issue.Assignee != "" {
+		top = append(top, metaLine("assignee", issue.Assignee), "")
 	}
 
 	var links []string

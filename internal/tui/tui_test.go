@@ -1696,6 +1696,49 @@ func TestIssueDetailWithoutLinksHasNoDoubleBlank(t *testing.T) {
 	}
 }
 
+func TestIssueDetailShowsAssigneeAndOmitsEmpty(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("who-detail-app", "WHO", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	assigned, err := st.CreateIssueInBatchWithMetadata(project, "Assigned issue", "todo", "high", "enhancement", "ready-for-agent", nil, "assigned body", "", "gpt-6-astra low")
+	if err != nil {
+		t.Fatalf("create assigned issue: %v", err)
+	}
+	if _, err := st.CreateIssue(project, "Unassigned issue", "todo", "medium", nil, "plain body"); err != nil {
+		t.Fatalf("create unassigned issue: %v", err)
+	}
+
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	detail := current.View()
+	if !strings.Contains(detail, "ito · "+assigned.ID+" · Assigned issue") {
+		t.Fatalf("expected assigned Issue detail, got:\n%s", detail)
+	}
+	if !strings.Contains(detail, "assignee     gpt-6-astra low") {
+		t.Fatalf("expected Issue detail to contain the assignee line, got:\n%s", detail)
+	}
+
+	current, _ = current.Update(keyMsg(t, "down"))
+	plain := current.View()
+	if !strings.Contains(plain, "Unassigned issue") {
+		t.Fatalf("expected Down to show the unassigned Issue detail, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "assignee     ") {
+		t.Fatalf("expected no assignee line for an unassigned Issue, got:\n%s", plain)
+	}
+	if strings.Contains(plain, "branch       ") {
+		t.Fatalf("expected no branch line for an Issue without branch, got:\n%s", plain)
+	}
+}
+
 func TestLabelPickerEditsTheDisplayedIssueAfterStatusMove(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {
