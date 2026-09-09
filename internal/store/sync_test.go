@@ -68,7 +68,7 @@ VALUES (1, 'LEG-1', 'Existing issue', 'todo', 'medium', '2026-08-09T10:00:00Z', 
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate v4 database: %v", err)
 	}
-	assertSchemaVersion(t, db, 6)
+	assertSchemaVersion(t, db, 7)
 	var pending int
 	if err := db.QueryRow(`SELECT count(*) FROM changes WHERE pushed = 0`).Scan(&pending); err != nil {
 		t.Fatalf("read change log: %v", err)
@@ -752,7 +752,7 @@ INSERT INTO issue_labels(project_id, issue_id, label) VALUES (1, 'LEG-1', 'bug')
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate v5 database: %v", err)
 	}
-	assertSchemaVersion(t, db, 6)
+	assertSchemaVersion(t, db, 7)
 	var updated string
 	if err := db.QueryRow(`SELECT updated FROM issue_labels WHERE issue_id = 'LEG-1'`).Scan(&updated); err != nil || updated != "" {
 		t.Fatalf("legacy label rows carry the empty stamp, got %q err %v", updated, err)

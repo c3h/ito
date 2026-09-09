@@ -269,6 +269,7 @@ type issueListItem struct {
 	Category      string   `json:"category"`
 	TriageState   string   `json:"triage_state"`
 	Branch        string   `json:"branch"`
+	Assignee      string   `json:"assignee"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -1472,6 +1473,7 @@ func runNew(args []string) int {
 	var labels stringSliceFlag
 	var body string
 	var batchName string
+	var assignee string
 	fs.BoolVar(&jsonMode, "json", false, "")
 	fs.StringVar(&projectName, "project", "", "")
 	fs.StringVar(&title, "title", "", "")
@@ -1482,6 +1484,7 @@ func runNew(args []string) int {
 	fs.Var(&labels, "label", "")
 	fs.StringVar(&body, "body", "", "")
 	fs.StringVar(&batchName, "batch", "", "")
+	fs.StringVar(&assignee, "assignee", "", "")
 	if err := fs.Parse(args); err != nil {
 		return fail(wantsJSON(args, commandValueFlags("new")), exitBadUsage, err.Error(), "run 'ito new --help' to see the accepted flags.")
 	}
@@ -1535,7 +1538,7 @@ func runNew(args []string) int {
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
-	created, err := st.CreateIssueInBatchWithMetadata(p, title, status, priority, category, triageState, labels, body, batchName)
+	created, err := st.CreateIssueInBatchWithMetadata(p, title, status, priority, category, triageState, labels, body, batchName, assignee)
 	if err != nil {
 		if errors.Is(err, itostore.ErrBatchNotFound) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", batchName, p.Name), "run 'ito batch list' to see the Project's Batches.")
@@ -1675,6 +1678,7 @@ func runEdit(args []string) int {
 	var category string
 	var triageState string
 	var branch string
+	var assignee string
 	var body string
 	var batchName string
 	var labelOps []labelEditOp
@@ -1686,6 +1690,7 @@ func runEdit(args []string) int {
 	fs.StringVar(&category, "category", "", "")
 	fs.StringVar(&triageState, "triage-state", "", "")
 	fs.StringVar(&branch, "branch", "", "")
+	fs.StringVar(&assignee, "assignee", "", "")
 	fs.StringVar(&body, "body", "", "")
 	fs.StringVar(&batchName, "batch", "", "")
 	fs.Var(labelEditFlag{kind: "add", ops: &labelOps}, "add-label", "")
@@ -1725,14 +1730,16 @@ func runEdit(args []string) int {
 			options.TriageStateSet = true
 		case "branch":
 			options.BranchSet = true
+		case "assignee":
+			options.AssigneeSet = true
 		case "body":
 			options.BodySet = true
 		case "batch":
 			options.BatchSet = true
 		}
 	})
-	if !options.TitleSet && !options.PrioritySet && !options.CategorySet && !options.TriageStateSet && !options.BranchSet && !options.BodySet && !options.BatchSet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
-		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --category, --triage-state, --branch, --body, --batch, --add-label, --block, --relate or --conflict.")
+	if !options.TitleSet && !options.PrioritySet && !options.CategorySet && !options.TriageStateSet && !options.BranchSet && !options.AssigneeSet && !options.BodySet && !options.BatchSet && len(options.LabelOps) == 0 && len(options.LinkOps) == 0 {
+		return fail(jsonMode, exitBadUsage, "no changes requested.", "use at least one flag like --title, --priority, --category, --triage-state, --branch, --assignee, --body, --batch, --add-label, --block, --relate or --conflict.")
 	}
 	if options.TitleSet {
 		if strings.TrimSpace(title) == "" {
@@ -1760,6 +1767,9 @@ func runEdit(args []string) int {
 	}
 	if options.BranchSet {
 		options.Branch = branch
+	}
+	if options.AssigneeSet {
+		options.Assignee = assignee
 	}
 	if options.BodySet {
 		if body == "-" {
@@ -1954,6 +1964,7 @@ func runList(args []string) int {
 	var triageState string
 	var search string
 	var batchName string
+	var assignee string
 	var ready bool
 	var labels stringSliceFlag
 	fs.BoolVar(&jsonMode, "json", false, "")
@@ -1965,6 +1976,7 @@ func runList(args []string) int {
 	fs.StringVar(&triageState, "triage-state", "", "")
 	fs.StringVar(&search, "search", "", "")
 	fs.StringVar(&batchName, "batch", "", "")
+	fs.StringVar(&assignee, "assignee", "", "")
 	fs.BoolVar(&ready, "ready", false, "")
 	fs.Var(&labels, "label", "")
 	if err := fs.Parse(args); err != nil {
@@ -2020,6 +2032,7 @@ func runList(args []string) int {
 		Search:      search,
 		Ready:       ready,
 		Batch:       batchName,
+		Assignee:    assignee,
 	}
 	if !allProjects {
 		p, code, message, hint := resolveProject(st, projectName)
@@ -2111,18 +2124,18 @@ func commandValueFlags(command string) map[string]struct{} {
 	case "rename":
 		return map[string]struct{}{"project": {}}
 	case "new":
-		return map[string]struct{}{"project": {}, "title": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "label": {}, "body": {}, "batch": {}}
+		return map[string]struct{}{"project": {}, "title": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "label": {}, "body": {}, "batch": {}, "assignee": {}}
 	case "show":
 		return map[string]struct{}{"project": {}}
 	case "list":
-		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "search": {}, "label": {}, "batch": {}}
+		return map[string]struct{}{"project": {}, "status": {}, "priority": {}, "category": {}, "triage-state": {}, "search": {}, "label": {}, "batch": {}, "assignee": {}}
 	case "batch new", "batch list", "batch move", "batch rename", "batch rm", "batch show":
 		return map[string]struct{}{"project": {}}
 	case "move":
 		return map[string]struct{}{"project": {}}
 	case "edit":
 		return map[string]struct{}{
-			"project": {}, "title": {}, "priority": {}, "category": {}, "triage-state": {}, "branch": {}, "body": {},
+			"project": {}, "title": {}, "priority": {}, "category": {}, "triage-state": {}, "branch": {}, "assignee": {}, "body": {},
 			"batch":     {},
 			"add-label": {}, "remove-label": {},
 			"block": {}, "unblock": {}, "relate": {}, "unrelate": {}, "conflict": {}, "unconflict": {},
@@ -2290,7 +2303,7 @@ Flags:
   --project <name>     Target Project when the cwd should not resolve implicitly.
   --json               Prints JSON.`)
 	case "new":
-		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--body <text>|-] [--batch <name>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito new --title <title> [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--body <text>|-] [--batch <name>] [--assignee <text>] [--project <name>] [--json]
 
 Creates an Issue and prints the ID in human mode.
 With a Ledger connected, the number is reserved from the Ledger so it stays sequential across Devices; an unreachable Ledger fails the command and creates nothing. Without one, numbering is local.
@@ -2305,6 +2318,7 @@ Flags:
   --label <label>          Repeatable initial Label: %s.
   --body <text>|-          Markdown body. Use "-" to read stdin.
   --batch <name>           Assign the Issue to an existing Batch.
+  --assignee <text>        Free-text assignee, typically model plus effort.
   --project <name>         Explicit Project.
   --json                   Prints JSON.
 `, statusList, priorityList, categoryList, triageList, labelList)
@@ -2317,7 +2331,7 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "list":
-		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--search <text>] [--batch <name>] [--project <name>|--all-projects] [--json]
+		fmt.Printf(`usage: ito list [--ready] [--status <status>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--label <label>] [--search <text>] [--batch <name>] [--assignee <text>] [--project <name>|--all-projects] [--json]
 
 Lists Issues in the current Project. Issues in done are hidden by default; --status all shows every status, including done.
 Use --ready to list the backlog/todo frontier whose blockers are all done and conflicts_with partners are not unsafe to start in parallel; an agent can fan out one git worktree per ready Issue.
@@ -2332,6 +2346,7 @@ Flags:
   --label <label>          Filter by Label. Repeatable.
   --search <text>          Full-text search in title and body.
   --batch <name>           Filter to Issues assigned to an existing Batch.
+  --assignee <text>        Filter by exact assignee match.
   --project <name>         Explicit Project.
   --all-projects           Lists all Projects.
   --json                   Prints JSON.
@@ -2411,7 +2426,7 @@ Flags:
   --project <name>     Validates that the Issue belongs to the given Project.
   --json               Prints JSON.`)
 	case "edit":
-		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--branch <name>|--branch ""] [--body <text>|-] [--batch <name>|--batch ""] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
+		fmt.Printf(`usage: ito edit <PREFIX>-<n> [--title <title>] [--priority <priority>] [--category <category>] [--triage-state <state>] [--branch <name>|--branch ""] [--assignee <text>|--assignee ""] [--body <text>|-] [--batch <name>|--batch ""] [--add-label <label>] [--remove-label <label>] [--block <ID>] [--unblock <ID>] [--relate <ID>] [--unrelate <ID>] [--conflict <ID>] [--unconflict <ID>] [--project <name>] [--json]
 
 Edits an Issue. Requires at least one change.
 Status is changed with ito move; triage state is changed here because it describes review/readiness metadata, not execution progress.
@@ -2422,6 +2437,7 @@ Flags:
   --category <category>    %s.
   --triage-state <state>   %s.
   --branch <name>|""       Set the working branch, or clear it with "".
+  --assignee <text>|""     Set the free-text assignee, or clear it with "".
   --body <text>|-          New markdown body. Use "-" to read stdin.
   --batch <name>|""        Move into a Batch, or clear membership with "".
   --add-label <label>      Adds a Label. Repeatable.
@@ -2690,6 +2706,9 @@ func printIssueDetail(i issue, jsonMode bool) int {
 	if i.Branch != "" {
 		fmt.Printf("Branch: %s\n", i.Branch)
 	}
+	if i.Assignee != "" {
+		fmt.Printf("Assignee: %s\n", i.Assignee)
+	}
 	fmt.Printf("Batch: %s\n", formatOptionalString(i.Batch))
 	fmt.Printf("Created: %s\n", i.Created)
 	fmt.Printf("Updated: %s\n", i.Updated)
@@ -2747,6 +2766,7 @@ func issueListJSON(i issue) issueListItem {
 		Category:      i.Category,
 		TriageState:   i.TriageState,
 		Branch:        i.Branch,
+		Assignee:      i.Assignee,
 		Labels:        i.Labels,
 		BlockedBy:     i.BlockedBy,
 		RelatesTo:     i.RelatesTo,

@@ -24,6 +24,8 @@ Local-first, solo issue tracker for the terminal, driven by AI through the comma
 
 **Triage state**: A field saying what kind of attention the Issue needs: `needs-triage` (still to shape), `ready-for-agent` (an agent can pick it up as is), `ready-for-human` (needs a human decision first), `wontfix` (won't be implemented, kept for the record). Independent of **Status** — closing work still happens through `done`. _Avoid_: resolution, state.
 
+**Assignee**: A free-text, optional field naming who implements the Issue — typically a model plus effort (e.g. `gpt-6-astra low`), occasionally a human. Empty means unassigned. Independent of **Status**, **Priority**, **Category**, **Triage state**, **Label** and **Batch** — the tracker knows no catalog of models or efforts and performs no cross-field validation. _Avoid_: owner, executor.
+
 **Label**: A global, fixed classification of the nature of an Issue. In v1 all Projects share the same vocabulary: `feature`, `bug`, `docs`, `tests`, `refactor`, `chore`, `research`, `infra`. An Issue can have zero or many Labels. _Avoid_: tag, custom label, category.
 
 **Prefix**: The textual identifier of a **Project**, chosen at `ito init`, that composes the ID of every Issue (e.g., `AUTH` in `AUTH-12`). One Prefix per Project; in v1 it does not change after `init`. _Avoid_: namespace, scope, project code.

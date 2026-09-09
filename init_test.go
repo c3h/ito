@@ -35,6 +35,7 @@ type issueJSON struct {
 	Category      string   `json:"category"`
 	TriageState   string   `json:"triage_state"`
 	Branch        string   `json:"branch"`
+	Assignee      string   `json:"assignee"`
 	Labels        []string `json:"labels"`
 	BlockedBy     []string `json:"blocked_by"`
 	RelatesTo     []string `json:"relates_to"`
@@ -897,6 +898,63 @@ func TestEditBranchAppearsInShowAndCanBeCleared(t *testing.T) {
 	}
 	if shown := runITO(t, repo, itoHome, "show", "BRC-1"); strings.Contains(shown.stdout, "Branch:") {
 		t.Fatalf("human show rendered an unset branch\nstdout: %s", shown.stdout)
+	}
+}
+
+func TestEditAssigneeAppearsInShowAndCanBeCleared(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init", "-q")
+	itoHome := t.TempDir()
+	if result := runITO(t, repo, itoHome, "init", "--json", "--name", "assignee-app", "--prefix", "ASN"); result.exitCode != 0 {
+		t.Fatalf("ito init failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	created := runITO(t, repo, itoHome, "new", "--json", "--title", "Track assignee", "--assignee", "gpt-6-astra low")
+	if created.exitCode != 0 {
+		t.Fatalf("ito new --assignee failed with exit %d\nstdout: %s\nstderr: %s", created.exitCode, created.stdout, created.stderr)
+	}
+	if issue := decodeIssue(t, created.stdout); issue.Assignee != "gpt-6-astra low" {
+		t.Fatalf("created assignee = %q", issue.Assignee)
+	}
+
+	edited := runITO(t, repo, itoHome, "edit", "--json", "ASN-1", "--assignee", "fable-5.1 medium")
+	if edited.exitCode != 0 {
+		t.Fatalf("ito edit --assignee failed with exit %d\nstdout: %s\nstderr: %s", edited.exitCode, edited.stdout, edited.stderr)
+	}
+	if issue := decodeIssue(t, edited.stdout); issue.Assignee != "fable-5.1 medium" {
+		t.Fatalf("edited assignee = %q", issue.Assignee)
+	}
+	human := runITO(t, repo, itoHome, "show", "ASN-1")
+	if human.exitCode != 0 || !strings.Contains(human.stdout, "Assignee: fable-5.1 medium") {
+		t.Fatalf("human show omitted assignee\nstdout: %s\nstderr: %s", human.stdout, human.stderr)
+	}
+
+	if result := runITO(t, repo, itoHome, "new", "--json", "--title", "Other assignee", "--assignee", "gpt-6-astra low"); result.exitCode != 0 {
+		t.Fatalf("ito new second issue failed with exit %d\nstdout: %s\nstderr: %s", result.exitCode, result.stdout, result.stderr)
+	}
+	filtered := runITO(t, repo, itoHome, "list", "--json", "--assignee", "fable-5.1 medium")
+	if filtered.exitCode != 0 {
+		t.Fatalf("ito list --assignee failed with exit %d\nstdout: %s\nstderr: %s", filtered.exitCode, filtered.stdout, filtered.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, filtered.stdout)); !stringSlicesEqual(got, []string{"ASN-1"}) {
+		t.Fatalf("expected assignee filter to return ASN-1, got %v\nstdout: %s", got, filtered.stdout)
+	}
+	composed := runITO(t, repo, itoHome, "list", "--json", "--assignee", "fable-5.1 medium", "--ready")
+	if composed.exitCode != 0 {
+		t.Fatalf("ito list --assignee --ready failed with exit %d\nstdout: %s\nstderr: %s", composed.exitCode, composed.stdout, composed.stderr)
+	}
+	if got := issueIDs(decodeIssueList(t, composed.stdout)); !stringSlicesEqual(got, []string{"ASN-1"}) {
+		t.Fatalf("expected composed filter to return ASN-1, got %v\nstdout: %s", got, composed.stdout)
+	}
+
+	cleared := runITO(t, repo, itoHome, "edit", "--json", "ASN-1", "--assignee", "")
+	if cleared.exitCode != 0 {
+		t.Fatalf("ito edit --assignee empty failed with exit %d\nstdout: %s\nstderr: %s", cleared.exitCode, cleared.stdout, cleared.stderr)
+	}
+	if issue := decodeIssue(t, cleared.stdout); issue.Assignee != "" {
+		t.Fatalf("cleared assignee = %q, want empty", issue.Assignee)
+	}
+	if shown := runITO(t, repo, itoHome, "show", "ASN-1"); strings.Contains(shown.stdout, "Assignee:") {
+		t.Fatalf("human show rendered an unset assignee\nstdout: %s", shown.stdout)
 	}
 }
 
@@ -2578,7 +2636,7 @@ INSERT INTO issue_links(project_id, source_id, target_id, kind) VALUES (?, 'SHP-
 	if err := json.Unmarshal([]byte(result.stdout), &raw); err != nil {
 		t.Fatalf("stdout is not a JSON object: %v\nstdout: %s", err, result.stdout)
 	}
-	expectedKeys := []string{"id", "project", "title", "status", "priority", "category", "triage_state", "branch", "labels", "blocked_by", "relates_to", "conflicts_with", "batch", "body", "created", "updated"}
+	expectedKeys := []string{"id", "project", "title", "status", "priority", "category", "triage_state", "branch", "assignee", "labels", "blocked_by", "relates_to", "conflicts_with", "batch", "body", "created", "updated"}
 	if len(raw) != len(expectedKeys) {
 		t.Fatalf("expected exactly keys %v, got %v in %s", expectedKeys, raw, result.stdout)
 	}

@@ -41,7 +41,7 @@ func TestOpenDefaultOpensLocalFileWithWALAndBusyTimeout(t *testing.T) {
 	if busyTimeout != 5000 {
 		t.Fatalf("busy_timeout = %d, want 5000", busyTimeout)
 	}
-	assertSchemaVersion(t, db, 6)
+	assertSchemaVersion(t, db, 7)
 }
 
 func TestOpenDefaultRejectsRetiredCloudConfig(t *testing.T) {
@@ -70,11 +70,12 @@ func TestMigrateFreshDatabaseReachesBatchSchemaVersion(t *testing.T) {
 	}
 	defer db.Close()
 
-	assertSchemaVersion(t, db, 6)
+	assertSchemaVersion(t, db, 7)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
 	assertColumnExists(t, db, "issues", "branch")
+	assertColumnExists(t, db, "issues", "assignee")
 	if _, err := db.Exec(`INSERT INTO batches(project_id, name, created) VALUES (1, 'orphan', '2026-06-12T10:00:00Z')`); err == nil {
 		t.Fatal("expected foreign key to reject a Batch without a Project")
 	}
@@ -145,11 +146,12 @@ VALUES (1, 'LEG-1', 'Legacy issue', 'todo', 'low', '', '2026-06-12T10:00:00Z', '
 		t.Fatalf("migrate v1 database: %v", err)
 	}
 
-	assertSchemaVersion(t, db, 6)
+	assertSchemaVersion(t, db, 7)
 	assertColumnExists(t, db, "issues", "batch_id")
 	assertColumnExists(t, db, "issues", "category")
 	assertColumnExists(t, db, "issues", "triage_state")
 	assertColumnExists(t, db, "issues", "branch")
+	assertColumnExists(t, db, "issues", "assignee")
 	var title string
 	if err := db.QueryRow(`SELECT title FROM issues WHERE id = 'LEG-1'`).Scan(&title); err != nil {
 		t.Fatalf("legacy issue was not preserved: %v", err)
@@ -197,7 +199,7 @@ VALUES (1, 'VTH-1', 'Existing issue', 'todo', 'medium', '', '2026-08-09T10:00:00
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate v3 database: %v", err)
 	}
-	assertSchemaVersion(t, db, 6)
+	assertSchemaVersion(t, db, 7)
 	assertColumnExists(t, db, "issues", "branch")
 	var branch string
 	if err := db.QueryRow(`SELECT branch FROM issues WHERE id = 'VTH-1'`).Scan(&branch); err != nil {
@@ -268,6 +270,133 @@ func TestIssueBranchRoundTripsThroughCreateEditListAndShow(t *testing.T) {
 	}
 	if cleared.Issue.Branch != "" {
 		t.Fatalf("cleared branch = %q, want empty", cleared.Issue.Branch)
+	}
+}
+
+func TestMigrateV7AddsAssigneeToV6Database(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "v6.db"))
+	if err != nil {
+		t.Fatalf("open v6 database: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version(version) VALUES (6);
+CREATE TABLE issues (
+  row_id       INTEGER PRIMARY KEY,
+  project_id   INTEGER NOT NULL,
+  id           TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  status       TEXT NOT NULL,
+  priority     TEXT NOT NULL,
+  body         TEXT NOT NULL DEFAULT '',
+  created      TEXT NOT NULL,
+  updated      TEXT NOT NULL,
+  batch_id     INTEGER,
+  category     TEXT NOT NULL DEFAULT 'uncategorized',
+  triage_state TEXT NOT NULL DEFAULT 'needs-triage',
+  branch       TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE issue_links (project_id INTEGER NOT NULL, source_id TEXT NOT NULL, target_id TEXT NOT NULL, kind TEXT NOT NULL, updated TEXT NOT NULL DEFAULT '', PRIMARY KEY (project_id, source_id, target_id, kind));
+CREATE TABLE issue_labels (project_id INTEGER NOT NULL, issue_id TEXT NOT NULL, label TEXT NOT NULL, updated TEXT NOT NULL DEFAULT '', PRIMARY KEY (project_id, issue_id, label));
+INSERT INTO issues(project_id, id, title, status, priority, body, created, updated)
+VALUES (1, 'VTH-1', 'Existing issue', 'todo', 'medium', '', '2026-08-09T10:00:00Z', '2026-08-09T10:00:00Z');
+`); err != nil {
+		t.Fatalf("seed v6 database: %v", err)
+	}
+
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate v6 database: %v", err)
+	}
+	assertSchemaVersion(t, db, 7)
+	assertColumnExists(t, db, "issues", "assignee")
+	var assignee string
+	if err := db.QueryRow(`SELECT assignee FROM issues WHERE id = 'VTH-1'`).Scan(&assignee); err != nil {
+		t.Fatalf("read migrated assignee: %v", err)
+	}
+	if assignee != "" {
+		t.Fatalf("migrated assignee = %q, want empty", assignee)
+	}
+}
+
+func TestIssueAssigneeRoundTripsThroughCreateEditListAndShow(t *testing.T) {
+	db, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	st := New(db)
+	project, err := st.CreateProject("assignee-app", "ASN", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	created, err := st.CreateIssueInBatchWithMetadata(project, "Track assignee", "backlog", "medium", "enhancement", "ready-for-agent", nil, "", "", "gpt-6-astra low")
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	if created.Assignee != "gpt-6-astra low" {
+		t.Fatalf("created assignee = %q, want %q", created.Assignee, "gpt-6-astra low")
+	}
+	other, err := st.CreateIssue(project, "Other work", "todo", "low", nil, "")
+	if err != nil {
+		t.Fatalf("create other issue: %v", err)
+	}
+	if other.Assignee != "" {
+		t.Fatalf("created assignee = %q, want empty", other.Assignee)
+	}
+
+	edited, err := st.Edit(project, created.ID, EditIssueOptions{AssigneeSet: true, Assignee: "fable-5.1 medium"})
+	if err != nil {
+		t.Fatalf("edit assignee: %v", err)
+	}
+	if !edited.Changed || edited.Issue.Assignee != "fable-5.1 medium" {
+		t.Fatalf("edited assignee = %q changed = %v", edited.Issue.Assignee, edited.Changed)
+	}
+	redundant, err := st.Edit(project, created.ID, EditIssueOptions{AssigneeSet: true, Assignee: "fable-5.1 medium"})
+	if err != nil {
+		t.Fatalf("redundant edit assignee: %v", err)
+	}
+	if redundant.Changed || redundant.Issue.Updated != edited.Issue.Updated {
+		t.Fatalf("idempotent assignee edit must not stamp updated, before=%q after=%q changed=%v", edited.Issue.Updated, redundant.Issue.Updated, redundant.Changed)
+	}
+
+	filtered, err := st.ListIssues(ListOptions{ProjectID: project.ID, Assignee: "fable-5.1 medium"})
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].ID != created.ID || filtered[0].Assignee != "fable-5.1 medium" {
+		t.Fatalf("filtered issues = %#v", filtered)
+	}
+	mismatched, err := st.ListIssues(ListOptions{ProjectID: project.ID, Assignee: "fable-5.1 medium", Status: "todo"})
+	if err != nil {
+		t.Fatalf("list issues with status: %v", err)
+	}
+	if len(mismatched) != 0 {
+		t.Fatalf("assignee filter must AND-combine with status, got %#v", mismatched)
+	}
+	ready, err := st.ListIssues(ListOptions{ProjectID: project.ID, Assignee: "fable-5.1 medium", Ready: true})
+	if err != nil {
+		t.Fatalf("list ready issues: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != created.ID {
+		t.Fatalf("assignee filter must compose with ready, got %#v", ready)
+	}
+
+	shown, err := st.FindIssue(project, created.ID)
+	if err != nil {
+		t.Fatalf("show issue: %v", err)
+	}
+	if shown.Assignee != "fable-5.1 medium" {
+		t.Fatalf("shown assignee = %q", shown.Assignee)
+	}
+
+	cleared, err := st.Edit(project, created.ID, EditIssueOptions{AssigneeSet: true, Assignee: ""})
+	if err != nil {
+		t.Fatalf("clear assignee: %v", err)
+	}
+	if cleared.Issue.Assignee != "" {
+		t.Fatalf("cleared assignee = %q, want empty", cleared.Issue.Assignee)
 	}
 }
 
