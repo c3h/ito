@@ -300,6 +300,44 @@ func TestSyncMoveBatchMoveAndPruneTravel(t *testing.T) {
 	}
 }
 
+func TestSyncAssigneeReachesTheOtherDeviceAndClearPropagates(t *testing.T) {
+	l := ledger.NewMemory()
+	a := openSyncDevice(t, "a")
+	b := openSyncDevice(t, "b")
+
+	setClock(t, "2026-08-24T16:00:00Z")
+	created := createStoreIssue(t, a.st, a.p, "Assigned work", "todo", "medium")
+	syncDevices(t, l, a, b)
+
+	// Set on A: the assignee travels inside the Issue's Change and lands on B.
+	setClock(t, "2026-08-24T16:01:00Z")
+	if _, err := a.st.Edit(a.p, created.ID, EditIssueOptions{AssigneeSet: true, Assignee: "gpt-6-astra low"}); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, a, b)
+	onB, err := b.st.FindIssue(b.p, created.ID)
+	if err != nil {
+		t.Fatalf("find on B: %v", err)
+	}
+	if onB.Assignee != "gpt-6-astra low" || onB.Updated != "2026-08-24T16:01:00Z" {
+		t.Fatalf("assignee on B = %q at %s, want %q", onB.Assignee, onB.Updated, "gpt-6-astra low")
+	}
+
+	// Clear on A: the empty value propagates the same way.
+	setClock(t, "2026-08-24T16:02:00Z")
+	if _, err := a.st.Edit(a.p, created.ID, EditIssueOptions{AssigneeSet: true, Assignee: ""}); err != nil {
+		t.Fatal(err)
+	}
+	syncDevices(t, l, a, b)
+	onB, err = b.st.FindIssue(b.p, created.ID)
+	if err != nil {
+		t.Fatalf("find on B after clear: %v", err)
+	}
+	if onB.Assignee != "" {
+		t.Fatalf("assignee on B after clear = %q, want empty", onB.Assignee)
+	}
+}
+
 // pagingLedger hands out one Entry per read and fails the read after a chosen
 // number of calls, to stand in for a connection dropping mid-pull.
 type pagingLedger struct {
@@ -946,7 +984,7 @@ func TestSnapshotLogsEveryRowOnceAndAFreshDevicePullsIdenticalRows(t *testing.T)
 	// A Label logged before the snapshot sits ahead of its Issue's Change in
 	// the log; the snapshot must still leave the fresh Device with the row.
 	setClock(t, "2026-08-24T18:05:00Z")
-	if _, err := a.st.Edit(a.p, two.ID, EditIssueOptions{TitleSet: true, Title: "Two edited", LabelOps: []LabelEditOp{{Kind: "add", Label: "bug"}}}); err != nil {
+	if _, err := a.st.Edit(a.p, two.ID, EditIssueOptions{TitleSet: true, Title: "Two edited", AssigneeSet: true, Assignee: "gpt-6-astra low", LabelOps: []LabelEditOp{{Kind: "add", Label: "bug"}}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1001,8 +1039,8 @@ func TestSnapshotLogsEveryRowOnceAndAFreshDevicePullsIdenticalRows(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pulledTwo.Title != "Two edited" || len(pulledTwo.BlockedBy) != 1 || pulledTwo.BlockedBy[0] != one.ID || len(pulledTwo.Labels) != 1 || pulledTwo.Labels[0] != "bug" {
-		t.Fatalf("pulled %#v, want the edited title, label bug, blocked by %s", pulledTwo, one.ID)
+	if pulledTwo.Title != "Two edited" || pulledTwo.Assignee != "gpt-6-astra low" || len(pulledTwo.BlockedBy) != 1 || pulledTwo.BlockedBy[0] != one.ID || len(pulledTwo.Labels) != 1 || pulledTwo.Labels[0] != "bug" {
+		t.Fatalf("pulled %#v, want the edited title, assignee gpt-6-astra low, label bug, blocked by %s", pulledTwo, one.ID)
 	}
 	pulledOne, err := fresh.FindIssue(p, one.ID)
 	if err != nil {

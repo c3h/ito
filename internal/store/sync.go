@@ -36,6 +36,7 @@ type issueState struct {
 	Category    string `json:"category"`
 	TriageState string `json:"triage_state"`
 	Branch      string `json:"branch"`
+	Assignee    string `json:"assignee"`
 	Body        string `json:"body"`
 	// Batch is the member Batch's name, empty when the Issue sits in none.
 	Batch   string `json:"batch,omitempty"`
@@ -173,11 +174,11 @@ func logIssueChangesTx(tx *sql.Tx, p Project, ids []string) error {
 		var state issueState
 		var batch sql.NullString
 		if err := tx.QueryRow(`
-SELECT issues.title, issues.status, issues.priority, issues.category, issues.triage_state, issues.branch, issues.body, batches.name, issues.created, issues.updated
+SELECT issues.title, issues.status, issues.priority, issues.category, issues.triage_state, issues.branch, issues.assignee, issues.body, batches.name, issues.created, issues.updated
 FROM issues
 LEFT JOIN batches ON batches.id = issues.batch_id
 WHERE issues.project_id = ? AND issues.id = ?`, p.ID, id).Scan(
-			&state.Title, &state.Status, &state.Priority, &state.Category, &state.TriageState, &state.Branch, &state.Body, &batch, &state.Created, &state.Updated,
+			&state.Title, &state.Status, &state.Priority, &state.Category, &state.TriageState, &state.Branch, &state.Assignee, &state.Body, &batch, &state.Created, &state.Updated,
 		); err != nil {
 			return err
 		}
@@ -474,8 +475,8 @@ func applyIssueChangeTx(tx *sql.Tx, change ledger.Change) (bool, error) {
 	if exists {
 		if _, err := tx.Exec(`
 UPDATE issues
-SET title = ?, status = ?, priority = ?, category = ?, triage_state = ?, branch = ?, body = ?, batch_id = ?, created = ?, updated = ?
-WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, batchID, state.Created, state.Updated, rowID); err != nil {
+SET title = ?, status = ?, priority = ?, category = ?, triage_state = ?, branch = ?, assignee = ?, body = ?, batch_id = ?, created = ?, updated = ?
+WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Assignee, state.Body, batchID, state.Created, state.Updated, rowID); err != nil {
 			return false, err
 		}
 		if err := reindexIssueFTSTx(tx, rowID, currentTitle, currentBody, state.Title, state.Body); err != nil {
@@ -485,9 +486,9 @@ WHERE row_id = ?`, state.Title, state.Status, state.Priority, state.Category, st
 	}
 
 	result, err := tx.Exec(`
-INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, branch, body, batch_id, created, updated)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, change.Key, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Body, batchID, state.Created, state.Updated)
+INSERT INTO issues(project_id, id, title, status, priority, category, triage_state, branch, assignee, body, batch_id, created, updated)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, change.Key, state.Title, state.Status, state.Priority, state.Category, state.TriageState, state.Branch, state.Assignee, state.Body, batchID, state.Created, state.Updated)
 	if err != nil {
 		return false, err
 	}
