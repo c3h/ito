@@ -51,7 +51,7 @@ func TestPRSyncMessageAppliesMovesReloadsAndShowsNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	issue, err := st.CreateIssue(project, "Sync this", "in_progress", "medium", nil, "")
+	issue, err := st.CreateIssue(project, store.NewIssue{Title: "Sync this", Status: "in_progress", Priority: "medium"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}

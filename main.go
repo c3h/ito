@@ -1538,7 +1538,7 @@ func runNew(args []string) int {
 	if code != 0 {
 		return fail(jsonMode, code, message, hint)
 	}
-	created, err := st.CreateIssueInBatchWithMetadata(p, title, status, priority, category, triageState, labels, body, batchName, assignee)
+	created, err := st.CreateIssue(p, itostore.NewIssue{Title: title, Status: status, Priority: priority, Category: category, TriageState: triageState, Labels: labels, Body: body, Batch: batchName, Assignee: assignee})
 	if err != nil {
 		if errors.Is(err, itostore.ErrBatchNotFound) {
 			return fail(jsonMode, exitNotFound, fmt.Sprintf("Batch %q not found in Project %q.", batchName, p.Name), "run 'ito batch list' to see the Project's Batches.")

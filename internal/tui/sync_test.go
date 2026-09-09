@@ -21,7 +21,7 @@ func newSyncTestModel(t *testing.T, sync SyncFunc) (model, *store.Store, store.P
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Local before sync", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Local before sync", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 	return newModel(st, project, Options{Sync: sync}), st, project
@@ -83,7 +83,7 @@ func TestSyncWithPulledChangesReloadsKeepingSelection(t *testing.T) {
 	m.Init()
 	// A Change pulled by the sync lands in the store before its message does;
 	// the model still shows the pre-sync snapshot until it applies the result.
-	if _, err := st.CreateIssue(project, "Pulled from the Ledger", "todo", "high", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Pulled from the Ledger", Status: "todo", Priority: "high"}); err != nil {
 		t.Fatalf("create pulled issue: %v", err)
 	}
 	m.cursor().moveSelection(1)
@@ -125,7 +125,7 @@ func TestSyncWithNothingPulledChangesNothingVisible(t *testing.T) {
 	before := m.View()
 	// A write that bypassed the model proves the model did not reload: a sync
 	// that pulled nothing has no reason to re-read the store.
-	if _, err := st.CreateIssue(project, "Written aside", "todo", "low", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Written aside", Status: "todo", Priority: "low"}); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 	updated, _ := m.Update(syncMsg{Project: project, Result: store.SyncResult{Pushed: 2}})

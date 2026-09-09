@@ -221,7 +221,7 @@ func TestIssueBranchRoundTripsThroughCreateEditListAndShow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	created, err := st.CreateIssue(project, "Track branch", "in_progress", "medium", nil, "")
+	created, err := st.CreateIssue(project, NewIssue{Title: "Track branch", Status: "in_progress", Priority: "medium"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -331,14 +331,14 @@ func TestIssueAssigneeRoundTripsThroughCreateEditListAndShow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	created, err := st.CreateIssueInBatchWithMetadata(project, "Track assignee", "backlog", "medium", "enhancement", "ready-for-agent", nil, "", "", "gpt-6-astra low")
+	created, err := st.CreateIssue(project, NewIssue{Title: "Track assignee", Status: "backlog", Priority: "medium", Category: "enhancement", TriageState: "ready-for-agent", Assignee: "gpt-6-astra low"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 	if created.Assignee != "gpt-6-astra low" {
 		t.Fatalf("created assignee = %q, want %q", created.Assignee, "gpt-6-astra low")
 	}
-	other, err := st.CreateIssue(project, "Other work", "todo", "low", nil, "")
+	other, err := st.CreateIssue(project, NewIssue{Title: "Other work", Status: "todo", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create other issue: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestDeleteBatchRollsBackWhenMemberClearFails(t *testing.T) {
 	if _, err := st.CreateBatch(project, "storage-refactor"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Member", "todo", "low", nil, "", "storage-refactor"); err != nil {
+	if _, err := st.CreateIssue(project, NewIssue{Title: "Member", Status: "todo", Priority: "low", Batch: "storage-refactor"}); err != nil {
 		t.Fatalf("create member: %v", err)
 	}
 	if _, err := db.Exec(`
@@ -513,7 +513,7 @@ func TestCreateIssueDeduplicatesLabels(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 
-	created, err := st.CreateIssue(project, "Repeated label", "backlog", "low", []string{"bug", "bug", "docs"}, "")
+	created, err := st.CreateIssue(project, NewIssue{Title: "Repeated label", Status: "backlog", Priority: "low", Labels: []string{"bug", "bug", "docs"}})
 	if err != nil {
 		t.Fatalf("create issue with repeated label: %v", err)
 	}
@@ -534,7 +534,7 @@ func TestEditMissingLinkTargetNamesTheTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	source, err := st.CreateIssue(project, "Source issue", "backlog", "low", nil, "")
+	source, err := st.CreateIssue(project, NewIssue{Title: "Source issue", Status: "backlog", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -566,11 +566,11 @@ func TestEditConflictsWithNormalizesSymmetricLinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	first, err := st.CreateIssue(project, "First issue", "backlog", "low", nil, "")
+	first, err := st.CreateIssue(project, NewIssue{Title: "First issue", Status: "backlog", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create first issue: %v", err)
 	}
-	second, err := st.CreateIssue(project, "Second issue", "backlog", "low", nil, "")
+	second, err := st.CreateIssue(project, NewIssue{Title: "Second issue", Status: "backlog", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create second issue: %v", err)
 	}
@@ -669,10 +669,10 @@ func TestListIssuesIncludeDoneLiftsTheDefaultFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Open issue", "todo", "low", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, NewIssue{Title: "Open issue", Status: "todo", Priority: "low"}); err != nil {
 		t.Fatalf("create open issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Done issue", "done", "low", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, NewIssue{Title: "Done issue", Status: "done", Priority: "low"}); err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
 
@@ -716,7 +716,7 @@ func TestListIssuesAggregatesRelationsAcrossProjects(t *testing.T) {
 		if i == 0 {
 			labels = []string{"research", "bug", "docs"}
 		}
-		firstIssues[i], err = st.CreateIssue(firstProject, "First project issue", "todo", "medium", labels, "")
+		firstIssues[i], err = st.CreateIssue(firstProject, NewIssue{Title: "First project issue", Status: "todo", Priority: "medium", Labels: labels})
 		if err != nil {
 			t.Fatalf("create first-project issue %d: %v", i+1, err)
 		}
@@ -727,7 +727,7 @@ func TestListIssuesAggregatesRelationsAcrossProjects(t *testing.T) {
 		if i == 1 {
 			labels = []string{"tests", "feature"}
 		}
-		secondIssues[i], err = st.CreateIssue(secondProject, "Second project issue", "todo", "medium", labels, "")
+		secondIssues[i], err = st.CreateIssue(secondProject, NewIssue{Title: "Second project issue", Status: "todo", Priority: "medium", Labels: labels})
 		if err != nil {
 			t.Fatalf("create second-project issue %d: %v", i+1, err)
 		}
@@ -1376,7 +1376,7 @@ func TestShowBatchClientDerivationPreservesSQLOrderingTies(t *testing.T) {
 
 func createStoreIssue(t *testing.T, st *Store, project Project, title, status, priority string) Issue {
 	t.Helper()
-	issue, err := st.CreateIssue(project, title, status, priority, nil, "")
+	issue, err := st.CreateIssue(project, NewIssue{Title: title, Status: status, Priority: priority})
 	if err != nil {
 		t.Fatalf("create issue %q: %v", title, err)
 	}
@@ -1385,7 +1385,7 @@ func createStoreIssue(t *testing.T, st *Store, project Project, title, status, p
 
 func createStoreIssueInBatch(t *testing.T, st *Store, project Project, title, status, priority, batch string) Issue {
 	t.Helper()
-	issue, err := st.CreateIssueInBatch(project, title, status, priority, nil, "", batch)
+	issue, err := st.CreateIssue(project, NewIssue{Title: title, Status: status, Priority: priority, Batch: batch})
 	if err != nil {
 		t.Fatalf("create issue %q in batch %q: %v", title, batch, err)
 	}

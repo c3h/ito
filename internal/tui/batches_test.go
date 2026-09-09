@@ -24,7 +24,7 @@ func TestBatchesKeySwitchesSurfaceAndHeaderTabs(t *testing.T) {
 	if _, err := st.CreateBatch(project, "first-effort"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Member issue", "todo", "medium", nil, "", "first-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Member issue", Status: "todo", Priority: "medium", Batch: "first-effort"}); err != nil {
 		t.Fatalf("create member: %v", err)
 	}
 
@@ -74,20 +74,20 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 	if _, err := st.CreateBatch(project, "older-effort"); err != nil {
 		t.Fatalf("create older batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Older member", "todo", "low", nil, "", "older-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Older member", Status: "todo", Priority: "low", Batch: "older-effort"}); err != nil {
 		t.Fatalf("create older member: %v", err)
 	}
 	if _, err := st.CreateBatch(project, "newer-effort"); err != nil {
 		t.Fatalf("create newer batch: %v", err)
 	}
-	root, err := st.CreateIssueInBatch(project, "Extract config loader", "todo", "high", []string{"refactor"}, "", "newer-effort")
+	root, err := st.CreateIssue(project, store.NewIssue{Title: "Extract config loader", Status: "todo", Priority: "high", Labels: []string{"refactor"}, Batch: "newer-effort"})
 	if err != nil {
 		t.Fatalf("create root member: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Introduce store interface", "todo", "medium", nil, "", "newer-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Introduce store interface", Status: "todo", Priority: "medium", Batch: "newer-effort"}); err != nil {
 		t.Fatalf("create independent member: %v", err)
 	}
-	blocked, err := st.CreateIssueInBatch(project, "Migrate writes", "todo", "medium", nil, "", "newer-effort")
+	blocked, err := st.CreateIssue(project, store.NewIssue{Title: "Migrate writes", Status: "todo", Priority: "medium", Batch: "newer-effort"})
 	if err != nil {
 		t.Fatalf("create blocked member: %v", err)
 	}
@@ -153,11 +153,11 @@ func TestBatchesRendersMembersBlockedOutsideTheBatchAsWaitingGroup(t *testing.T)
 	if _, err := st.CreateBatch(project, "release"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	external, err := st.CreateIssue(project, "External blocker", "todo", "urgent", nil, "")
+	external, err := st.CreateIssue(project, store.NewIssue{Title: "External blocker", Status: "todo", Priority: "urgent"})
 	if err != nil {
 		t.Fatalf("create external blocker: %v", err)
 	}
-	member, err := st.CreateIssueInBatch(project, "Batch member", "todo", "medium", nil, "", "release")
+	member, err := st.CreateIssue(project, store.NewIssue{Title: "Batch member", Status: "todo", Priority: "medium", Batch: "release"})
 	if err != nil {
 		t.Fatalf("create Batch member: %v", err)
 	}
@@ -190,16 +190,16 @@ func TestBatchesCountsDoneInHeadingAndCollapsesFullyDoneBatch(t *testing.T) {
 	if _, err := st.CreateBatch(project, "mixed-effort"); err != nil {
 		t.Fatalf("create mixed batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Open member", "todo", "medium", nil, "", "mixed-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Open member", Status: "todo", Priority: "medium", Batch: "mixed-effort"}); err != nil {
 		t.Fatalf("create open member: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Finished member", "done", "low", nil, "", "mixed-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Finished member", Status: "done", Priority: "low", Batch: "mixed-effort"}); err != nil {
 		t.Fatalf("create done member: %v", err)
 	}
 	if _, err := st.CreateBatch(project, "shipped-effort"); err != nil {
 		t.Fatalf("create shipped batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Shipped member", "done", "low", nil, "", "shipped-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Shipped member", Status: "done", Priority: "low", Batch: "shipped-effort"}); err != nil {
 		t.Fatalf("create shipped member: %v", err)
 	}
 
@@ -240,7 +240,7 @@ func TestBatchesRollUpCompletedBatchesIntoOneSection(t *testing.T) {
 		if _, err := st.CreateBatch(project, name); err != nil {
 			t.Fatalf("create batch: %v", err)
 		}
-		if _, err := st.CreateIssueInBatch(project, "Shipped member", "done", "low", nil, "", name); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: "Shipped member", Status: "done", Priority: "low", Batch: name}); err != nil {
 			t.Fatalf("create member: %v", err)
 		}
 	}
@@ -248,7 +248,7 @@ func TestBatchesRollUpCompletedBatchesIntoOneSection(t *testing.T) {
 		t.Fatalf("create live batch: %v", err)
 	}
 	for i := range 4 {
-		if _, err := st.CreateIssueInBatch(project, fmt.Sprintf("Open member %d", i), "todo", "medium", nil, "", "live-effort"); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: fmt.Sprintf("Open member %d", i), Status: "todo", Priority: "medium", Batch: "live-effort"}); err != nil {
 			t.Fatalf("create open member: %v", err)
 		}
 	}
@@ -301,14 +301,14 @@ func TestBatchesOrderOpenWorkBeforeCompletedBatches(t *testing.T) {
 	if _, err := st.CreateBatch(project, "older-open"); err != nil {
 		t.Fatalf("create older batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Still open", "todo", "medium", nil, "", "older-open"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Still open", Status: "todo", Priority: "medium", Batch: "older-open"}); err != nil {
 		t.Fatalf("create open member: %v", err)
 	}
 	// Created last, so ListBatches puts it first — but it has shipped.
 	if _, err := st.CreateBatch(project, "newer-shipped"); err != nil {
 		t.Fatalf("create newer batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Shipped", "done", "low", nil, "", "newer-shipped"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Shipped", Status: "done", Priority: "low", Batch: "newer-shipped"}); err != nil {
 		t.Fatalf("create done member: %v", err)
 	}
 
@@ -336,11 +336,11 @@ func TestBatchesRowsShowConflictPartnerAsSecondMarker(t *testing.T) {
 	if _, err := st.CreateBatch(project, "conflict-effort"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	winner, err := st.CreateIssueInBatch(project, "Conflict winner", "todo", "high", nil, "", "conflict-effort")
+	winner, err := st.CreateIssue(project, store.NewIssue{Title: "Conflict winner", Status: "todo", Priority: "high", Batch: "conflict-effort"})
 	if err != nil {
 		t.Fatalf("create winner: %v", err)
 	}
-	loser, err := st.CreateIssueInBatch(project, "Conflict loser", "todo", "low", nil, "", "conflict-effort")
+	loser, err := st.CreateIssue(project, store.NewIssue{Title: "Conflict loser", Status: "todo", Priority: "low", Batch: "conflict-effort"})
 	if err != nil {
 		t.Fatalf("create loser: %v", err)
 	}
@@ -376,11 +376,11 @@ func TestBatchesCyclicBatchRendersCycleLineInsteadOfWaves(t *testing.T) {
 	if _, err := st.CreateBatch(project, "cyclic-effort"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	first, err := st.CreateIssueInBatch(project, "Cycle head", "todo", "medium", nil, "", "cyclic-effort")
+	first, err := st.CreateIssue(project, store.NewIssue{Title: "Cycle head", Status: "todo", Priority: "medium", Batch: "cyclic-effort"})
 	if err != nil {
 		t.Fatalf("create first: %v", err)
 	}
-	second, err := st.CreateIssueInBatch(project, "Cycle tail", "todo", "medium", nil, "", "cyclic-effort")
+	second, err := st.CreateIssue(project, store.NewIssue{Title: "Cycle tail", Status: "todo", Priority: "medium", Batch: "cyclic-effort"})
 	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestBatchesWindowsRowsToTerminalHeight(t *testing.T) {
 		t.Fatalf("create batch: %v", err)
 	}
 	for i := 1; i <= 8; i++ {
-		if _, err := st.CreateIssueInBatch(project, "Member "+string(rune('0'+i)), "todo", "medium", nil, "", "tall-effort"); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: "Member " + string(rune('0'+i)), Status: "todo", Priority: "medium", Batch: "tall-effort"}); err != nil {
 			t.Fatalf("create member %d: %v", i, err)
 		}
 	}
@@ -493,7 +493,7 @@ func TestBatchesTabCyclesFocusAcrossBatches(t *testing.T) {
 		if _, err := st.CreateBatch(project, name); err != nil {
 			t.Fatalf("create batch %s: %v", name, err)
 		}
-		if _, err := st.CreateIssueInBatch(project, "Member of "+name, "todo", "medium", nil, "", name); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: "Member of " + name, Status: "todo", Priority: "medium", Batch: name}); err != nil {
 			t.Fatalf("create member of %s: %v", name, err)
 		}
 	}
@@ -538,15 +538,15 @@ func TestBatchesUpDownMovesSelectionAcrossWavesClamped(t *testing.T) {
 	if _, err := st.CreateBatch(project, "wave-walk"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	first, err := st.CreateIssueInBatch(project, "First ready", "todo", "high", nil, "", "wave-walk")
+	first, err := st.CreateIssue(project, store.NewIssue{Title: "First ready", Status: "todo", Priority: "high", Batch: "wave-walk"})
 	if err != nil {
 		t.Fatalf("create first: %v", err)
 	}
-	second, err := st.CreateIssueInBatch(project, "Second ready", "todo", "medium", nil, "", "wave-walk")
+	second, err := st.CreateIssue(project, store.NewIssue{Title: "Second ready", Status: "todo", Priority: "medium", Batch: "wave-walk"})
 	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
-	tail, err := st.CreateIssueInBatch(project, "Blocked tail", "todo", "medium", nil, "", "wave-walk")
+	tail, err := st.CreateIssue(project, store.NewIssue{Title: "Blocked tail", Status: "todo", Priority: "medium", Batch: "wave-walk"})
 	if err != nil {
 		t.Fatalf("create tail: %v", err)
 	}
@@ -603,25 +603,25 @@ func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
 	if _, err := st.CreateBatch(project, "open-tail"); err != nil {
 		t.Fatalf("create tail batch: %v", err)
 	}
-	tail, err := st.CreateIssueInBatch(project, "Tail member", "todo", "low", nil, "", "open-tail")
+	tail, err := st.CreateIssue(project, store.NewIssue{Title: "Tail member", Status: "todo", Priority: "low", Batch: "open-tail"})
 	if err != nil {
 		t.Fatalf("create tail member: %v", err)
 	}
 	if _, err := st.CreateBatch(project, "shipped-middle"); err != nil {
 		t.Fatalf("create middle batch: %v", err)
 	}
-	shipped, err := st.CreateIssueInBatch(project, "Shipped member", "done", "low", nil, "", "shipped-middle")
+	shipped, err := st.CreateIssue(project, store.NewIssue{Title: "Shipped member", Status: "done", Priority: "low", Batch: "shipped-middle"})
 	if err != nil {
 		t.Fatalf("create shipped member: %v", err)
 	}
 	if _, err := st.CreateBatch(project, "open-head"); err != nil {
 		t.Fatalf("create head batch: %v", err)
 	}
-	first, err := st.CreateIssueInBatch(project, "Head first", "todo", "high", nil, "", "open-head")
+	first, err := st.CreateIssue(project, store.NewIssue{Title: "Head first", Status: "todo", Priority: "high", Batch: "open-head"})
 	if err != nil {
 		t.Fatalf("create head first: %v", err)
 	}
-	second, err := st.CreateIssueInBatch(project, "Head second", "todo", "medium", nil, "", "open-head")
+	second, err := st.CreateIssue(project, store.NewIssue{Title: "Head second", Status: "todo", Priority: "medium", Batch: "open-head"})
 	if err != nil {
 		t.Fatalf("create head second: %v", err)
 	}
@@ -685,14 +685,14 @@ func TestBatchesSelectionLandsOnCollapsedBatchToReveal(t *testing.T) {
 	if _, err := st.CreateBatch(project, "older-effort"); err != nil {
 		t.Fatalf("create older batch: %v", err)
 	}
-	older, err := st.CreateIssueInBatch(project, "Older member", "todo", "low", nil, "", "older-effort")
+	older, err := st.CreateIssue(project, store.NewIssue{Title: "Older member", Status: "todo", Priority: "low", Batch: "older-effort"})
 	if err != nil {
 		t.Fatalf("create older member: %v", err)
 	}
 	if _, err := st.CreateBatch(project, "newer-effort"); err != nil {
 		t.Fatalf("create newer batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Newer member", "todo", "high", nil, "", "newer-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Newer member", Status: "todo", Priority: "high", Batch: "newer-effort"}); err != nil {
 		t.Fatalf("create newer member: %v", err)
 	}
 
@@ -735,11 +735,11 @@ func TestBatchesSelectionSurvivesRefreshWhenIssueStillRenders(t *testing.T) {
 	if _, err := st.CreateBatch(project, "refresh-keep"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	alpha, err := st.CreateIssueInBatch(project, "Keep alpha", "todo", "high", nil, "", "refresh-keep")
+	alpha, err := st.CreateIssue(project, store.NewIssue{Title: "Keep alpha", Status: "todo", Priority: "high", Batch: "refresh-keep"})
 	if err != nil {
 		t.Fatalf("create alpha: %v", err)
 	}
-	beta, err := st.CreateIssueInBatch(project, "Keep beta", "todo", "medium", nil, "", "refresh-keep")
+	beta, err := st.CreateIssue(project, store.NewIssue{Title: "Keep beta", Status: "todo", Priority: "medium", Batch: "refresh-keep"})
 	if err != nil {
 		t.Fatalf("create beta: %v", err)
 	}
@@ -782,13 +782,13 @@ func TestBatchesHideTogglesFocusedBatchAndInteropsWithDefaultCollapse(t *testing
 	if _, err := st.CreateBatch(project, "done-effort"); err != nil {
 		t.Fatalf("create done batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Finished member", "done", "low", nil, "", "done-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Finished member", Status: "done", Priority: "low", Batch: "done-effort"}); err != nil {
 		t.Fatalf("create done member: %v", err)
 	}
 	if _, err := st.CreateBatch(project, "open-effort"); err != nil {
 		t.Fatalf("create open batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Open member", "todo", "medium", nil, "", "open-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Open member", Status: "todo", Priority: "medium", Batch: "open-effort"}); err != nil {
 		t.Fatalf("create open member: %v", err)
 	}
 
@@ -835,10 +835,10 @@ func TestBatchesEnterOpensIssueDetailAndEscReturnsInPlace(t *testing.T) {
 	if _, err := st.CreateBatch(project, "detail-effort"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Open me first", "todo", "medium", nil, "", "detail-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Open me first", Status: "todo", Priority: "medium", Batch: "detail-effort"}); err != nil {
 		t.Fatalf("create first member: %v", err)
 	}
-	second, err := st.CreateIssueInBatch(project, "Open me second", "todo", "low", nil, "", "detail-effort")
+	second, err := st.CreateIssue(project, store.NewIssue{Title: "Open me second", Status: "todo", Priority: "low", Batch: "detail-effort"})
 	if err != nil {
 		t.Fatalf("create second member: %v", err)
 	}
@@ -884,11 +884,11 @@ func TestBatchesStatusKeyRederivesWavesAndCollapsesCompletedBatch(t *testing.T) 
 	if _, err := st.CreateBatch(project, "ship-effort"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	core, err := st.CreateIssueInBatch(project, "Ship core", "in_review", "high", nil, "", "ship-effort")
+	core, err := st.CreateIssue(project, store.NewIssue{Title: "Ship core", Status: "in_review", Priority: "high", Batch: "ship-effort"})
 	if err != nil {
 		t.Fatalf("create core: %v", err)
 	}
-	docs, err := st.CreateIssueInBatch(project, "Ship docs", "todo", "medium", nil, "", "ship-effort")
+	docs, err := st.CreateIssue(project, store.NewIssue{Title: "Ship docs", Status: "todo", Priority: "medium", Batch: "ship-effort"})
 	if err != nil {
 		t.Fatalf("create docs: %v", err)
 	}
@@ -953,7 +953,7 @@ func TestBatchesCommandLineRunsPriorityAndLabelsOnSelectedMember(t *testing.T) {
 	if _, err := st.CreateBatch(project, "cmd-effort"); err != nil {
 		t.Fatalf("create batch: %v", err)
 	}
-	member, err := st.CreateIssueInBatch(project, "Tune me", "todo", "medium", nil, "", "cmd-effort")
+	member, err := st.CreateIssue(project, store.NewIssue{Title: "Tune me", Status: "todo", Priority: "medium", Batch: "cmd-effort"})
 	if err != nil {
 		t.Fatalf("create member: %v", err)
 	}
@@ -1014,17 +1014,17 @@ func TestBatchesInlineFilterNarrowsRowsWithCounts(t *testing.T) {
 	if _, err := st.CreateBatch(project, "noise-effort"); err != nil {
 		t.Fatalf("create noise batch: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Unrelated chore", "todo", "low", nil, "", "noise-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Unrelated chore", Status: "todo", Priority: "low", Batch: "noise-effort"}); err != nil {
 		t.Fatalf("create noise member: %v", err)
 	}
 	if _, err := st.CreateBatch(project, "signal-effort"); err != nil {
 		t.Fatalf("create signal batch: %v", err)
 	}
-	match, err := st.CreateIssueInBatch(project, "Fix parser bug", "todo", "high", []string{"bug"}, "", "signal-effort")
+	match, err := st.CreateIssue(project, store.NewIssue{Title: "Fix parser bug", Status: "todo", Priority: "high", Labels: []string{"bug"}, Batch: "signal-effort"})
 	if err != nil {
 		t.Fatalf("create matching member: %v", err)
 	}
-	if _, err := st.CreateIssueInBatch(project, "Write docs page", "todo", "low", nil, "", "signal-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Write docs page", Status: "todo", Priority: "low", Batch: "signal-effort"}); err != nil {
 		t.Fatalf("create other member: %v", err)
 	}
 
@@ -1072,7 +1072,7 @@ func TestRefreshReloadsEverySurfaceFromAnyView(t *testing.T) {
 
 	var current tea.Model = newModel(st, project, Options{})
 	// A write from outside the TUI — another agent or a CLI run.
-	if _, err := st.CreateIssueInBatch(project, "Written elsewhere", "todo", "high", nil, "", "shared-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Written elsewhere", Status: "todo", Priority: "high", Batch: "shared-effort"}); err != nil {
 		t.Fatalf("create outside member: %v", err)
 	}
 
@@ -1086,7 +1086,7 @@ func TestRefreshReloadsEverySurfaceFromAnyView(t *testing.T) {
 		t.Fatalf("expected r on the Digest to reload the Batches too, got:\n%s", batches)
 	}
 
-	if _, err := st.CreateIssueInBatch(project, "Also written elsewhere", "todo", "low", nil, "", "shared-effort"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Also written elsewhere", Status: "todo", Priority: "low", Batch: "shared-effort"}); err != nil {
 		t.Fatalf("create second outside member: %v", err)
 	}
 
@@ -1121,12 +1121,12 @@ func TestBatchesTightHeightSpendsLinesOnRowsNotWaveHeadings(t *testing.T) {
 		if _, err := st.CreateBatch(project, name); err != nil {
 			t.Fatalf("create batch: %v", err)
 		}
-		head, err := st.CreateIssueInBatch(project, fmt.Sprintf("Head %d", i), "todo", "high", nil, "", name)
+		head, err := st.CreateIssue(project, store.NewIssue{Title: fmt.Sprintf("Head %d", i), Status: "todo", Priority: "high", Batch: name})
 		if err != nil {
 			t.Fatalf("create head: %v", err)
 		}
 		for j := range 3 {
-			tail, err := st.CreateIssueInBatch(project, fmt.Sprintf("Tail %d-%d", i, j), "todo", "low", nil, "", name)
+			tail, err := st.CreateIssue(project, store.NewIssue{Title: fmt.Sprintf("Tail %d-%d", i, j), Status: "todo", Priority: "low", Batch: name})
 			if err != nil {
 				t.Fatalf("create tail: %v", err)
 			}
@@ -1179,7 +1179,7 @@ func TestBatchesCollapsedBatchCostsOneLine(t *testing.T) {
 		if _, err := st.CreateBatch(project, name); err != nil {
 			t.Fatalf("create batch: %v", err)
 		}
-		if _, err := st.CreateIssueInBatch(project, "Member of "+name, "todo", "medium", nil, "", name); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: "Member of " + name, Status: "todo", Priority: "medium", Batch: name}); err != nil {
 			t.Fatalf("create member: %v", err)
 		}
 	}

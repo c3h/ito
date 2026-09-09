@@ -49,7 +49,7 @@ func pushFromAnotherDevice(t *testing.T, shared ledger.Ledger) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateIssue(p, "From the other Device", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(p, itostore.NewIssue{Title: "From the other Device", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Sync(shared); err != nil {
@@ -69,7 +69,7 @@ func createLocalIssue(t *testing.T, itoHome string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateIssue(p, "Made here", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(p, itostore.NewIssue{Title: "Made here", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -199,7 +199,7 @@ func seedLocalTracker(t *testing.T, itoHome string, issues int) {
 	}
 	var previous string
 	for i := 0; i < issues; i++ {
-		issue, err := st.CreateIssueInBatch(p, fmt.Sprintf("Café %d", i), "todo", "medium", []string{"feature"}, "espresso", "wave-1")
+		issue, err := st.CreateIssue(p, itostore.NewIssue{Title: fmt.Sprintf("Café %d", i), Status: "todo", Priority: "medium", Labels: []string{"feature"}, Body: "espresso", Batch: "wave-1"})
 		if err != nil {
 			t.Fatal(err)
 		}

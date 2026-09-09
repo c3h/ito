@@ -439,16 +439,23 @@ func (s *Store) ProjectPrefixExists(prefix string) (bool, error) {
 	return valueExists(s.db, `SELECT 1 FROM projects WHERE prefix = ?`, prefix)
 }
 
-func (s *Store) CreateIssue(p Project, title, status, priority string, labels []string, body string) (Issue, error) {
-	return s.CreateIssueInBatchWithMetadata(p, title, status, priority, "uncategorized", "needs-triage", labels, body, "", "")
+// NewIssue carries the fields a creation call supplies; empty Category defaults
+// to "uncategorized" and empty TriageState to "needs-triage" inside the
+// store, so callers that don't care omit them.
+type NewIssue struct {
+	Title       string
+	Status      string
+	Priority    string
+	Category    string
+	TriageState string
+	Labels      []string
+	Body        string
+	Batch       string
+	Assignee    string
 }
 
-func (s *Store) CreateIssueInBatch(p Project, title, status, priority string, labels []string, body string, batch string) (Issue, error) {
-	return s.CreateIssueInBatchWithMetadata(p, title, status, priority, "uncategorized", "needs-triage", labels, body, batch, "")
-}
-
-func (s *Store) CreateIssueInBatchWithMetadata(p Project, title, status, priority, category, triageState string, labels []string, body string, batch string, assignee string) (Issue, error) {
-	return insertIssue(s.db, s.numberer, p, title, status, priority, category, triageState, labels, body, batch, assignee)
+func (s *Store) CreateIssue(p Project, issue NewIssue) (Issue, error) {
+	return insertIssue(s.db, s.numberer, p, issue)
 }
 
 func (s *Store) CreateBatch(p Project, name string) (Batch, error) {
@@ -1727,12 +1734,18 @@ func updateProjectName(db *sql.DB, p Project, name string) (Project, error) {
 // insertIssue reserves the number before opening the transaction: a refused
 // reservation leaves no row and no Change behind. The local counter is
 // advisory once a numberer is set — it only tracks the highest number seen.
-func insertIssue(db *sql.DB, numberer IssueNumberer, p Project, title, status, priority, category, triageState string, labels []string, body string, batch string, assignee string) (Issue, error) {
+func insertIssue(db *sql.DB, numberer IssueNumberer, p Project, issue NewIssue) (Issue, error) {
+	if issue.Category == "" {
+		issue.Category = "uncategorized"
+	}
+	if issue.TriageState == "" {
+		issue.TriageState = "needs-triage"
+	}
 	// Everything that can refuse the creation runs before the reservation, so
 	// a refusal never burns a number.
 	var batchID sql.NullInt64
-	if batch != "" {
-		id, found, err := findBatchID(db, p.ID, batch)
+	if issue.Batch != "" {
+		id, found, err := findBatchID(db, p.ID, issue.Batch)
 		if err != nil {
 			return Issue{}, err
 		}
@@ -1778,18 +1791,18 @@ func insertIssue(db *sql.DB, numberer IssueNumberer, p Project, title, status, p
 	created := Issue{
 		ID:            fmt.Sprintf("%s-%d", p.Prefix, nextID),
 		Project:       p.Name,
-		Title:         title,
-		Status:        status,
-		Priority:      priority,
-		Category:      category,
-		TriageState:   triageState,
-		Assignee:      assignee,
-		Labels:        dedupe(labels),
+		Title:         issue.Title,
+		Status:        issue.Status,
+		Priority:      issue.Priority,
+		Category:      issue.Category,
+		TriageState:   issue.TriageState,
+		Assignee:      issue.Assignee,
+		Labels:        dedupe(issue.Labels),
 		BlockedBy:     []string{},
 		RelatesTo:     []string{},
 		ConflictsWith: []string{},
-		Batch:         nullableString(batch),
-		Body:          body,
+		Batch:         nullableString(issue.Batch),
+		Body:          issue.Body,
 		Created:       now,
 		Updated:       now,
 	}

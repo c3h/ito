@@ -16,7 +16,7 @@ func TestIssueNumbersComeFromTheLedgerAcrossDevices(t *testing.T) {
 
 	var ids []string
 	for i, device := range []syncDevice{a, b, a, b} {
-		issue, err := device.st.CreateIssue(device.p, "Numbered", "todo", "medium", nil, "")
+		issue, err := device.st.CreateIssue(device.p, NewIssue{Title: "Numbered", Status: "todo", Priority: "medium"})
 		if err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
@@ -41,7 +41,7 @@ func TestIssueNumbersComeFromTheLedgerAcrossDevices(t *testing.T) {
 			t.Fatalf("%s holds %d issues, want 4", name, len(issues))
 		}
 	}
-	issue, err := b.st.CreateIssue(b.p, "Fifth", "todo", "medium", nil, "")
+	issue, err := b.st.CreateIssue(b.p, NewIssue{Title: "Fifth", Status: "todo", Priority: "medium"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,11 +52,11 @@ func TestIssueNumbersComeFromTheLedgerAcrossDevices(t *testing.T) {
 
 func TestIssueNumbersStayLocalWithoutANumberer(t *testing.T) {
 	a := openSyncDevice(t, "a")
-	first, err := a.st.CreateIssue(a.p, "One", "todo", "medium", nil, "")
+	first, err := a.st.CreateIssue(a.p, NewIssue{Title: "One", Status: "todo", Priority: "medium"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := a.st.CreateIssue(a.p, "Two", "todo", "medium", nil, "")
+	second, err := a.st.CreateIssue(a.p, NewIssue{Title: "Two", Status: "todo", Priority: "medium"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestAFailedReservationWritesNothing(t *testing.T) {
 	cause := errors.New("connection refused")
 	a.st.SetIssueNumberer(failingNumberer{cause})
 
-	_, err := a.st.CreateIssue(a.p, "Never", "todo", "medium", []string{"bug"}, "")
+	_, err := a.st.CreateIssue(a.p, NewIssue{Title: "Never", Status: "todo", Priority: "medium", Labels: []string{"bug"}})
 	var reservation *ReservationError
 	if !errors.As(err, &reservation) || !errors.Is(err, cause) {
 		t.Fatalf("err = %v, want a ReservationError wrapping the cause", err)
@@ -108,7 +108,7 @@ func TestARefusedCreationReservesNoNumber(t *testing.T) {
 	numberer := &countingNumberer{}
 	a.st.SetIssueNumberer(numberer)
 
-	if _, err := a.st.CreateIssueInBatch(a.p, "Homeless", "todo", "medium", nil, "", "missing"); !errors.Is(err, ErrBatchNotFound) {
+	if _, err := a.st.CreateIssue(a.p, NewIssue{Title: "Homeless", Status: "todo", Priority: "medium", Batch: "missing"}); !errors.Is(err, ErrBatchNotFound) {
 		t.Fatalf("err = %v, want ErrBatchNotFound", err)
 	}
 	if numberer.calls != 0 {

@@ -26,14 +26,14 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create other project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Backlog research", "backlog", "medium", []string{"research"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog research", Status: "backlog", Priority: "medium", Labels: []string{"research"}}); err != nil {
 		t.Fatalf("create backlog issue: %v", err)
 	}
-	blocker, err := st.CreateIssue(project, "Unblock the TUI", "todo", "high", []string{"feature"}, "")
+	blocker, err := st.CreateIssue(project, store.NewIssue{Title: "Unblock the TUI", Status: "todo", Priority: "high", Labels: []string{"feature"}})
 	if err != nil {
 		t.Fatalf("create blocker issue: %v", err)
 	}
-	blocked, err := st.CreateIssue(project, "Blocked Digest row", "in_progress", "urgent", []string{"feature", "tests"}, "")
+	blocked, err := st.CreateIssue(project, store.NewIssue{Title: "Blocked Digest row", Status: "in_progress", Priority: "urgent", Labels: []string{"feature", "tests"}})
 	if err != nil {
 		t.Fatalf("create blocked issue: %v", err)
 	}
@@ -45,13 +45,13 @@ func TestDigestRendersIssuesGroupedByStatus(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("block issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Review polish", "in_review", "low", []string{"chore"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Review polish", Status: "in_review", Priority: "low", Labels: []string{"chore"}}); err != nil {
 		t.Fatalf("create in review issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Done still appears", "done", "low", []string{"docs"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Done still appears", Status: "done", Priority: "low", Labels: []string{"docs"}}); err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
-	if _, err := st.CreateIssue(otherProject, "Other project issue", "todo", "urgent", []string{"bug"}, ""); err != nil {
+	if _, err := st.CreateIssue(otherProject, store.NewIssue{Title: "Other project issue", Status: "todo", Priority: "urgent", Labels: []string{"bug"}}); err != nil {
 		t.Fatalf("create other project issue: %v", err)
 	}
 
@@ -134,7 +134,7 @@ func TestBoardOpensFromCommandLineAndEscReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Visible on both surfaces", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Visible on both surfaces", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
@@ -169,10 +169,10 @@ func TestBoardRenderDoesNotRevealHiddenDigestSections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Backlog can hide", "backlog", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog can hide", Status: "backlog", Priority: "medium"}); err != nil {
 		t.Fatalf("create backlog issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Done stays hidden", "done", "low", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Done stays hidden", Status: "done", Priority: "low"}); err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
 
@@ -209,19 +209,19 @@ func TestBoardRendersAllStatusesAsColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Backlog research", "backlog", "medium", []string{"research"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog research", Status: "backlog", Priority: "medium", Labels: []string{"research"}}); err != nil {
 		t.Fatalf("create backlog issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Todo feature with a title long enough to truncate in the board column", "todo", "high", []string{"feature"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Todo feature with a title long enough to truncate in the board column", Status: "todo", Priority: "high", Labels: []string{"feature"}}); err != nil {
 		t.Fatalf("create todo issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Active refactor", "in_progress", "urgent", []string{"refactor"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Active refactor", Status: "in_progress", Priority: "urgent", Labels: []string{"refactor"}}); err != nil {
 		t.Fatalf("create in progress issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Review docs", "in_review", "low", []string{"docs"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Review docs", Status: "in_review", Priority: "low", Labels: []string{"docs"}}); err != nil {
 		t.Fatalf("create in review issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Done still visible on Board", "done", "low", []string{"tests"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Done still visible on Board", Status: "done", Priority: "low", Labels: []string{"tests"}}); err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
 
@@ -263,7 +263,7 @@ func TestBoardSlidesHorizontallyToKeepFocusedStatusVisible(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	for _, status := range store.Statuses {
-		if _, err := st.CreateIssue(project, "Issue in "+status, status, "medium", nil, ""); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: "Issue in " + status, Status: status, Priority: "medium"}); err != nil {
 			t.Fatalf("create %s issue: %v", status, err)
 		}
 	}
@@ -308,11 +308,11 @@ func TestBoardSharesInlineFilterAndStatusEditWithDigestState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	target, err := st.CreateIssue(project, "Move this Board Issue", "backlog", "medium", []string{"feature"}, "")
+	target, err := st.CreateIssue(project, store.NewIssue{Title: "Move this Board Issue", Status: "backlog", Priority: "medium", Labels: []string{"feature"}})
 	if err != nil {
 		t.Fatalf("create target issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Done docs match filter", "done", "low", []string{"docs"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Done docs match filter", Status: "done", Priority: "low", Labels: []string{"docs"}}); err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestIssueDetailReturnsToBoardWhenOpenedFromBoard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	issue, err := st.CreateIssue(project, "Open detail from Board", "backlog", "medium", nil, "body")
+	issue, err := st.CreateIssue(project, store.NewIssue{Title: "Open detail from Board", Status: "backlog", Priority: "medium", Body: "body"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -419,13 +419,13 @@ func TestDigestNavigationMovesFocusAndSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Backlog issue", "backlog", "medium", []string{"research"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog issue", Status: "backlog", Priority: "medium", Labels: []string{"research"}}); err != nil {
 		t.Fatalf("create backlog issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "First todo", "todo", "high", []string{"feature"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "First todo", Status: "todo", Priority: "high", Labels: []string{"feature"}}); err != nil {
 		t.Fatalf("create first todo: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Second todo", "todo", "low", []string{"tests"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Second todo", Status: "todo", Priority: "low", Labels: []string{"tests"}}); err != nil {
 		t.Fatalf("create second todo: %v", err)
 	}
 
@@ -460,18 +460,18 @@ func TestDigestSelectionFlowsAcrossStatusBoundaries(t *testing.T) {
 	// starts hidden with one. Down stops at every section in turn — the empty
 	// TODO heading, then IN PROGRESS, then the hidden DONE heading where h
 	// reveals it.
-	if _, err := st.CreateIssue(project, "Backlog first", "backlog", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog first", Status: "backlog", Priority: "medium"}); err != nil {
 		t.Fatalf("create backlog first: %v", err)
 	}
-	second, err := st.CreateIssue(project, "Backlog second", "backlog", "low", nil, "")
+	second, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog second", Status: "backlog", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create backlog second: %v", err)
 	}
-	active, err := st.CreateIssue(project, "Active refactor", "in_progress", "medium", nil, "")
+	active, err := st.CreateIssue(project, store.NewIssue{Title: "Active refactor", Status: "in_progress", Priority: "medium"})
 	if err != nil {
 		t.Fatalf("create in progress issue: %v", err)
 	}
-	done, err := st.CreateIssue(project, "Done stays hidden", "done", "low", nil, "")
+	done, err := st.CreateIssue(project, store.NewIssue{Title: "Done stays hidden", Status: "done", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
@@ -541,10 +541,10 @@ func TestDigestHidesAndRevealsFocusedSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Backlog can hide", "backlog", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog can hide", Status: "backlog", Priority: "medium"}); err != nil {
 		t.Fatalf("create backlog issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Done can reveal", "done", "low", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Done can reveal", Status: "done", Priority: "low"}); err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
 
@@ -599,7 +599,7 @@ func TestDigestSlashOpensInlineFilterAndEscRestoresShortcuts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Keep the surface visible", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Keep the surface visible", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
@@ -637,13 +637,13 @@ func TestDigestInlineFilterNarrowsLiveByIDTitleAndLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Render digest rows", "todo", "medium", []string{"feature"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Render digest rows", Status: "todo", Priority: "medium", Labels: []string{"feature"}}); err != nil {
 		t.Fatalf("create digest issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Fix search matching", "todo", "high", []string{"bug"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Fix search matching", Status: "todo", Priority: "high", Labels: []string{"bug"}}); err != nil {
 		t.Fatalf("create search issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Write docs", "in_progress", "low", []string{"docs"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Write docs", Status: "in_progress", Priority: "low", Labels: []string{"docs"}}); err != nil {
 		t.Fatalf("create docs issue: %v", err)
 	}
 
@@ -701,10 +701,10 @@ func TestDigestInlineFilterAcceptsSpaceKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Two word title", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Two word title", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create matching issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Two unrelated", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Two unrelated", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create non-matching issue: %v", err)
 	}
 
@@ -738,10 +738,10 @@ func TestDigestInlineFilterRevealsMatchesInHiddenSections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Open issue", "todo", "medium", []string{"feature"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Open issue", Status: "todo", Priority: "medium", Labels: []string{"feature"}}); err != nil {
 		t.Fatalf("create open issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Completed docs", "done", "low", []string{"docs"}, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Completed docs", Status: "done", Priority: "low", Labels: []string{"docs"}}); err != nil {
 		t.Fatalf("create done issue: %v", err)
 	}
 
@@ -776,7 +776,7 @@ func TestCommandLineOpensInlineAndEscRestoresShortcuts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Keep Digest under command line", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Keep Digest under command line", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
@@ -814,7 +814,7 @@ func TestCommandLineFiltersClosedV2ActionSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Command target", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Command target", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
@@ -864,7 +864,7 @@ func TestCommandLineSelectionRunsActions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	issue, err := st.CreateIssue(project, "Run selected command", "backlog", "medium", nil, "")
+	issue, err := st.CreateIssue(project, store.NewIssue{Title: "Run selected command", Status: "backlog", Priority: "medium"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -938,10 +938,10 @@ func TestSwitchProjectCommandOpensPickerAndRescopesDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create beta project: %v", err)
 	}
-	if _, err := st.CreateIssue(alpha, "Alpha scoped issue", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(alpha, store.NewIssue{Title: "Alpha scoped issue", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create alpha issue: %v", err)
 	}
-	if _, err := st.CreateIssue(beta, "Beta scoped issue", "todo", "high", nil, ""); err != nil {
+	if _, err := st.CreateIssue(beta, store.NewIssue{Title: "Beta scoped issue", Status: "todo", Priority: "high"}); err != nil {
 		t.Fatalf("create beta issue: %v", err)
 	}
 
@@ -981,7 +981,7 @@ func TestProjectPickerOpensWhenModelStartsWithoutProject(t *testing.T) {
 	if _, err := st.CreateProject("beta-app", "BET", t.TempDir()); err != nil {
 		t.Fatalf("create beta project: %v", err)
 	}
-	if _, err := st.CreateIssue(alpha, "Alpha issue", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(alpha, store.NewIssue{Title: "Alpha issue", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create alpha issue: %v", err)
 	}
 
@@ -1029,7 +1029,7 @@ func TestIssueDetailCommandLineRunsLongTailActionsInline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	issue, err := st.CreateIssue(project, "Priority from command", "todo", "low", nil, "body")
+	issue, err := st.CreateIssue(project, store.NewIssue{Title: "Priority from command", Status: "todo", Priority: "low", Body: "body"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -1074,7 +1074,7 @@ func TestRefreshShortcutAndCommandReloadDigest(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	current := newModel(st, project, Options{})
-	if _, err := st.CreateIssue(project, "External write", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "External write", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create external issue: %v", err)
 	}
 
@@ -1087,7 +1087,7 @@ func TestRefreshShortcutAndCommandReloadDigest(t *testing.T) {
 		t.Fatalf("expected r shortcut to reload Digest, got:\n%s", view)
 	}
 
-	if _, err := st.CreateIssue(project, "Second external write", "todo", "high", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Second external write", Status: "todo", Priority: "high"}); err != nil {
 		t.Fatalf("create second external issue: %v", err)
 	}
 	refreshedByCommand, _ := refreshedByKey.Update(keyMsg(t, ":"))
@@ -1112,13 +1112,13 @@ func TestRefreshPreservesSelectedIssueWhenItStillExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Backlog issue", "backlog", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog issue", Status: "backlog", Priority: "medium"}); err != nil {
 		t.Fatalf("create backlog issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "First todo issue", "todo", "high", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "First todo issue", Status: "todo", Priority: "high"}); err != nil {
 		t.Fatalf("create first todo issue: %v", err)
 	}
-	selected, err := st.CreateIssue(project, "Keep this selected", "todo", "low", nil, "")
+	selected, err := st.CreateIssue(project, store.NewIssue{Title: "Keep this selected", Status: "todo", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create selected issue: %v", err)
 	}
@@ -1129,7 +1129,7 @@ func TestRefreshPreservesSelectedIssueWhenItStillExists(t *testing.T) {
 		t.Fatalf("expected TODO issue to be selected before refresh, got:\n%s", view)
 	}
 
-	if _, err := st.CreateIssue(project, "External write", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "External write", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatalf("create external issue: %v", err)
 	}
 	current, _ = current.Update(keyMsg(t, "r"))
@@ -1155,7 +1155,7 @@ func TestStatusKeyMovesSelectedIssueThroughStoreAndReloadsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	issue, err := st.CreateIssue(project, "Move from the TUI", "backlog", "medium", []string{"feature"}, "")
+	issue, err := st.CreateIssue(project, store.NewIssue{Title: "Move from the TUI", Status: "backlog", Priority: "medium", Labels: []string{"feature"}})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -1190,7 +1190,7 @@ func TestIssueDetailPriorityKeyCyclesPriorityThroughStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	issue, err := st.CreateIssue(project, "Cycle priority from detail", "todo", "low", []string{"feature"}, "")
+	issue, err := st.CreateIssue(project, store.NewIssue{Title: "Cycle priority from detail", Status: "todo", Priority: "low", Labels: []string{"feature"}})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -1227,7 +1227,7 @@ func TestIssueDetailLabelPickerTogglesChosenLabelsThroughStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	issue, err := st.CreateIssue(project, "Toggle labels from detail", "todo", "medium", nil, "")
+	issue, err := st.CreateIssue(project, store.NewIssue{Title: "Toggle labels from detail", Status: "todo", Priority: "medium"})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -1297,7 +1297,7 @@ func TestDigestViewportUsesTerminalHeightWithoutFixedItemCap(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	for i := 1; i <= 8; i++ {
-		if _, err := st.CreateIssue(project, "Todo viewport issue "+string(rune('0'+i)), "todo", "medium", nil, ""); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: "Todo viewport issue " + string(rune('0'+i)), Status: "todo", Priority: "medium"}); err != nil {
 			t.Fatalf("create issue %d: %v", i, err)
 		}
 	}
@@ -1328,7 +1328,7 @@ func TestDigestOverflowShowsMoreIndicatorsAndKeepsSelectionVisible(t *testing.T)
 		t.Fatalf("create project: %v", err)
 	}
 	for i := 1; i <= 8; i++ {
-		if _, err := st.CreateIssue(project, "Scrollable issue "+string(rune('0'+i)), "todo", "medium", nil, ""); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: "Scrollable issue " + string(rune('0'+i)), Status: "todo", Priority: "medium"}); err != nil {
 			t.Fatalf("create issue %d: %v", i, err)
 		}
 	}
@@ -1374,7 +1374,7 @@ func TestDigestScrollKeepsCursorAtEdgeNotCentre(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	for i := 1; i <= 9; i++ {
-		if _, err := st.CreateIssue(project, fmt.Sprintf("Row %d", i), "todo", "medium", nil, ""); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: fmt.Sprintf("Row %d", i), Status: "todo", Priority: "medium"}); err != nil {
 			t.Fatalf("create issue %d: %v", i, err)
 		}
 	}
@@ -1429,19 +1429,19 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	blocker, err := st.CreateIssue(project, "Extract store read path", "done", "high", []string{"refactor"}, "done blocker")
+	blocker, err := st.CreateIssue(project, store.NewIssue{Title: "Extract store read path", Status: "done", Priority: "high", Labels: []string{"refactor"}, Body: "done blocker"})
 	if err != nil {
 		t.Fatalf("create blocker: %v", err)
 	}
-	related, err := st.CreateIssue(project, "Render the Board later", "backlog", "medium", []string{"feature"}, "related body")
+	related, err := st.CreateIssue(project, store.NewIssue{Title: "Render the Board later", Status: "backlog", Priority: "medium", Labels: []string{"feature"}, Body: "related body"})
 	if err != nil {
 		t.Fatalf("create related issue: %v", err)
 	}
-	conflicting, err := st.CreateIssue(project, "Avoid parallel Board work", "backlog", "high", []string{"tests"}, "conflict body")
+	conflicting, err := st.CreateIssue(project, store.NewIssue{Title: "Avoid parallel Board work", Status: "backlog", Priority: "high", Labels: []string{"tests"}, Body: "conflict body"})
 	if err != nil {
 		t.Fatalf("create conflicting issue: %v", err)
 	}
-	target, err := st.CreateIssue(project, "Read-only detail view with a title long enough to truncate in the header", "todo", "urgent", []string{"feature", "docs"}, "## Context\nShow the full markdown body.\n\n## Acceptance\n- read-only")
+	target, err := st.CreateIssue(project, store.NewIssue{Title: "Read-only detail view with a title long enough to truncate in the header", Status: "todo", Priority: "urgent", Labels: []string{"feature", "docs"}, Body: "## Context\nShow the full markdown body.\n\n## Acceptance\n- read-only"})
 	if err != nil {
 		t.Fatalf("create target issue: %v", err)
 	}
@@ -1499,11 +1499,11 @@ func TestIssueDetailUpDownMovesBetweenIssues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	first, err := st.CreateIssue(project, "Backlog first", "backlog", "medium", nil, "first body")
+	first, err := st.CreateIssue(project, store.NewIssue{Title: "Backlog first", Status: "backlog", Priority: "medium", Body: "first body"})
 	if err != nil {
 		t.Fatalf("create first issue: %v", err)
 	}
-	second, err := st.CreateIssue(project, "Todo second", "todo", "high", nil, "second body")
+	second, err := st.CreateIssue(project, store.NewIssue{Title: "Todo second", Status: "todo", Priority: "high", Body: "second body"})
 	if err != nil {
 		t.Fatalf("create second issue: %v", err)
 	}
@@ -1611,10 +1611,10 @@ func TestIssueDetailScrollsLongBodyWithinHeight(t *testing.T) {
 	for i := 1; i <= 30; i++ {
 		fmt.Fprintf(&body, "L%02d unique body line\n", i)
 	}
-	if _, err := st.CreateIssue(project, "Long body issue", "todo", "high", nil, body.String()); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Long body issue", Status: "todo", Priority: "high", Body: body.String()}); err != nil {
 		t.Fatalf("create long issue: %v", err)
 	}
-	next, err := st.CreateIssue(project, "Following issue", "todo", "low", nil, "short body")
+	next, err := st.CreateIssue(project, store.NewIssue{Title: "Following issue", Status: "todo", Priority: "low", Body: "short body"})
 	if err != nil {
 		t.Fatalf("create next issue: %v", err)
 	}
@@ -1674,7 +1674,7 @@ func TestIssueDetailWithoutLinksHasNoDoubleBlank(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Unlinked issue", "todo", "high", []string{"feature"}, "single body line"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Unlinked issue", Status: "todo", Priority: "high", Labels: []string{"feature"}, Body: "single body line"}); err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
 
@@ -1708,11 +1708,11 @@ func TestIssueDetailShowsAssigneeAndOmitsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	assigned, err := st.CreateIssueInBatchWithMetadata(project, "Assigned issue", "todo", "high", "enhancement", "ready-for-agent", nil, "assigned body", "", "gpt-6-astra low")
+	assigned, err := st.CreateIssue(project, store.NewIssue{Title: "Assigned issue", Status: "todo", Priority: "high", Category: "enhancement", TriageState: "ready-for-agent", Body: "assigned body", Assignee: "gpt-6-astra low"})
 	if err != nil {
 		t.Fatalf("create assigned issue: %v", err)
 	}
-	if _, err := st.CreateIssue(project, "Unassigned issue", "todo", "medium", nil, "plain body"); err != nil {
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Unassigned issue", Status: "todo", Priority: "medium", Body: "plain body"}); err != nil {
 		t.Fatalf("create unassigned issue: %v", err)
 	}
 
@@ -1751,11 +1751,11 @@ func TestLabelPickerEditsTheDisplayedIssueAfterStatusMove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	target, err := st.CreateIssue(project, "Picker target", "in_review", "high", nil, "")
+	target, err := st.CreateIssue(project, store.NewIssue{Title: "Picker target", Status: "in_review", Priority: "high"})
 	if err != nil {
 		t.Fatalf("create target issue: %v", err)
 	}
-	bystander, err := st.CreateIssue(project, "Innocent bystander", "in_review", "low", nil, "")
+	bystander, err := st.CreateIssue(project, store.NewIssue{Title: "Innocent bystander", Status: "in_review", Priority: "low"})
 	if err != nil {
 		t.Fatalf("create bystander issue: %v", err)
 	}
@@ -1802,7 +1802,7 @@ func TestBoardDetailNavigatesWithinDoneIssues(t *testing.T) {
 		{"Done one", "done", "high"},
 		{"Done two", "done", "low"},
 	} {
-		if _, err := st.CreateIssue(project, issue.title, issue.status, issue.priority, nil, ""); err != nil {
+		if _, err := st.CreateIssue(project, store.NewIssue{Title: issue.title, Status: issue.status, Priority: issue.priority}); err != nil {
 			t.Fatalf("create issue %q: %v", issue.title, err)
 		}
 	}

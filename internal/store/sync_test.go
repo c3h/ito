@@ -132,7 +132,7 @@ func TestSyncConvergesTwoStoresThroughOneLedger(t *testing.T) {
 	b := openSyncDevice(t, "b")
 
 	setClock(t, "2026-08-24T10:00:00Z")
-	created, err := a.st.CreateIssue(a.p, "Created on A", "todo", "high", []string{"feature"}, "body from A")
+	created, err := a.st.CreateIssue(a.p, NewIssue{Title: "Created on A", Status: "todo", Priority: "high", Labels: []string{"feature"}, Body: "body from A"})
 	if err != nil {
 		t.Fatalf("create on A: %v", err)
 	}
@@ -404,10 +404,10 @@ func TestSyncBootstrapsAnEmptyDeviceAndKeepsSearchWorking(t *testing.T) {
 	a := openSyncDevice(t, "a")
 
 	setClock(t, "2026-08-24T13:00:00Z")
-	if _, err := a.st.CreateIssue(a.p, "Café latte machine", "todo", "medium", nil, "espresso body"); err != nil {
+	if _, err := a.st.CreateIssue(a.p, NewIssue{Title: "Café latte machine", Status: "todo", Priority: "medium", Body: "espresso body"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.st.CreateIssue(a.p, "Grinder", "backlog", "low", nil, ""); err != nil {
+	if _, err := a.st.CreateIssue(a.p, NewIssue{Title: "Grinder", Status: "backlog", Priority: "low"}); err != nil {
 		t.Fatal(err)
 	}
 	syncDevices(t, l, a)
@@ -473,7 +473,7 @@ func TestSyncLinksAndLabelsRoundTripIncludingRemovals(t *testing.T) {
 	setClock(t, "2026-08-24T16:00:00Z")
 	one := createStoreIssue(t, a.st, a.p, "One", "todo", "medium")
 	two := createStoreIssue(t, a.st, a.p, "Two", "todo", "medium")
-	three, err := a.st.CreateIssue(a.p, "Three", "todo", "medium", []string{"feature", "docs"}, "")
+	three, err := a.st.CreateIssue(a.p, NewIssue{Title: "Three", Status: "todo", Priority: "medium", Labels: []string{"feature", "docs"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +727,7 @@ func TestSyncConcurrentLabelAndLinkEditsConvergeOnTheLaterOne(t *testing.T) {
 	b := openSyncDevice(t, "b")
 
 	setClock(t, "2026-08-24T20:00:00Z")
-	issue, err := a.st.CreateIssue(a.p, "Labelled", "todo", "medium", []string{"bug"}, "")
+	issue, err := a.st.CreateIssue(a.p, NewIssue{Title: "Labelled", Status: "todo", Priority: "medium", Labels: []string{"bug"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -807,7 +807,7 @@ func TestEmptyIgnoresProjectsAndResetSyncRewindsAndResends(t *testing.T) {
 	if err != nil || !empty {
 		t.Fatalf("store with only a project: empty=%v err=%v", empty, err)
 	}
-	if _, err := st.CreateIssue(p, "Work", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(p, NewIssue{Title: "Work", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatal(err)
 	}
 	if empty, err = st.Empty(); err != nil || empty {
@@ -890,7 +890,7 @@ func TestSyncThroughSQLLedgerUsesBoundedRoundTrips(t *testing.T) {
 
 	mac := openSyncDevice(t, "mac")
 	for i := range 40 {
-		if _, err := mac.st.CreateIssue(mac.p, fmt.Sprintf("Issue %d", i), "todo", "medium", []string{"feature"}, ""); err != nil {
+		if _, err := mac.st.CreateIssue(mac.p, NewIssue{Title: fmt.Sprintf("Issue %d", i), Status: "todo", Priority: "medium", Labels: []string{"feature"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -920,13 +920,13 @@ func TestPushSendsPendingChangesWithoutPulling(t *testing.T) {
 	a := openSyncDevice(t, "a")
 	b := openSyncDevice(t, "b")
 
-	if _, err := b.st.CreateIssue(b.p, "Created on B", "todo", "medium", nil, ""); err != nil {
+	if _, err := b.st.CreateIssue(b.p, NewIssue{Title: "Created on B", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.st.Sync(l); err != nil {
 		t.Fatal(err)
 	}
-	created, err := a.st.CreateIssue(a.p, "Created on A", "todo", "high", nil, "")
+	created, err := a.st.CreateIssue(a.p, NewIssue{Title: "Created on A", Status: "todo", Priority: "high"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -964,7 +964,7 @@ func legacyRows(t *testing.T, device syncDevice) (Issue, Issue) {
 	if _, err := device.st.CreateBatch(device.p, "wave-1"); err != nil {
 		t.Fatal(err)
 	}
-	one, err := device.st.CreateIssueInBatch(device.p, "Café one", "todo", "medium", []string{"feature"}, "espresso", "wave-1")
+	one, err := device.st.CreateIssue(device.p, NewIssue{Title: "Café one", Status: "todo", Priority: "medium", Labels: []string{"feature"}, Body: "espresso", Batch: "wave-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1070,7 +1070,7 @@ func TestSnapshotPushesInBoundedBatches(t *testing.T) {
 	}
 	mac := openSyncDevice(t, "mac")
 	for i := range 700 {
-		if _, err := mac.st.CreateIssue(mac.p, fmt.Sprintf("Issue %d", i), "todo", "medium", nil, ""); err != nil {
+		if _, err := mac.st.CreateIssue(mac.p, NewIssue{Title: fmt.Sprintf("Issue %d", i), Status: "todo", Priority: "medium"}); err != nil {
 			t.Fatal(err)
 		}
 	}

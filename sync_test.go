@@ -47,7 +47,7 @@ func TestSyncReportsPushedAndPulledCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.CreateIssue(otherProject, "From the other Device", "todo", "medium", nil, ""); err != nil {
+	if _, err := other.CreateIssue(otherProject, itostore.NewIssue{Title: "From the other Device", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := other.Sync(shared); err != nil {
@@ -64,7 +64,7 @@ func TestSyncReportsPushedAndPulledCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateIssue(local, "Pending here", "todo", "medium", nil, ""); err != nil {
+	if _, err := st.CreateIssue(local, itostore.NewIssue{Title: "Pending here", Status: "todo", Priority: "medium"}); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
