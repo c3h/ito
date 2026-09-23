@@ -101,6 +101,31 @@ func TestBoardIssueRowShowsBlockedAndConflictMarkers(t *testing.T) {
 	}
 }
 
+func TestRowRightAlignsLinkMarkersFlushToTheEdge(t *testing.T) {
+	issue := store.Issue{
+		ID:            "EDG-1",
+		Title:         "A title long enough that it has to truncate before the markers",
+		Priority:      "medium",
+		BlockedBy:     []string{"EDG-2"},
+		ConflictsWith: []string{"EDG-3"},
+	}
+	rows := map[string]string{
+		"Digest": renderIssueRow(issue, 60),
+		"Board":  renderBoardIssue(issue, false, 60),
+	}
+	for surface, row := range rows {
+		if runeLen(row) != 60 {
+			t.Fatalf("expected %s row to span exactly 60 cells, got %d: %q", surface, runeLen(row), row)
+		}
+		if !strings.HasSuffix(row, "⊘ EDG-3") {
+			t.Fatalf("expected %s row's last marker flush with the edge, got %q", surface, row)
+		}
+		if !strings.Contains(row, "… ⊘ EDG-2") {
+			t.Fatalf("expected %s row to keep a space between the truncated title and its markers, got %q", surface, row)
+		}
+	}
+}
+
 func TestRowCollapsesOverflowingBlockedByIntoCount(t *testing.T) {
 	blockers := []string{"OVR-2", "OVR-3", "OVR-4", "OVR-5", "OVR-6"}
 	row := renderBoardIssue(store.Issue{

@@ -1959,7 +1959,7 @@ func renderIssueRow(issue store.Issue, width int) string {
 	plainRight, styledRight := issueRowRight(issue, true)
 	mark, id := priorityMark(issue.Priority), issue.ID
 	fixed := runeLen(mark) + 1 + runeLen(id) + 1 // "mark id " before the title
-	title := truncate(issue.Title, max(0, width-runeLen(plainRight)-fixed))
+	title := truncate(issue.Title, max(0, width-rowRightWidth(plainRight)-fixed))
 	styledLeft := styledPriorityMark(issue.Priority) + " " + styleID.Render(id) + " " + styleText.Render(title)
 
 	if plainRight == "" {
@@ -1987,23 +1987,37 @@ func rowLinkIDs(ids []string) (string, string) {
 	return shown + rest, styleID.Render(shown) + styleDim.Render(rest)
 }
 
+// rowGroupGap separates the right-aligned groups of a row (blocked, conflict,
+// labels) from each other. It sits only between groups, never after the last,
+// so the final group lands flush on the row's edge.
+const rowGroupGap = "   "
+
 func issueRowRight(issue store.Issue, includeLabels bool) (string, string) {
-	plainRight, styledRight := "", ""
+	var plain, styled []string
 	if len(issue.BlockedBy) > 0 {
 		blockers, styledBlockers := rowLinkIDs(issue.BlockedBy)
-		plainRight += "⊘ " + blockers + "   "
-		styledRight += styleBlock.Render("⊘ ") + styledBlockers + "   "
+		plain = append(plain, "⊘ "+blockers)
+		styled = append(styled, styleBlock.Render("⊘ ")+styledBlockers)
 	}
 	if len(issue.ConflictsWith) > 0 {
 		conflicts, styledConflicts := rowLinkIDs(issue.ConflictsWith)
-		plainRight += "⊘ " + conflicts + "   "
-		styledRight += styleConflict.Render("⊘ ") + styledConflicts + "   "
+		plain = append(plain, "⊘ "+conflicts)
+		styled = append(styled, styleConflict.Render("⊘ ")+styledConflicts)
 	}
 	if includeLabels && len(issue.Labels) > 0 {
-		plainRight += strings.Join(issue.Labels, " ") + " "
-		styledRight += labelChips(issue.Labels, " ") + " "
+		plain = append(plain, strings.Join(issue.Labels, " "))
+		styled = append(styled, labelChips(issue.Labels, " "))
 	}
-	return plainRight, styledRight
+	return strings.Join(plain, rowGroupGap), strings.Join(styled, rowGroupGap)
+}
+
+// rowRightWidth is the cells a row's right-aligned group claims: its text plus
+// one space of clearance so a truncated title never runs into the first marker.
+func rowRightWidth(plainRight string) int {
+	if plainRight == "" {
+		return 0
+	}
+	return runeLen(plainRight) + 1
 }
 
 func renderBoardIssue(issue store.Issue, selected bool, width int) string {
@@ -2017,7 +2031,7 @@ func renderBoardIssue(issue store.Issue, selected bool, width int) string {
 	plainPrefix := fmt.Sprintf("%s %s %s ", pointer, priorityMark(issue.Priority), issue.ID)
 	styledPrefix := styledPointer + " " + styledPriorityMark(issue.Priority) + " " + styleID.Render(issue.ID) + " "
 
-	titleWidth := width - runeLen(plainPrefix) - runeLen(plainRight)
+	titleWidth := width - runeLen(plainPrefix) - rowRightWidth(plainRight)
 	if titleWidth < 1 {
 		return truncate(plainPrefix+issue.Title, width) // too narrow to style cleanly
 	}
