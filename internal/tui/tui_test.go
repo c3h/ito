@@ -1819,6 +1819,49 @@ func TestIssueDetailLinkRowsStayInsideTheFrame(t *testing.T) {
 	}
 }
 
+func TestIssueDetailBodyBreaksWordsWiderThanTheFrame(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("body-frame-app", "BFA", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	path := "(`apps/organization-service/src/modules/professional/application/services/professional-activation.service.ts:116-204`);"
+	if _, err := st.CreateIssue(project, store.NewIssue{Title: "Long path body", Status: "todo", Priority: "high", Body: "see " + path + " for details"}); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	const width = 100
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: width, Height: 40})
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	detail := current.View()
+
+	var joined strings.Builder
+	for _, line := range strings.Split(detail, "\n") {
+		if runeLen(line) > width {
+			t.Fatalf("expected every line within the %d-column frame, got %d columns:\n%q", width, runeLen(line), line)
+		}
+		joined.WriteString(strings.TrimSpace(line))
+	}
+	if !strings.Contains(joined.String(), path) {
+		t.Fatalf("expected the long path split across lines without losing characters, got:\n%s", detail)
+	}
+}
+
+func TestWrapLineBreaksWordsWiderThanTheWidth(t *testing.T) {
+	lines := wrapLine("see abcdefghijklmnopqrstuvwxyz now", 10)
+	want := []string{"see", "abcdefghij", "klmnopqrst", "uvwxyz now"}
+	if !slices.Equal(lines, want) {
+		t.Fatalf("expected the long word hard-broken at the width, got %#v", lines)
+	}
+}
+
 func TestLabelPickerEditsTheDisplayedIssueAfterStatusMove(t *testing.T) {
 	db, err := store.Open(t.TempDir())
 	if err != nil {

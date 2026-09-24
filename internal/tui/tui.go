@@ -2136,7 +2136,15 @@ func wrapLine(value string, width int) []string {
 		if current != "" {
 			lines = append(lines, current)
 		}
-		current = word
+		// A word wider than the line (a long file path, a URL) has no space to
+		// break at, so it is cut into width-sized pieces; the last piece stays
+		// open for the words that follow.
+		runes := []rune(word)
+		for width > 0 && len(runes) > width {
+			lines = append(lines, string(runes[:width]))
+			runes = runes[width:]
+		}
+		current = string(runes)
 	}
 	if current != "" {
 		lines = append(lines, current)
