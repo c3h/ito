@@ -1247,10 +1247,10 @@ func TestBatchesRowsAndWaveHeadingsShowMemberStatus(t *testing.T) {
 
 	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	view := current.View()
-	if !strings.Contains(view, "WAVE 1 · READY  (5) · ◌ 1 backlog · ○ 2 todo · ◐ 1 in progress · ◉ 1 in review") {
+	if !strings.Contains(view, "WAVE 1 · READY  (5) · ◌ 1 backlog · ○ 2 todo · ◔ 1 in progress · ◕ 1 in review") {
 		t.Fatalf("expected the Wave heading to split its members by status in flow order, got:\n%s", view)
 	}
-	for status, mark := range map[string]string{"backlog": "◌", "in_progress": "◐", "in_review": "◉"} {
+	for status, mark := range map[string]string{"backlog": "◌", "in_progress": "◔", "in_review": "◕"} {
 		if !strings.Contains(view, mark+" · "+members[status]+" Member "+status) {
 			t.Fatalf("expected the %s member's row to lead with %s, got:\n%s", status, mark, view)
 		}

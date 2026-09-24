@@ -662,8 +662,10 @@ func memberStatusSplit(issues []store.Issue) (string, string) {
 }
 
 // memberStatusMark is the glyph a Batch row leads with: a dotted ring for
-// backlog, an empty ring for todo, a half disc in progress, a ringed dot in
-// review. Done members never list, so they need none.
+// backlog, then a disc filling up as the work moves — empty for todo, a quarter
+// in progress, three quarters in review. Done members never list, so they need
+// none. Every mark must live in the terminal font itself: the half disc (◐)
+// falls back to another face in JetBrains Mono and sits off-centre.
 func memberStatusMark(status string) string {
 	switch status {
 	case "backlog":
@@ -671,9 +673,9 @@ func memberStatusMark(status string) string {
 	case "todo":
 		return "○"
 	case "in_progress":
-		return "◐"
+		return "◔"
 	case "in_review":
-		return "◉"
+		return "◕"
 	default:
 		return "·"
 	}

@@ -69,10 +69,12 @@ func (m *model) applySync(msg syncMsg) {
 	}
 }
 
-// syncBadge is the header's sync indicator, empty when nothing runs.
+// syncBadge is the header's sync indicator, empty when nothing runs. The
+// arrows are ↕ rather than ⟳, which JetBrains Mono lacks and a fallback face
+// draws off the baseline.
 func syncBadge(syncing bool) string {
 	if syncing {
-		return "⟳ syncing   "
+		return "↕ syncing   "
 	}
 	return ""
 }
