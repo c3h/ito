@@ -1498,7 +1498,7 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 		"## Context",
 		"Show the full markdown body.",
 		"## Acceptance",
-		"esc back   ↑↓ prev/next   s status   p priority   l labels",
+		"esc back   tab links   ↑↓ prev/next   s status   p priority   l labels",
 	} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("expected Issue detail to contain %q, got:\n%s", want, detail)

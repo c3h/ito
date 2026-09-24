@@ -45,13 +45,9 @@ const (
 // this to fit (see issueDetailView).
 const detailBodyWidth = 80
 
-// linkIDWidth is the column the linked Issue id occupies before its title in
-// the detail view, so the titles line up across link rows.
-const linkIDWidth = 8
-
 // detailLabelWidth is the gutter the detail view's field and link labels occupy,
 // so every value and linked id starts on one column whichever of them renders.
-// It fits "conflicts with" plus the three-space gap before the id.
+// It fits "conflicts with" plus the two-column link cursor slot.
 const detailLabelWidth = 17
 
 type viewMode string
@@ -110,6 +106,13 @@ type model struct {
 	filterQuery    string
 	commandOpen    bool
 	commandQuery   string
+	// linksFocused points the detail's ↑↓ and enter at its Links block instead
+	// of prev/next navigation; linkSelected and linkTop are the block's cursor
+	// and scroll offset, and detailTrail the Links followed to reach this Issue.
+	linksFocused bool
+	linkSelected int
+	linkTop      int
+	detailTrail  []detailStop
 	// sync runs a Ledger sync, nil when no Ledger is connected; syncing is true
 	// while one is in flight and the header shows the indicator.
 	sync    SyncFunc
@@ -204,7 +207,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case viewLabels:
 				m.mode = viewIssue
 			case viewIssue:
-				m.mode = m.detailReturnMode()
+				m.escapeDetail()
 			case viewBoard:
 				m.mode = viewDigest
 			}
@@ -228,12 +231,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.mode {
 			case viewDigest, viewBoard, viewBatches:
 				m.openSelectedIssue()
+			case viewIssue:
+				if m.linksActive() {
+					m.followLink()
+				}
 			case viewLabels:
 				m.toggleFocusedLabel()
 			}
 		case "tab":
 			if m.isSurfaceMode() {
 				m.cursor().moveFocus(1)
+			} else if m.mode == viewIssue {
+				m.toggleLinksFocus()
 			}
 		case "h":
 			switch m.mode {
@@ -261,11 +270,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "shift+tab":
 			if m.isSurfaceMode() {
 				m.cursor().moveFocus(-1)
+			} else if m.mode == viewIssue {
+				m.toggleLinksFocus()
 			}
 		case "up":
 			switch m.mode {
 			case viewIssue:
-				m.moveDetailIssue(-1)
+				if m.linksActive() {
+					m.moveLinkCursor(-1)
+				} else {
+					m.moveDetailIssue(-1)
+				}
 			case viewLabels:
 				m.moveLabelCursor(-1)
 			default:
@@ -274,7 +289,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down":
 			switch m.mode {
 			case viewIssue:
-				m.moveDetailIssue(1)
+				if m.linksActive() {
+					m.moveLinkCursor(1)
+				} else {
+					m.moveDetailIssue(1)
+				}
 			case viewLabels:
 				m.moveLabelCursor(1)
 			default:
@@ -1399,13 +1418,16 @@ func (m *model) openLabelPicker() {
 	if !ok {
 		return
 	}
-	if m.isSurfaceMode() {
+	fromSurface := m.isSurfaceMode()
+	if fromSurface {
 		m.returnMode = m.mode
+		m.detailTrail = nil
 	}
-	if m.detailIssue.ID != issue.ID {
+	if fromSurface || m.detailIssue.ID != issue.ID {
 		// Esc from the picker lands on this Issue's detail — don't inherit the
-		// previous Issue's scroll offset.
+		// previous Issue's scroll offset or Links cursor.
 		m.detailScroll = 0
+		m.resetLinkCursor()
 	}
 	m.detailIssue = issue
 	m.setLinkTitles(issue)
@@ -1469,10 +1491,17 @@ func (m *model) openSelectedIssue() {
 
 // showIssue opens the read-only detail for an Issue already loaded in the
 // originating surface, so opening and prev/next navigation never re-read the
-// store for data the sections already hold.
+// store for data the sections already hold. Opening from a surface starts a
+// fresh trail of followed Links, and a newly shown Issue opens with its body
+// focused.
 func (m *model) showIssue(issue store.Issue) {
-	if m.isSurfaceMode() {
+	fromSurface := m.isSurfaceMode()
+	if fromSurface {
 		m.returnMode = m.mode
+		m.detailTrail = nil
+	}
+	if fromSurface || m.detailIssue.ID != issue.ID {
+		m.resetLinkCursor()
 	}
 	m.detailIssue = issue
 	m.detailScroll = 0
@@ -1522,6 +1551,9 @@ func (m *model) moveDetailIssue(delta int) {
 	}
 	next := min(max(idx+delta, 0), len(issues)-1)
 	if issues[next].ID != m.detailIssue.ID {
+		// Stepping along the surface's list leaves the trail of followed Links:
+		// esc from here returns to the surface, not to a Link's origin.
+		m.detailTrail = nil
 		m.showIssue(issues[next])
 	}
 }
@@ -1643,18 +1675,9 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 		top = append(top, metaLine("assignee", issue.Assignee), "")
 	}
 
-	var links []string
-	for _, id := range issue.BlockedBy {
-		links = append(links, m.linkLine("blocked by", id, width))
-	}
-	for _, id := range issue.RelatesTo {
-		links = append(links, m.linkLine("relates to", id, width))
-	}
-	for _, id := range issue.ConflictsWith {
-		links = append(links, m.linkLine("conflicts with", id, width))
-	}
+	links := detailLinks(issue)
 	if len(links) > 0 {
-		top = append(top, links...)
+		top = append(top, m.linkBlock(links, width)...)
 		top = append(top, "")
 	}
 
@@ -1678,11 +1701,7 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 	} else if m.note != "" {
 		bottom = append(bottom, m.noteBar())
 	} else {
-		bottom = append(bottom, statusBar(
-			[2]string{"esc", "back"}, [2]string{"↑↓", "prev/next"}, [2]string{"s", "status"},
-			[2]string{"p", "priority"}, [2]string{"l", "labels"}, [2]string{"r", "refresh"},
-			[2]string{":", "cmd"}, [2]string{"q", "quit"},
-		))
+		bottom = append(bottom, statusBar(m.detailKeys(len(links) > 0)...))
 	}
 	return top, body, bottom, width
 }
@@ -1944,17 +1963,6 @@ func styledPriorityWord(priority string) string {
 func metaLine(label, value string) string {
 	pad := strings.Repeat(" ", max(1, detailLabelWidth-runeLen(label)))
 	return " " + styleDim.Render(label) + pad + styleText.Render(value)
-}
-
-// linkLine renders a link row: a dim label, the linked id in cyan, then the
-// linked title aligned past linkIDWidth and cut to the frame's one-column right
-// inset.
-func (m model) linkLine(label, id string, width int) string {
-	labelPad := strings.Repeat(" ", max(1, detailLabelWidth-runeLen(label)))
-	idPad := strings.Repeat(" ", max(1, linkIDWidth-runeLen(id)))
-	lead := " " + label + labelPad + id + idPad
-	title := truncate(m.linkTitles[id], max(1, width-1-runeLen(lead)))
-	return " " + styleDim.Render(label) + labelPad + styleID.Render(id) + idPad + styleText.Render(title)
 }
 
 // renderIssueRow draws a Digest row across width: priority mark, id and title on
