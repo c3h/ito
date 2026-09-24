@@ -123,7 +123,13 @@ func (m model) selectedLink(links []detailLink) int {
 // linksActive reports whether the detail's ↑↓ and enter act on its Links block:
 // it has focus and the Issue still has Links (a refresh may have removed them).
 func (m model) linksActive() bool {
-	return m.linksFocused && len(detailLinks(m.detailIssue)) > 0
+	return m.linksFocused && hasLinks(m.detailIssue)
+}
+
+// hasLinks reports whether an Issue has any Link, without building its Links
+// block.
+func hasLinks(issue store.Issue) bool {
+	return len(issue.BlockedBy)+len(issue.ConflictsWith)+len(issue.RelatesTo) > 0
 }
 
 // toggleLinksFocus moves the detail's focus between the body and the Links
@@ -133,7 +139,7 @@ func (m *model) toggleLinksFocus() {
 		m.linksFocused = false
 		return
 	}
-	m.linksFocused = len(detailLinks(m.detailIssue)) > 0
+	m.linksFocused = hasLinks(m.detailIssue)
 }
 
 func (m *model) resetLinkCursor() {
@@ -201,22 +207,17 @@ func (m *model) walkBack() {
 	m.linkTop = visibleIssueWindow(len(links), m.linkSelected, stop.top, detailLinkLines).start
 }
 
-// linkedIssue resolves an Issue the detail navigates to by id, the way
-// loadLinkTitles does: from the loaded sections, falling back to the store for
-// Issues created since the last reload. A missing Issue becomes a note; a real
-// store error goes to loadErr.
+// linkedIssue resolves an Issue the detail navigates to through lookupIssue. A
+// missing Issue becomes a note; a real store error goes to loadErr.
 func (m *model) linkedIssue(id string) (store.Issue, bool) {
-	if issue, ok := m.issueInSections(id); ok {
+	issue, err := m.lookupIssue(id)
+	if err == nil {
 		return issue, true
 	}
-	issue, err := m.store.FindIssue(m.project, id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			m.note = id + " no longer exists"
-		} else {
-			m.loadErr = err
-		}
-		return store.Issue{}, false
+	if errors.Is(err, store.ErrNotFound) {
+		m.note = id + " no longer exists"
+	} else {
+		m.loadErr = err
 	}
-	return issue, true
+	return store.Issue{}, false
 }

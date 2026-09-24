@@ -1418,20 +1418,8 @@ func (m *model) openLabelPicker() {
 	if !ok {
 		return
 	}
-	fromSurface := m.isSurfaceMode()
-	if fromSurface {
-		m.returnMode = m.mode
-		m.detailTrail = nil
-	}
-	if fromSurface || m.detailIssue.ID != issue.ID {
-		// Esc from the picker lands on this Issue's detail — don't inherit the
-		// previous Issue's scroll offset or Links cursor.
-		m.detailScroll = 0
-		m.resetLinkCursor()
-	}
-	m.detailIssue = issue
-	m.setLinkTitles(issue)
-	m.focusIssue(issue.ID)
+	// Esc from the picker lands on this Issue's detail.
+	m.setDetailIssue(issue)
 	m.labelCursor = 0
 	m.mode = viewLabels
 }
@@ -1491,26 +1479,33 @@ func (m *model) openSelectedIssue() {
 
 // showIssue opens the read-only detail for an Issue already loaded in the
 // originating surface, so opening and prev/next navigation never re-read the
-// store for data the sections already hold. Opening from a surface starts a
-// fresh trail of followed Links, and a newly shown Issue opens with its body
-// focused.
+// store for data the sections already hold.
 func (m *model) showIssue(issue store.Issue) {
+	m.setDetailIssue(issue)
+	m.detailScroll = 0
+	if m.returnMode == viewBatches {
+		m.focusBatchIssue(issue.ID)
+	}
+	m.mode = viewIssue
+}
+
+// setDetailIssue points the detail at an Issue. Arriving from a surface
+// remembers it for esc and starts a fresh trail of followed Links; a surface
+// arrival or a different Issue starts scrolled to the top with the body
+// focused, never inheriting the previous Issue's scroll offset or Links cursor.
+func (m *model) setDetailIssue(issue store.Issue) {
 	fromSurface := m.isSurfaceMode()
 	if fromSurface {
 		m.returnMode = m.mode
 		m.detailTrail = nil
 	}
 	if fromSurface || m.detailIssue.ID != issue.ID {
+		m.detailScroll = 0
 		m.resetLinkCursor()
 	}
 	m.detailIssue = issue
-	m.detailScroll = 0
 	m.setLinkTitles(issue)
 	m.focusIssue(issue.ID)
-	if m.returnMode == viewBatches {
-		m.focusBatchIssue(issue.ID)
-	}
-	m.mode = viewIssue
 }
 
 func (m model) detailReturnMode() viewMode {
@@ -1600,33 +1595,33 @@ func (m model) issueInSections(id string) (store.Issue, bool) {
 	return store.Issue{}, false
 }
 
-// loadLinkTitles resolves linked Issue titles from the already-loaded sections
-// (which hold every status), falling back to the store only for Issues created
-// since the last reload. A missing target renders blank; a real store error is
-// returned rather than written to loadErr, because the reload path owns that
-// field — a failure raised inside a reload has to travel back up to it.
+// lookupIssue resolves an Issue by id from the already-loaded sections (which
+// hold every status), falling back to the store only for Issues created since
+// the last reload.
+func (m model) lookupIssue(id string) (store.Issue, error) {
+	if issue, ok := m.issueInSections(id); ok {
+		return issue, nil
+	}
+	return m.store.FindIssue(m.project, id)
+}
+
+// loadLinkTitles resolves linked Issue titles through lookupIssue. A missing
+// target renders blank; a real store error is returned rather than written to
+// loadErr, because the reload path owns that field — a failure raised inside a
+// reload has to travel back up to it.
 func (m *model) loadLinkTitles(issue store.Issue) (map[string]string, error) {
 	titles := map[string]string{}
 	var failure error
-	resolve := func(ids []string) {
-		for _, id := range ids {
-			if linked, ok := m.issueInSections(id); ok {
-				titles[id] = linked.Title
-				continue
+	for _, link := range detailLinks(issue) {
+		linked, err := m.lookupIssue(link.id)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				failure = cmp.Or(failure, err)
 			}
-			linked, err := m.store.FindIssue(m.project, id)
-			if err != nil {
-				if !errors.Is(err, store.ErrNotFound) {
-					failure = cmp.Or(failure, err)
-				}
-				continue
-			}
-			titles[id] = linked.Title
+			continue
 		}
+		titles[link.id] = linked.Title
 	}
-	resolve(issue.BlockedBy)
-	resolve(issue.RelatesTo)
-	resolve(issue.ConflictsWith)
 	return titles, failure
 }
 
