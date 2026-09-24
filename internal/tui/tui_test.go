@@ -1489,9 +1489,9 @@ func TestIssueDetailOpensSelectedIssueAndReturnsToDigest(t *testing.T) {
 	for _, want := range []string{
 		"ito · " + target.ID + " · Read-only detail view",
 		"todo   ·   urgent   ·   docs  feature",
-		"branch       feat/issue-detail",
-		"blocked by   " + blocker.ID + "   Extract store read path",
-		"relates to   " + related.ID + "   Render the Board later",
+		"branch           feat/issue-detail",
+		"blocked by       " + blocker.ID + "   Extract store read path",
+		"relates to       " + related.ID + "   Render the Board later",
 		"conflicts with   " + conflicting.ID + "   Avoid parallel Board work",
 		"created      ",
 		"updated      ",
@@ -1747,7 +1747,7 @@ func TestIssueDetailShowsAssigneeAndOmitsEmpty(t *testing.T) {
 	if !strings.Contains(detail, "ito · "+assigned.ID+" · Assigned issue") {
 		t.Fatalf("expected assigned Issue detail, got:\n%s", detail)
 	}
-	if !strings.Contains(detail, "assignee     gpt-6-astra low") {
+	if !strings.Contains(detail, "assignee         gpt-6-astra low") {
 		t.Fatalf("expected Issue detail to contain the assignee line, got:\n%s", detail)
 	}
 
@@ -1761,6 +1761,61 @@ func TestIssueDetailShowsAssigneeAndOmitsEmpty(t *testing.T) {
 	}
 	if strings.Contains(plain, "branch       ") {
 		t.Fatalf("expected no branch line for an Issue without branch, got:\n%s", plain)
+	}
+}
+
+func TestIssueDetailLinkRowsStayInsideTheFrame(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("frame-app", "FRM", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	long := strings.Repeat("a linked title long enough to run past the frame ", 3)
+	related, err := st.CreateIssue(project, store.NewIssue{Title: "Related " + long, Status: "backlog", Priority: "low"})
+	if err != nil {
+		t.Fatalf("create related issue: %v", err)
+	}
+	conflicting, err := st.CreateIssue(project, store.NewIssue{Title: "Conflicting " + long, Status: "backlog", Priority: "low"})
+	if err != nil {
+		t.Fatalf("create conflicting issue: %v", err)
+	}
+	target, err := st.CreateIssue(project, store.NewIssue{Title: "Framed target", Status: "todo", Priority: "high", Body: "framed body"})
+	if err != nil {
+		t.Fatalf("create target issue: %v", err)
+	}
+	if _, err := st.Edit(project, target.ID, store.EditIssueOptions{LinkOps: []store.LinkEditOp{
+		{Kind: "relates_to", Action: "add", Target: related.ID},
+		{Kind: "conflicts_with", Action: "add", Target: conflicting.ID},
+	}}); err != nil {
+		t.Fatalf("link target issue: %v", err)
+	}
+
+	const width = 60
+	current, _ := newModel(st, project, Options{}).Update(tea.WindowSizeMsg{Width: width, Height: 30})
+	current, _ = current.Update(keyMsg(t, "tab"))
+	current, _ = current.Update(keyMsg(t, "enter"))
+	detail := current.View()
+
+	for _, line := range strings.Split(detail, "\n") {
+		isLink := strings.Contains(line, related.ID) || strings.Contains(line, conflicting.ID)
+		if isLink && runeLen(line) > width {
+			t.Fatalf("expected link rows within the %d-column frame, got %d columns:\n%q", width, runeLen(line), line)
+		}
+	}
+	// Every label shares one gutter, so the ids line up under the longest.
+	for _, want := range []string{"relates to       " + related.ID + "   Related a linked", "conflicts with   " + conflicting.ID + "   Conflicting a linked"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("expected the link row %q, got:\n%s", want, detail)
+		}
+	}
+	if !strings.Contains(detail, "…") {
+		t.Fatalf("expected the long linked titles cut with an ellipsis, got:\n%s", detail)
 	}
 }
 

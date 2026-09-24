@@ -49,9 +49,10 @@ const detailBodyWidth = 80
 // the detail view, so the titles line up across link rows.
 const linkIDWidth = 8
 
-// detailLabelWidth is the gutter the detail view's field labels occupy, so
-// branch, assignee, created and updated share one column whichever of them renders.
-const detailLabelWidth = 13
+// detailLabelWidth is the gutter the detail view's field and link labels occupy,
+// so every value and linked id starts on one column whichever of them renders.
+// It fits "conflicts with" plus the three-space gap before the id.
+const detailLabelWidth = 17
 
 type viewMode string
 
@@ -1644,13 +1645,13 @@ func (m model) detailLayout() (top, body, bottom []string, width int) {
 
 	var links []string
 	for _, id := range issue.BlockedBy {
-		links = append(links, m.linkLine("blocked by", id))
+		links = append(links, m.linkLine("blocked by", id, width))
 	}
 	for _, id := range issue.RelatesTo {
-		links = append(links, m.linkLine("relates to", id))
+		links = append(links, m.linkLine("relates to", id, width))
 	}
 	for _, id := range issue.ConflictsWith {
-		links = append(links, m.linkLine("conflicts with", id))
+		links = append(links, m.linkLine("conflicts with", id, width))
 	}
 	if len(links) > 0 {
 		top = append(top, links...)
@@ -1946,10 +1947,14 @@ func metaLine(label, value string) string {
 }
 
 // linkLine renders a link row: a dim label, the linked id in cyan, then the
-// linked title aligned past linkIDWidth.
-func (m model) linkLine(label, id string) string {
-	pad := strings.Repeat(" ", max(1, linkIDWidth-runeLen(id)))
-	return " " + styleDim.Render(label) + "   " + styleID.Render(id) + pad + styleText.Render(m.linkTitles[id])
+// linked title aligned past linkIDWidth and cut to the frame's one-column right
+// inset.
+func (m model) linkLine(label, id string, width int) string {
+	labelPad := strings.Repeat(" ", max(1, detailLabelWidth-runeLen(label)))
+	idPad := strings.Repeat(" ", max(1, linkIDWidth-runeLen(id)))
+	lead := " " + label + labelPad + id + idPad
+	title := truncate(m.linkTitles[id], max(1, width-1-runeLen(lead)))
+	return " " + styleDim.Render(label) + labelPad + styleID.Render(id) + idPad + styleText.Render(title)
 }
 
 // renderIssueRow draws a Digest row across width: priority mark, id and title on
