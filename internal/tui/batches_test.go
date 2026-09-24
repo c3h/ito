@@ -133,8 +133,11 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 			break
 		}
 	}
-	if !strings.Contains(headingLine, "─") || !strings.HasSuffix(headingLine, "  "+date+" ") {
+	if !strings.Contains(headingLine, "─") || !strings.HasSuffix(headingLine, "─  "+date) {
 		t.Fatalf("expected created date dim at the rule's right end, got %q", headingLine)
+	}
+	if runeLen(headingLine) != current.(model).viewWidth() {
+		t.Fatalf("expected the heading to run flush to the right edge, got %d cells: %q", runeLen(headingLine), headingLine)
 	}
 }
 
@@ -262,6 +265,11 @@ func TestBatchesRollUpCompletedBatchesIntoOneSection(t *testing.T) {
 	}
 	if !strings.Contains(view, "▸ completed  (12) · done · h to show") {
 		t.Fatalf("expected one rollup for the twelve shipped Batches, got:\n%s", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "completed  (12)") && (runeLen(line) != 100 || !strings.HasSuffix(line, "─")) {
+			t.Fatalf("expected the rollup's rule to run flush to the right edge, got %d cells: %q", runeLen(line), line)
+		}
 	}
 	for i := range 4 {
 		if !strings.Contains(view, fmt.Sprintf("Open member %d", i)) {

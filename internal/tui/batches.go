@@ -580,9 +580,9 @@ func batchSectionHeading(name string, count int, meta, trailing string, collapse
 	}
 	label := fmt.Sprintf("  (%d)", count)
 	meta = " · " + meta
-	plainTail, styledTail := " ", " "
+	plainTail, styledTail := "", ""
 	if trailing != "" {
-		plainTail, styledTail = "  "+trailing+" ", "  "+styleDim.Render(trailing)+" "
+		plainTail, styledTail = "  "+trailing, "  "+styleDim.Render(trailing)
 	}
 
 	plain := " " + bar + triangle + " " + name + label + meta + "  " + plainTail
