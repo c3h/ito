@@ -113,8 +113,8 @@ func TestBatchesRendersSectionsNewestFirstWithWaveGrouping(t *testing.T) {
 	}
 	// The focused Batch's selected row wears the cursor; the rest sit two
 	// columns right of Digest rows.
-	if !strings.Contains(view, "    ▸ ▲ "+root.ID+" Extract config loader") ||
-		!strings.Contains(view, "      ◆ ") {
+	if !strings.Contains(view, "    ▸ ○ ▲ "+root.ID+" Extract config loader") ||
+		!strings.Contains(view, "      ○ ◆ ") {
 		t.Fatalf("expected Digest-style rows indented under their Wave, got:\n%s", view)
 	}
 	if !strings.Contains(view, "⊘ "+root.ID) || !strings.Contains(view, "refactor") {
@@ -565,29 +565,29 @@ func TestBatchesUpDownMovesSelectionAcrossWavesClamped(t *testing.T) {
 	}
 
 	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
-	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ▲ "+first.ID) {
 		t.Fatalf("expected the selection cursor on the first listed row, got:\n%s", view)
 	}
 
 	current, _ = current.Update(keyMsg(t, "down"))
-	if view := current.View(); !strings.Contains(view, "▸ ◆ "+second.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ◆ "+second.ID) {
 		t.Fatalf("expected Down to select the next row, got:\n%s", view)
 	}
 
 	current, _ = current.Update(keyMsg(t, "down"))
-	if view := current.View(); !strings.Contains(view, "▸ ◆ "+tail.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ◆ "+tail.ID) {
 		t.Fatalf("expected Down to cross the Wave sub-heading transparently, got:\n%s", view)
 	}
 
 	current, _ = current.Update(keyMsg(t, "down"))
-	if view := current.View(); !strings.Contains(view, "▸ ◆ "+tail.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ◆ "+tail.ID) {
 		t.Fatalf("expected Down past the last row to clamp, got:\n%s", view)
 	}
 
 	for range 3 {
 		current, _ = current.Update(keyMsg(t, "up"))
 	}
-	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ▲ "+first.ID) {
 		t.Fatalf("expected Up past the first row to clamp, got:\n%s", view)
 	}
 }
@@ -635,18 +635,18 @@ func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
 	}
 
 	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
-	if view := current.View(); !strings.Contains(view, "▸ ▲ "+first.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ▲ "+first.ID) {
 		t.Fatalf("expected the cursor on the newest Batch's first row, got:\n%s", view)
 	}
 
 	current, _ = current.Update(keyMsg(t, "down"))
-	if view := current.View(); !strings.Contains(view, "▸ ◆ "+second.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ◆ "+second.ID) {
 		t.Fatalf("expected Down to select the next row, got:\n%s", view)
 	}
 
 	current, _ = current.Update(keyMsg(t, "down"))
 	view := current.View()
-	if !strings.Contains(view, "▸ · "+tail.ID) || !strings.Contains(view, " ▌▾ open-tail") {
+	if !strings.Contains(view, "▸ ○ · "+tail.ID) || !strings.Contains(view, " ▌▾ open-tail") {
 		t.Fatalf("expected Down to flow into the next open Batch, got:\n%s", view)
 	}
 
@@ -657,7 +657,7 @@ func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
 	if !strings.Contains(view, " ▌▸ completed") || !strings.Contains(view, "h to show") {
 		t.Fatalf("expected Down to land focus on the completed rollup, got:\n%s", view)
 	}
-	if strings.Contains(view, "▸ · "+tail.ID) || strings.Contains(view, shipped.ID) {
+	if strings.Contains(view, "▸ ○ · "+tail.ID) || strings.Contains(view, shipped.ID) {
 		t.Fatalf("expected no row cursor on the rollup, got:\n%s", view)
 	}
 
@@ -668,12 +668,12 @@ func TestBatchesSelectionFlowsAcrossBatchBoundaries(t *testing.T) {
 
 	// Up retraces the same stops: the last open row, then the head's last row.
 	current, _ = current.Update(keyMsg(t, "up"))
-	if view := current.View(); !strings.Contains(view, "▸ · "+tail.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ · "+tail.ID) {
 		t.Fatalf("expected Up to land back on the last open row, got:\n%s", view)
 	}
 	current, _ = current.Update(keyMsg(t, "up"))
 	view = current.View()
-	if !strings.Contains(view, "▸ ◆ "+second.ID) || !strings.Contains(view, " ▌▾ open-head") {
+	if !strings.Contains(view, "▸ ○ ◆ "+second.ID) || !strings.Contains(view, " ▌▾ open-head") {
 		t.Fatalf("expected Up to flow back onto the newest Batch's last row, got:\n%s", view)
 	}
 }
@@ -723,7 +723,7 @@ func TestBatchesSelectionLandsOnCollapsedBatchToReveal(t *testing.T) {
 
 	current, _ = current.Update(keyMsg(t, "h"))
 	view = current.View()
-	if !strings.Contains(view, " ▌▾ older-effort") || !strings.Contains(view, "▸ · "+older.ID) {
+	if !strings.Contains(view, " ▌▾ older-effort") || !strings.Contains(view, "▸ ○ · "+older.ID) {
 		t.Fatalf("expected h to reveal the Batch with the cursor on its member, got:\n%s", view)
 	}
 }
@@ -754,7 +754,7 @@ func TestBatchesSelectionSurvivesRefreshWhenIssueStillRenders(t *testing.T) {
 
 	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
 	current, _ = current.Update(keyMsg(t, "down"))
-	if view := current.View(); !strings.Contains(view, "▸ ◆ "+beta.ID) {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ◆ "+beta.ID) {
 		t.Fatalf("expected the selection on beta before the refresh, got:\n%s", view)
 	}
 
@@ -770,7 +770,7 @@ func TestBatchesSelectionSurvivesRefreshWhenIssueStillRenders(t *testing.T) {
 	if !strings.Contains(view, "refresh-keep  (2) · 1/2 done") {
 		t.Fatalf("expected the heading progress to update, got:\n%s", view)
 	}
-	if !strings.Contains(view, "▸ ◆ "+beta.ID) {
+	if !strings.Contains(view, "▸ ○ ◆ "+beta.ID) {
 		t.Fatalf("expected the selection to stay on beta by ID, got:\n%s", view)
 	}
 }
@@ -865,7 +865,7 @@ func TestBatchesEnterOpensIssueDetailAndEscReturnsInPlace(t *testing.T) {
 	if !strings.Contains(view, " ▌▾ detail-effort") || !strings.Contains(view, "WAVE 1") {
 		t.Fatalf("expected Esc to return to the Batches surface, got:\n%s", view)
 	}
-	if !strings.Contains(view, "▸ ◆ "+second.ID) {
+	if !strings.Contains(view, "▸ ○ ◆ "+second.ID) {
 		t.Fatalf("expected the edited member selected with its new priority mark, got:\n%s", view)
 	}
 	edited, err := st.FindIssue(project, second.ID)
@@ -921,7 +921,7 @@ func TestBatchesStatusKeyRederivesWavesAndCollapsesCompletedBatch(t *testing.T) 
 	if !strings.Contains(view, "ship-effort  (2) · 1/2 done · wave 1/1") {
 		t.Fatalf("expected the heading progress to update, got:\n%s", view)
 	}
-	if !strings.Contains(view, "WAVE 1 · READY  (1)") || !strings.Contains(view, "▸ ◆ "+docs.ID) {
+	if !strings.Contains(view, "WAVE 1 · READY  (1)") || !strings.Contains(view, "▸ ○ ◆ "+docs.ID) {
 		t.Fatalf("expected the unblocked member selected on Wave 1, got:\n%s", view)
 	}
 	moved, err := st.FindIssue(project, core.ID)
@@ -972,7 +972,7 @@ func TestBatchesCommandLineRunsPriorityAndLabelsOnSelectedMember(t *testing.T) {
 		current, _ = current.Update(runeMsg(r))
 	}
 	current, _ = current.Update(keyMsg(t, "enter"))
-	if view := current.View(); !strings.Contains(view, "▸ ▲ "+member.ID) || strings.Contains(view, "esc cancel") {
+	if view := current.View(); !strings.Contains(view, "▸ ○ ▲ "+member.ID) || strings.Contains(view, "esc cancel") {
 		t.Fatalf("expected :priority to cycle the selected member and close the bar, got:\n%s", view)
 	}
 	cycled, err := st.FindIssue(project, member.ID)
@@ -1215,5 +1215,51 @@ func TestBatchesCollapsedBatchCostsOneLine(t *testing.T) {
 	// last heading.
 	if lines[second+1] == "" {
 		t.Fatalf("expected the bottom rule to follow the last heading directly, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// The Batches surface groups by Wave, so each row carries its member's status
+// and each Wave heading counts them — which members of a READY Wave are already
+// in flight, and which are still free to start.
+func TestBatchesRowsAndWaveHeadingsShowMemberStatus(t *testing.T) {
+	db, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+
+	st := store.New(db)
+	project, err := st.CreateProject("batch-status-app", "BST", t.TempDir())
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := st.CreateBatch(project, "mixed-effort"); err != nil {
+		t.Fatalf("create batch: %v", err)
+	}
+	members := map[string]string{}
+	for _, status := range []string{"backlog", "todo", "todo", "in_progress", "in_review"} {
+		issue, err := st.CreateIssue(project, store.NewIssue{Title: "Member " + status, Status: status, Priority: "low", Batch: "mixed-effort"})
+		if err != nil {
+			t.Fatalf("create %s member: %v", status, err)
+		}
+		members[status] = issue.ID
+	}
+
+	current, _ := newModel(st, project, Options{}).Update(keyMsg(t, "2"))
+	view := current.View()
+	if !strings.Contains(view, "WAVE 1 · READY  (5) · ◌ 1 backlog · ○ 2 todo · ◐ 1 in progress · ◉ 1 in review") {
+		t.Fatalf("expected the Wave heading to split its members by status in flow order, got:\n%s", view)
+	}
+	for status, mark := range map[string]string{"backlog": "◌", "in_progress": "◐", "in_review": "◉"} {
+		if !strings.Contains(view, mark+" · "+members[status]+" Member "+status) {
+			t.Fatalf("expected the %s member's row to lead with %s, got:\n%s", status, mark, view)
+		}
+	}
+
+	// A frame too narrow for the split keeps the heading and drops the split.
+	current, _ = current.Update(tea.WindowSizeMsg{Width: 40, Height: 24})
+	narrow := current.View()
+	if !strings.Contains(narrow, "WAVE 1 · READY  (5)") || strings.Contains(narrow, "in review") {
+		t.Fatalf("expected a narrow frame to drop the status split, got:\n%s", narrow)
 	}
 }

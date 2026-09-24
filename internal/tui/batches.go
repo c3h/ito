@@ -537,15 +537,17 @@ func batchBody(block batchBlock, focused bool, window issueWindow, showHeadings 
 	for i := window.start; i < window.end; i++ {
 		row := block.rows[i]
 		if showHeadings && row.group != previous {
-			lines = append(lines, batchGroupHeading(block.section.groups[row.group]))
+			lines = append(lines, batchGroupHeading(block.section.groups[row.group], width))
 		}
 		previous = row.group
-		// Rows sit two columns right of Digest rows, under their group heading.
+		// Rows sit two columns right of Digest rows, under their group heading,
+		// and lead with the member's status — the Batches surface groups by Wave,
+		// so the status the Digest sections by would otherwise be lost.
 		prefix := "      "
 		if focused && i == block.section.selected {
 			prefix = "    " + styleActive.Render("▸") + " "
 		}
-		lines = append(lines, prefix+renderIssueRow(row.issue, width-6))
+		lines = append(lines, prefix+styledMemberStatus(row.issue.Status)+" "+renderIssueRow(row.issue, width-8))
 	}
 	return lines
 }
@@ -623,14 +625,73 @@ func batchMeta(section batchSection) string {
 
 // batchGroupHeading renders the quiet sub-heading over a group's rows: the
 // label in the label ink, the group's state next to it — READY in the id colour
-// on the current Wave, dimmed otherwise — then the rows it covers.
-func batchGroupHeading(group batchGroup) string {
+// on the current Wave, dimmed otherwise — then the rows it covers and how they
+// split across statuses, dropped when the frame is too narrow to hold it.
+func batchGroupHeading(group batchGroup, width int) string {
 	state := styleDim.Render(group.state)
 	if group.ready {
 		state = styleStatus.Render(group.state)
 	}
-	return "    " + styleLabel.Render(group.label) +
-		styleDim.Render(" · ") + state + styleDim.Render(fmt.Sprintf("  (%d)", len(group.issues)))
+	count := fmt.Sprintf("  (%d)", len(group.issues))
+	heading := "    " + styleLabel.Render(group.label) +
+		styleDim.Render(" · ") + state + styleDim.Render(count)
+	plainSplit, styledSplit := memberStatusSplit(group.issues)
+	if runeLen("    "+group.label+" · "+group.state+count+plainSplit) > width {
+		return heading
+	}
+	return heading + styledSplit
+}
+
+// memberStatusSplit counts a group's members per status in flow order, each
+// count behind the mark its rows carry, so the heading doubles as the legend.
+func memberStatusSplit(issues []store.Issue) (string, string) {
+	counts := make(map[string]int, len(store.Statuses))
+	for _, issue := range issues {
+		counts[issue.Status]++
+	}
+	var plain, styled strings.Builder
+	for _, status := range store.Statuses {
+		if counts[status] == 0 {
+			continue
+		}
+		text := fmt.Sprintf(" %d %s", counts[status], strings.ReplaceAll(status, "_", " "))
+		plain.WriteString(" · " + memberStatusMark(status) + text)
+		styled.WriteString(styleDim.Render(" · ") + styledMemberStatus(status) + styleDim.Render(text))
+	}
+	return plain.String(), styled.String()
+}
+
+// memberStatusMark is the glyph a Batch row leads with: a dotted ring for
+// backlog, an empty ring for todo, a half disc in progress, a ringed dot in
+// review. Done members never list, so they need none.
+func memberStatusMark(status string) string {
+	switch status {
+	case "backlog":
+		return "◌"
+	case "todo":
+		return "○"
+	case "in_progress":
+		return "◐"
+	case "in_review":
+		return "◉"
+	default:
+		return "·"
+	}
+}
+
+// styledMemberStatus colours the status mark: work in flight — in progress in
+// the accent, in review in the ink — stands out against the dim rings of work
+// not yet started.
+func styledMemberStatus(status string) string {
+	mark := memberStatusMark(status)
+	switch status {
+	case "in_progress":
+		return styleActive.Render(mark)
+	case "in_review":
+		return styleText.Render(mark)
+	default:
+		return styleDim.Render(mark)
+	}
 }
 
 // batchesBottomBar shows the same footer and key set as the Digest — the
